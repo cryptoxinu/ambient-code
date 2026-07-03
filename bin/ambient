@@ -3794,7 +3794,10 @@ def safe_relpath(path, root):
         raise ValueError("control characters in path")
     if len(p) > 1024:
         raise ValueError("path too long")
-    if os.path.isabs(p) or re.match(r"^[A-Za-z]:", p) or p.startswith("//"):
+    # Explicit leading-slash check: Windows py3.13 changed ntpath.isabs to
+    # False for drive-relative "/x" paths — a leading slash always signals
+    # absolute intent and is rejected on every platform (Windows CI finding).
+    if p.startswith("/") or os.path.isabs(p) or re.match(r"^[A-Za-z]:", p):
         raise ValueError("absolute/drive path")
     parts = [seg for seg in p.split("/") if seg not in ("", ".")]
     if not parts:

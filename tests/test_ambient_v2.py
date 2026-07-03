@@ -530,7 +530,8 @@ class TestConfigCorruption(unittest.TestCase):
         with open(up) as fh:
             n_lines = sum(1 for _ in fh)
         self.assertLessEqual(n_lines, 20_001)
-        self.assertEqual(stat.S_IMODE(os.stat(up).st_mode), 0o600)
+        if os.name != "nt":  # Windows has no POSIX owner-only mode bits
+            self.assertEqual(stat.S_IMODE(os.stat(up).st_mode), 0o600)
 
     def test_cache_concurrent_same_key_never_torn(self):
         d = tempfile.mkdtemp()
