@@ -2399,7 +2399,14 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
             {"role": "user", "content": body + gap},
         ]
         try:
-            return complete(api_key, api_url, model, messages, args)[0], True
+            text, _u, resp_body = complete(api_key, api_url, model, messages,
+                                           args)
+            # The SYNTHESIS tier can truncate too: a length-cut or salvaged
+            # merge is NOT a clean synthesis. Flag it exactly like a truncated
+            # map chunk so the final verdict can never masquerade as complete.
+            ok = not (resp_body.get("finish_reason") == "length"
+                      or bool(resp_body.get("salvaged_partial")))
+            return text, ok
         except (ChatError, NetworkError):
             # Never throw away paid work: fall back to the raw concatenation.
             return body, False
@@ -2465,7 +2472,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     if truncated:
         reasons.append(f"{len(truncated)} chunk(s) truncated")
     if synth_failed:
-        reasons.append("synthesis fell back to raw concatenation")
+        reasons.append("synthesis was incomplete (truncated or fell back to "
+                       "raw concatenation)")
     if missed_ranges:
         reasons.append("UNREVIEWED: " + "; ".join(dict.fromkeys(missed_ranges)))
     if partial:

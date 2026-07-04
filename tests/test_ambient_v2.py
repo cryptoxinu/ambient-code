@@ -217,6 +217,42 @@ class TestTransportClassification(unittest.TestCase):
         self.assertIn("error", body)  # reported cleanly, no crash
 
 
+class TestMapReduceHonesty(unittest.TestCase):
+    """arch-audit: the SYNTHESIS/reduce tier must not silently truncate."""
+
+    def setUp(self):
+        self._logu = amb.log_usage
+        amb.log_usage = lambda *a, **k: None
+
+    def tearDown(self):
+        amb.log_usage = self._logu
+
+    def test_truncated_synthesis_marks_partial(self):
+        # A length-cut merge (finish_reason=length) must set PARTIAL — the map
+        # phase already guards this; the reduce phase must too.
+        def fake(api_key, api_url, model, messages, args, on_delta=None, **kw):
+            if "SYNTH-MARK" in messages[0]["content"]:
+                return ("truncated merge", None, {"finish_reason": "length"})
+            return ("chunk report", None, {"finish_reason": "stop"})
+        with patched(amb, complete=fake):
+            final, partial, reason = amb.run_map_reduce(
+                "k", "u", "m", "map instructions",
+                ["chunk one", "chunk two"], ns(),
+                "SYNTH-MARK synthesize", 8000)
+        self.assertTrue(partial)
+        self.assertIn("synthesis", reason)
+
+    def test_clean_synthesis_is_not_partial(self):
+        # Converse: a clean synthesis over clean chunks is NOT partial.
+        def fake(api_key, api_url, model, messages, args, on_delta=None, **kw):
+            return ("ok text", None, {"finish_reason": "stop"})
+        with patched(amb, complete=fake):
+            final, partial, reason = amb.run_map_reduce(
+                "k", "u", "m", "map", ["chunk one", "chunk two"], ns(),
+                "SYNTH-MARK synth", 8000)
+        self.assertFalse(partial)
+
+
 def stream_seq(*results):
     """Fake stream_completion returning canned results per call; StallError
     instances raise. Returns (fake, payload-log)."""
