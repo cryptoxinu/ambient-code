@@ -106,6 +106,21 @@ also sets how many `--consensus` models run at once. Spend is
 gated: estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`),
 and jobs over $0.50 ask first (`--yes` skips, `--allow-cost` overrides).
 
+**Advisory routing** (your explicit model choice is *never* silently swapped):
+`-m auto` delegates the pick — the cheapest READY model that fits the input,
+resolved against the live catalog on every call and printed to stderr
+(`auto:cheapest` / `auto:largest` variants; `ambient use auto` makes it the
+sticky default). If your *concrete* model is cold or the input outgrows its
+window, a one-line stderr hint names READY alternatives with prices — purely
+informational, nothing changes. `--reduce-model ID` runs the map-reduce
+*synthesis* step on a different model (cheap map, strong reduce), and
+`AMBIENT_MODEL_MAP` (env or config, alongside `AMBIENT_MAX_PARALLEL` /
+`AMBIENT_MAX_SPEND`) routes phases persistently, e.g.
+`AMBIENT_MODEL_MAP="map=z-ai/glm-5.2,reduce=moonshotai/kimi-k2.7-code"`
+(phases: `chat`, `code`, `map`, `reduce`) — explicit `-m` / `--reduce-model`
+always win. The opt-in `--fallback` now ranks alternates fit-then-cheapest
+(the cheapest fitting model, not the biggest).
+
 **Bulk per-item work is `ambient map`** — the "a thousand cheap things at once,
 with a receipt" lane. One prompt is applied *independently* to each item (each
 file, or each stdin line; `--jsonl` for `{"input": …, "id": …}` objects), one

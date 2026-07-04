@@ -38,8 +38,16 @@ Exit codes: 0 ok · 1 diagnosed error · 2 PARTIAL result · 3 no key configured
             64 usage error · 130 interrupted
 
 Credentials: OS keychain (preferred) or ~/.config/ambient/env (chmod 600).
-Model resolution: -m flag > AMBIENT_MODEL / AMBIENT_CODE_MODEL env var
-                  > saved default (ambient use) > built-in default.
+Model resolution: -m flag > AMBIENT_MODEL_MAP phase entry > AMBIENT_MODEL /
+                  AMBIENT_CODE_MODEL env var > saved default (ambient use)
+                  > built-in default. `-m auto[:cheapest|:largest]` (or
+                  `ambient use auto`) delegates the pick to the live catalog
+                  — resolved per call, always printed. AMBIENT_MODEL_MAP
+                  (like AMBIENT_MAX_PARALLEL / AMBIENT_MAX_SPEND, env or
+                  config) routes phases: "map=ID,reduce=ID,chat=ID,code=ID";
+                  --reduce-model overrides its reduce entry per run.
+An explicit concrete -m model is NEVER silently swapped (SACRED) — routing
+is advisory, auto is explicit delegation, --fallback stays opt-in.
 """
 
 import argparse
@@ -679,6 +687,8 @@ def note_if_hidden(model_id, conf, source="-m"):
     """One stderr line when an explicitly chosen model is curated out —
     explicit choice always wins, but silently ignoring the founder's curation
     would look like a bug."""
+    if is_auto_model(model_id):
+        return  # a pseudo-spec, not a catalog id — nothing to note
     allow, hide, show, _ = curation(conf)
     if is_hidden(model_id, allow, hide, show):
         print(
@@ -792,12 +802,36 @@ def key_paste_problem(key):
     return None
 
 
-def resolve_model(args, conf, kind="chat"):
-    """Resolution order: -m flag > env var > saved default > built-in."""
+def model_map(conf):
+    """Parse AMBIENT_MODEL_MAP — the USER's per-phase routing config, e.g.
+    "map=z-ai/glm-5.2,reduce=moonshotai/kimi-k2.7-code,chat=…" — into
+    {phase: model_id}. Phases: chat, code, map (the bulk lane), reduce (the
+    map-reduce synthesis step). Explicit -m / --reduce-model on the CLI always
+    override it (Phase 3d). Defensive: junk config can never crash."""
+    raw = (os.environ.get("AMBIENT_MODEL_MAP")
+           or conf.get("AMBIENT_MODEL_MAP") or "")
+    out = {}
+    for part in raw.split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k, v = k.strip().lower(), v.strip()
+        if k and v:
+            out[k] = v
+    return out
+
+
+def resolve_model(args, conf, kind="chat", phase=None):
+    """Resolution order: -m flag > AMBIENT_MODEL_MAP phase entry > env var >
+    saved default > built-in. `phase` names the AMBIENT_MODEL_MAP slot to
+    consult (default: same as `kind`); the map is the user's own explicit
+    config, so consulting it never violates the sacred-model rule — and the
+    -m flag still beats everything."""
     env_key = "AMBIENT_CODE_MODEL" if kind == "code" else "AMBIENT_MODEL"
     fallback = DEFAULT_CODE_MODEL if kind == "code" else DEFAULT_MODEL
     return (
         getattr(args, "model", None)
+        or model_map(conf).get(phase or kind)
         or os.environ.get(env_key)
         or conf.get(env_key)
         or fallback
@@ -1008,6 +1042,84 @@ def _gate_amount(expected, args, conf, bound=None):
             _fail_exit(args, _argv_command(), "cancelled", "cancelled")
 
 
+def _lane_pricing(catalog, model):
+    """(pricing tuple, assumed?) — the worst-case substitution estimate_cost
+    applies, exposed for the per-lane split estimate."""
+    price = model_pricing(catalog, model)
+    if price is None:
+        return (ASSUMED_MAX_INPUT_PRICE, ASSUMED_MAX_OUTPUT_PRICE), True
+    return price, False
+
+
+def estimate_cost_mr(catalog, model, reduce_model, input_chars, n_chunks,
+                     max_tokens, extra_calls=0, synthesis=True):
+    """(expected, bound, assumed) for a map-reduce run, priced PER LANE:
+    map input ~1.0x at map prices + synthesis input ~0.3x (the partials the
+    reduce step re-reads) at REDUCE prices + each lane's own output calls at
+    its own price. Reusing the 1.3x single-model helper for both lanes
+    double-counted the synthesis re-read (Codex M1). When map == reduce this
+    is byte-identical to estimate_cost(n_chunks*2 + extra_calls). With
+    synthesis=False (deterministic reducer — findings_reducer does a pure
+    Python merge) there is NO synthesis LLM call at all: only the map lane
+    is priced, input billed once (Codex M3)."""
+    if not synthesis:
+        price, assumed = _lane_pricing(catalog, model)
+        in_tok = input_chars / CHARS_PER_TOKEN
+        n_calls = n_chunks + extra_calls
+        input_cost = in_tok * price[0]
+        bound = (input_cost + n_calls * max_tokens * price[1]) / 1e6
+        expected_out = min(max_tokens, ANSWER_TOKENS_RESERVE)
+        expected = (input_cost + n_calls * expected_out * price[1]) / 1e6
+        return expected, bound, assumed
+    rmodel = reduce_model or model
+    if rmodel == model:
+        # Delegate so the number stays BYTE-identical to the classic gate.
+        return estimate_cost(catalog, model, input_chars,
+                             n_chunks * 2 + extra_calls, max_tokens)
+    mp, asm_m = _lane_pricing(catalog, model)
+    rp, asm_r = _lane_pricing(catalog, rmodel)
+    in_tok = input_chars / CHARS_PER_TOKEN
+    input_cost = in_tok * 1.0 * mp[0] + in_tok * 0.3 * rp[0]
+    map_calls, red_calls = n_chunks + extra_calls, n_chunks
+    bound = (input_cost + map_calls * max_tokens * mp[1]
+             + red_calls * max_tokens * rp[1]) / 1e6
+    expected_out = min(max_tokens, ANSWER_TOKENS_RESERVE)
+    expected = (input_cost + map_calls * expected_out * mp[1]
+                + red_calls * expected_out * rp[1]) / 1e6
+    return expected, bound, asm_m or asm_r
+
+
+def cost_gate_mr(catalog, model, reduce_model, input_chars, n_chunks, args,
+                 conf, extra_calls=0, synthesis=True):
+    """Cost gate for a map-reduce run whose REDUCE model may differ from the
+    map model (--reduce-model / AMBIENT_MODEL_MAP, Phase 3c): map chunks are
+    priced at the map model, synthesis calls at the reduce model. Same
+    ceiling / worst-case / TTY-confirm semantics as cost_gate; identical to
+    it when the models match, so existing estimates don't shift.
+    synthesis=False (deterministic reducer, e.g. the structured-audit
+    findings merge) prices ONLY the map lane — there is no synthesis LLM
+    call to bill (Codex M3)."""
+    rmodel = reduce_model or model
+    if synthesis and rmodel == model:
+        cost_gate(catalog, model, input_chars,
+                  n_chunks * 2 + extra_calls, args, conf)
+        return
+    expected, bound, assumed = estimate_cost_mr(
+        catalog, model, reduce_model, input_chars, n_chunks,
+        args.max_tokens, extra_calls=extra_calls, synthesis=synthesis)
+    note = (" — assumed worst-case pricing (model unpriced)"
+            if assumed else "")
+    detail = (f"map={model}, deterministic merge — no synthesis call"
+              if not synthesis else f"map={model}, reduce={rmodel}")
+    in_tok = int(input_chars / CHARS_PER_TOKEN)
+    print(
+        f"ambient: estimated cost ~${expected:.2f} (hard bound ${bound:.2f})"
+        f"{note} ({in_tok:,} input tokens; {detail})",
+        file=sys.stderr,
+    )
+    _gate_amount(expected, args, conf, bound=bound)
+
+
 def pick_fallback_model(catalog, current, min_context=0, conf=None):
     """Choose a READY replacement that can actually do chat work — text output,
     not an embedding/vision-only model — so opt-in fallback never silently
@@ -1016,8 +1128,10 @@ def pick_fallback_model(catalog, current, min_context=0, conf=None):
     original model (Codex fix: a non-reasoner's huge chunk must not land on a
     small-window model). Curation-aware: never auto-switch INTO a model the
     founder curated out while any visible candidate exists, prefer the user's
-    other configured lane default, then biggest context, then cheapest output.
-    Returns None if none fit."""
+    other configured lane default, then the CHEAPEST fitting model by output
+    $/Mtok, tie-broken by bigger context (v3 Phase 3e: fit-then-cheapest —
+    the old biggest-context-first ranking paid frontier prices for headroom
+    the chunk never needed). Returns None if none fit."""
     conf = conf if conf is not None else {}
     allow, hide, show, _notes = curation(conf)
     ns = argparse.Namespace(model=None)
@@ -1041,7 +1155,7 @@ def pick_fallback_model(catalog, current, min_context=0, conf=None):
         out_price = price[1] if price else ASSUMED_MAX_OUTPUT_PRICE
         candidates.append(
             (1 if hidden else 0, 0 if mid in lane_defaults else 1,
-             -ctx, out_price, mid))
+             out_price, -ctx, mid))
         skipped_hidden += 1 if hidden else 0
     if not candidates:
         return None
@@ -1055,6 +1169,204 @@ def pick_fallback_model(catalog, current, min_context=0, conf=None):
         )
         return None
     return best[4]
+
+
+# --- Advisory routing (v3 Phase 3) ------------------------------------------
+# Everything here is either the user EXPLICITLY delegating selection (they
+# typed `-m auto…` / saved it with `ambient use auto`), purely ADVISORY (a
+# stderr hint that changes nothing), or the user's own explicit config
+# (AMBIENT_MODEL_MAP / --reduce-model). A concrete -m model is NEVER swapped.
+
+AUTO_MODEL_SPECS = ("auto", "auto:cheapest", "auto:largest")
+
+
+def is_auto_model(model):
+    """True for the explicit `auto` pseudo-model specs (case-insensitive)."""
+    return isinstance(model, str) and model.strip().lower() in AUTO_MODEL_SPECS
+
+
+def _catalog_out_price(catalog, model_id):
+    p = model_pricing(catalog, model_id)
+    return p[1] if p else ASSUMED_MAX_OUTPUT_PRICE
+
+
+def resolve_auto_model(spec, catalog, conf, input_chars=0, args=None,
+                       label="-m"):
+    """Resolve the EXPLICIT `-m auto[:cheapest|:largest]` pseudo-model to a
+    REAL model id at call time: READY + curation-visible + text-output, and
+    (for cheapest/bare auto) able to hold the input in ONE pass. The pick is
+    PRINTED to stderr — the user delegated the choice but always sees exactly
+    which model runs. SACRED-safe: this only ever executes when the user
+    literally asked for auto. Fails with the clean [model] diagnosis (naming
+    what IS ready) when nothing qualifies — never a silent substitute.
+    `label` names the surface the spec came from in every message (-m,
+    --reduce-model, AMBIENT_MODEL_MAP reduce=)."""
+    spec_l = spec.strip().lower()
+    variant = spec_l.split(":", 1)[1] if ":" in spec_l else ""
+    allow, hide, show, _notes = curation(conf)
+    candidates = []
+    for m in catalog or []:
+        if not (isinstance(m, dict) and m.get("is_ready") and m.get("id")):
+            continue
+        out_mod = m.get("output_modalities") or ["text"]
+        if not isinstance(out_mod, list) or "text" not in out_mod:
+            continue
+        if is_hidden(m["id"], allow, hide, show):
+            continue
+        candidates.append(m)
+
+    def _bail(msg):
+        _fail_exit(args, _argv_command(), "model", msg,
+                   prose=f"ambient [model]: {msg}")
+
+    if not candidates:
+        ready = ready_model_ids(catalog)
+        if ready:  # READY models exist but curation hides every one of them
+            _bail(f"{label} {spec}: every READY model is hidden by your curation "
+                  f"(READY: {', '.join(ready)}) — surface one with "
+                  "`ambient curate show <id>` or pick it explicitly with -m.")
+        _bail(f"{label} {spec}: no model has live workers right now — try again "
+              "shortly, or check: ambient models")
+    if variant == "largest":
+        ranked = sorted(
+            candidates,
+            key=lambda m: (-_as_pos_int(m.get("context_length"), 0),
+                           _catalog_out_price(catalog, m["id"]), m["id"]))
+        pick = ranked[0]["id"]
+        why = (f"largest READY context, "
+               f"{_humanize_ctx(_as_pos_int(ranked[0].get('context_length'), 0))}")
+    else:  # bare auto and auto:cheapest — cheapest READY that FITS the input
+        fits = [m for m in candidates
+                if input_chars <= model_profile(catalog,
+                                                m["id"]).single_shot_chars]
+        if not fits:
+            names = ", ".join(m["id"] for m in candidates)
+            _bail(f"{label} {spec}: no READY model fits this input "
+                  f"(~{input_chars:,} chars) in one pass — READY: {names}; "
+                  "pick one explicitly with -m (oversize inputs are "
+                  "map-reduced), or use -m auto:largest.")
+        ranked = sorted(
+            fits,
+            key=lambda m: (_catalog_out_price(catalog, m["id"]),
+                           -_as_pos_int(m.get("context_length"), 0), m["id"]))
+        pick = ranked[0]["id"]
+        why = "cheapest READY that fits"
+    price = model_pricing(catalog, pick)
+    tail = f", ${price[1]:.2f}/Mtok out" if price else ""
+    print(f"ambient: {label} {spec} -> {pick} ({why}{tail})", file=sys.stderr)
+    return pick
+
+
+def preflight_hint(model, catalog, conf, input_chars=0):
+    """Phase 3b: ADVISORY ONLY. One stderr line when the user's resolved
+    CONCRETE model has no live workers, or the whole input cannot fit its
+    context window — naming READY alternatives with their price. It never
+    changes the model, never blocks, and says so: model choice is SACRED."""
+    if not catalog:
+        return None  # degraded/offline catalog — nothing trustworthy to say
+    meta = next((m for m in catalog
+                 if isinstance(m, dict) and m.get("id") == model), None)
+    if meta is None:
+        return None  # unknown id: complete() gives the real [model] diagnosis
+    problems = []
+    if not meta.get("is_ready"):
+        problems.append(f"'{model}' has no live workers right now")
+    if input_chars:
+        ctx_chars = _as_pos_int(meta.get("context_length"), 0) * CHARS_PER_TOKEN
+        if ctx_chars and input_chars > ctx_chars:
+            problems.append(
+                f"the input (~{input_chars:,} chars) exceeds '{model}'s whole "
+                "context window (it will be split and map-reduced)")
+    if not problems:
+        return None
+    allow, hide, show, _notes = curation(conf)
+    alts = []
+    for m in catalog:
+        if not (isinstance(m, dict) and m.get("is_ready") and m.get("id")) \
+                or m["id"] == model:
+            continue
+        out_mod = m.get("output_modalities") or ["text"]
+        if not isinstance(out_mod, list) or "text" not in out_mod:
+            continue
+        if is_hidden(m["id"], allow, hide, show):
+            continue
+        alts.append((_catalog_out_price(catalog, m["id"]), m["id"]))
+    alts.sort()
+    line = "ambient: note — " + "; ".join(problems)
+    if alts:
+        shown = ", ".join(f"{mid} (${pr:.2f}/Mtok out)"
+                          for pr, mid in alts[:4])
+        line += f" — READY: {shown}; pick with -m or -m auto"
+    line += ". (advisory only — your model choice is unchanged)"
+    print(line, file=sys.stderr)
+    return None
+
+
+def route_model(args, conf, kind, catalog, input_chars=0, phase=None):
+    """The shared Phase-3 command preamble: resolve the model, expand an
+    explicit `auto` spec to a concrete READY pick (printed), or print the
+    pre-flight advisory for a concrete model. Returns the model to run.
+    NEVER changes a concrete model — the hint is information only."""
+    model = resolve_model(args, conf, kind, phase=phase)
+    if is_auto_model(model):
+        return resolve_auto_model(model, catalog, conf, input_chars, args)
+    preflight_hint(model, catalog, conf, input_chars)
+    return model
+
+
+def _validate_reduce_id(chosen, catalog, args, source):
+    """H1: an unknown reduce id must be diagnosed BEFORE the map fan-out
+    spends a cent — the old failure mode billed EVERY map chunk, then
+    merge() degraded the synthesis ChatError into raw concatenation and the
+    user never saw the real 'unknown model' diagnosis. Clean [model] error
+    with did-you-mean suggestions, prose AND --json envelope, exit 1."""
+    ids = [m["id"] for m in catalog
+           if isinstance(m, dict) and isinstance(m.get("id"), str)]
+    if not ids or chosen in ids:
+        return
+    close = difflib.get_close_matches(chosen, ids, n=3, cutoff=0.4)
+    hint = f" — did you mean: {', '.join(close)}?" if close else ""
+    msg = (f"unknown reduce model '{chosen}' (from {source}){hint} "
+           "— nothing was run or billed. See: ambient models")
+    _fail_exit(args, _argv_command(), "model", msg,
+               prose=f"ambient [model]: {msg}")
+
+
+def resolve_reduce_model(args, conf, map_model, catalog=None):
+    """Model for the map-reduce SYNTHESIS step (Phase 3c cheap-map /
+    strong-reduce): --reduce-model flag > AMBIENT_MODEL_MAP 'reduce' phase >
+    the map model itself. An explicit concrete -m pins the WHOLE run — the
+    config map must never reroute the synthesis behind the user's back.
+    When a `catalog` is available: an `auto[:…]` reduce spec resolves to a
+    concrete READY pick (printed) instead of being silently dropped, and a
+    concrete id is VALIDATED up front so a typo'd --reduce-model / stale
+    map entry fails before any map spend (H1). A degraded/absent catalog
+    changes nothing — no false refusals while offline."""
+    flag = getattr(args, "reduce_model", None)
+    if flag:
+        chosen, source = flag, "--reduce-model"
+    else:
+        explicit = getattr(args, "model", None)
+        if explicit and not is_auto_model(explicit):
+            return map_model
+        mapped = model_map(conf).get("reduce")
+        if not mapped:
+            return map_model
+        chosen, source = mapped, "AMBIENT_MODEL_MAP reduce="
+    if is_auto_model(chosen):
+        if catalog:
+            return resolve_auto_model(chosen, catalog, conf, 0, args,
+                                      label=source)
+        # No catalog to resolve against: say so explicitly rather than
+        # letting the pseudo-model id reach the synthesis call (or silently
+        # vanishing, the old behavior for a mapped auto spec).
+        print(f"ambient: note — {source} {chosen} ignored (model catalog "
+              f"unavailable) — synthesis stays on {map_model}",
+              file=sys.stderr)
+        return map_model
+    if chosen != map_model and catalog:
+        _validate_reduce_id(chosen, catalog, args, source)
+    return chosen
 
 
 ModelProfile = collections.namedtuple(
@@ -2298,9 +2610,27 @@ def _resolve_parallel(args):
     return MAX_PARALLEL_CHUNKS
 
 
+def _reduce_response_format(rf, reduce_profile):
+    """Re-gate a response_format request to the REDUCE model's capabilities
+    (H2): a strict json_schema the map model supports can 400 on a reduce
+    model that lacks structured_outputs — downgrade per its own features."""
+    if not rf:
+        return rf
+    if rf.get("type") == "json_schema":
+        schema = (rf.get("json_schema") or {}).get("schema") or {}
+        return response_format_for(reduce_profile, schema)
+    if rf.get("type") == "json_object":
+        feats = reduce_profile.features or []
+        if "json_mode" in feats or "structured_outputs" in feats:
+            return rf
+        return None
+    return rf
+
+
 def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                    synth_system, reduce_budget, reducer=None, code_map="",
-                   gate=None, cancel_event=None):
+                   gate=None, cancel_event=None, reduce_model=None,
+                   catalog=None):
     """Fan chunk calls out in parallel, then reduce with BUDGET-AWARE synthesis.
     Returns (final_text, partial, reason). Never discards paid-for work: failed
     or truncated chunks are counted as coverage gaps and surfaced; a synthesis
@@ -2311,13 +2641,39 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     caps TOTAL concurrent complete() calls ACROSS sibling pools — without it
     N models × N chunks each = width² simultaneous network calls (be kind to
     miners). A set `cancel_event` stops chunks from STARTING: once the caller
-    is unwinding (fatal sibling error / Ctrl-C), no new work gets billed."""
+    is unwinding (fatal sibling error / Ctrl-C), no new work gets billed.
+    `reduce_model` (Phase 3c, explicit --reduce-model/AMBIENT_MODEL_MAP only)
+    routes the SYNTHESIS calls to a different model — cheap map, strong
+    reduce; default = the map model, byte-identical behavior. When it
+    differs and a `catalog` is supplied, the synthesis is sized to the
+    REDUCE model's own window (H2): the hierarchical grouping budget is
+    clamped to its single-shot capacity and the synthesis call gets a
+    reduce-specific args copy (max_tokens/response_format re-derived) — a
+    smaller-window reduce model must never receive merge prompts or token
+    budgets sized for the map model."""
     total = sum(map(len, chunks))
     width = min(_resolve_parallel(args), len(chunks))
+    synth_model = reduce_model or model
+    synth_args = args
+    if synth_model != model and catalog:
+        reduce_profile = model_profile(catalog, synth_model)
+        # Pack merge inputs to the SMALLER of the two windows: shrinking for
+        # a tiny reduce model is required; growing for a bigger one is not
+        # (the map model's budget is already proven safe for these partials).
+        reduce_budget = min(reduce_budget, reduce_profile.single_shot_chars)
+        synth_args = argparse.Namespace(**vars(args))
+        if getattr(args, "max_tokens", None):
+            synth_args.max_tokens = min(args.max_tokens,
+                                        reduce_profile.output_budget)
+        else:
+            synth_args.max_tokens = reduce_profile.output_budget
+        synth_args.response_format = _reduce_response_format(
+            getattr(args, "response_format", None), reduce_profile)
     print(
         f"ambient: input {total:,} chars → {len(chunks)} chunks → parallel calls "
         f"(max {width} at once) + budget-aware synthesis "
-        f"(~{total // 3:,} input tokens)",
+        f"(~{total // 3:,} input tokens)"
+        + (f" · reduce on {synth_model}" if synth_model != model else ""),
         file=sys.stderr,
     )
 
@@ -2452,8 +2808,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
             {"role": "user", "content": body + gap},
         ]
         try:
-            text, _u, resp_body = complete(api_key, api_url, model, messages,
-                                           args)
+            text, _u, resp_body = complete(api_key, api_url, synth_model,
+                                           messages, synth_args)
             # The SYNTHESIS tier can truncate too: a length-cut or salvaged
             # merge is NOT a clean synthesis. Flag it exactly like a truncated
             # map chunk so the final verdict can never masquerade as complete.
@@ -2850,6 +3206,16 @@ def cmd_use(args, api_key, api_url, conf):
         except (ValueError, EOFError, KeyboardInterrupt):
             sys.exit("\nambient: cancelled (no valid selection)")
         chosen = pick_from[idx - 1]["id"]
+    elif is_auto_model(chosen):
+        # `ambient use auto[:cheapest|:largest]` stores the LITERAL spec —
+        # it re-resolves against the live catalog on every call (and prints
+        # each pick). Skip the catalog-id validation: it is not a model id.
+        chosen = chosen.strip().lower()
+        print(
+            f"note: '{chosen}' is a delegation, not a model — every call "
+            "picks a live model from the catalog and prints its choice.",
+            file=sys.stderr,
+        )
     elif chosen not in known_ids:
         # Explicit user text, so a UNIQUE substring match resolves (still the
         # user's choice — never a guess between candidates). Otherwise suggest.
@@ -2863,7 +3229,7 @@ def cmd_use(args, api_key, api_url, conf):
             hint = f" Did you mean: {', '.join(sugg[:3])}?" if sugg else ""
             sys.exit(f"ambient: unknown model '{chosen}'.{hint} "
                      "Run 'ambient models' for the list.")
-    if is_hidden(chosen, allow, hide, show):
+    if not is_auto_model(chosen) and is_hidden(chosen, allow, hide, show):
         print(
             f"note: '{chosen}' is hidden from the model menu — saving anyway "
             f"(surface it with: ambient curate show {chosen}).",
@@ -3032,12 +3398,15 @@ def cmd_ask(args, api_key, api_url, conf):
         usage_exit("nothing to ask (pass a prompt or pipe stdin)")
     scan = [("prompt", question)] + ([("stdin", doc)] if doc else [])
     refuse_if_secrets(scan, getattr(args, "allow_secrets", False))
-    model = resolve_model(args, conf, "chat")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
-    profile = model_profile(catalog, model)
     input_size = len(question) + (len(doc) if doc else 0)
+    # Phase 3 advisory routing: expands an explicit `-m auto` (printed) or
+    # prints the readiness/fit hint — a concrete model is NEVER changed.
+    model = route_model(args, conf, "chat", catalog, input_chars=input_size)
+    reduce_model = resolve_reduce_model(args, conf, model, catalog=catalog)
+    profile = model_profile(catalog, model)
     sizing = (input_size if input_size <= profile.single_shot_chars
               else profile.chunk_chars)
     apply_output_budget(args, profile, sizing)
@@ -3052,7 +3421,8 @@ def cmd_ask(args, api_key, api_url, conf):
         chunk_eff = max(MIN_REASONING_CHUNK,
                         int(chunk / density_factor(doc)))
         packed = pack_chunks([("input", doc)], chunk_eff)
-        cost_gate(catalog, model, len(doc), len(packed) * 2, args, conf)
+        cost_gate_mr(catalog, model, reduce_model, len(doc), len(packed),
+                     args, conf)
         final, partial, reason = run_map_reduce(
             api_key, api_url, model,
             f"{base}\nQUESTION: {q}\nFrom the given chunk, extract everything "
@@ -3060,7 +3430,7 @@ def cmd_ask(args, api_key, api_url, conf):
             packed, args,
             f"You are merging partial answers to: {q}\nCombine into one final, "
             "coherent, non-repetitive answer; resolve conflicts explicitly.",
-            single,
+            single, reduce_model=reduce_model, catalog=catalog,
         )
         if want_json:  # keep --json machine-readable even on the map-reduce path
             emit_json("ask", model=model, api_key=api_key, content=final,
@@ -3294,10 +3664,16 @@ def cmd_map(args, api_key, api_url, conf):
     refuse_if_secrets(
         [("prompt", prompt)] + [(str(i), t) for i, t, e in items if e is None],
         getattr(args, "allow_secrets", False))
-    model = resolve_model(args, conf, "chat")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
+    # `map`'s unit of fit is the LARGEST single item (each item is its own
+    # single-shot call). AMBIENT_MODEL_MAP's dedicated "map" phase lets the
+    # user route the whole bulk lane to a cheap model without touching chat.
+    biggest = max((len(prompt) + len(t) for _i, t, e in items if e is None),
+                  default=0)
+    model = route_model(args, conf, "chat", catalog, input_chars=biggest,
+                        phase="map")
     profile = model_profile(catalog, model)
     single = profile.single_shot_chars
 
@@ -3936,17 +4312,24 @@ def cmd_audit(args, api_key, api_url, conf):
             exit_code=EXIT_USAGE, api_key=api_key,
         )
     focus = f"\nAudit focus: {args.focus}" if args.focus else ""
-    model = resolve_model(args, conf, "chat")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
-    profile = model_profile(catalog, model)
-    single, chunk = profile.single_shot_chars, profile.chunk_chars
     total = sum(len(text) for _, text in labeled)
     # Token-dense input (CJK etc.) holds more tokens per char than the 3.2
     # assumption — inflate the effective size so sizing decisions stay safe.
     dens = density_factor("".join(t for _, t in labeled[:8])[:200_000])
     eff_total = int(total * dens)
+    if getattr(args, "consensus", None):
+        # Consensus names its models explicitly — the default-lane resolution
+        # below is only bookkeeping; don't auto-route or hint on its behalf.
+        model = resolve_model(args, conf, "chat")
+    else:
+        model = route_model(args, conf, "chat", catalog,
+                            input_chars=eff_total)
+    reduce_model = resolve_reduce_model(args, conf, model, catalog=catalog)
+    profile = model_profile(catalog, model)
+    single, chunk = profile.single_shot_chars, profile.chunk_chars
     # Remember whether --max-tokens came from the USER before the next line
     # resolves it for the DEFAULT model — consensus workers must not mistake
     # that derived number for an explicit choice and inherit it (R4).
@@ -3958,12 +4341,26 @@ def cmd_audit(args, api_key, api_url, conf):
     if getattr(args, "dry_run", False):
         # D6: preview using the SAME sizing functions, then exit without a call.
         one_pass = eff_total <= single
-        n_chunks = 1 if one_pass else len(pack_chunks(labeled, min(chunk, single)))
-        n_calls = 1 if one_pass else n_chunks * 2  # + synthesis, mirrors cost_gate
-        expected, bound, assumed = estimate_cost(
-            catalog, model, total, n_calls, args.max_tokens)
+        structured_preview = args.format in ("json", "report")
+        if one_pass:
+            n_chunks = 1
+            expected, bound, assumed = estimate_cost(
+                catalog, model, total, 1, args.max_tokens)
+        else:
+            # Mirror the live path's chunking AND its gate (M2): the shared
+            # split helper prices map/reduce lanes exactly like cost_gate_mr
+            # will on the real run — incl. the deterministic structured merge
+            # that makes NO synthesis call.
+            n_chunks = len(pack_chunks(
+                labeled,
+                max(MIN_REASONING_CHUNK, int(min(chunk, single) / dens))))
+            expected, bound, assumed = estimate_cost_mr(
+                catalog, model, reduce_model, total, n_chunks,
+                args.max_tokens, synthesis=not structured_preview)
         print("ambient audit plan (dry run — nothing sent):")
         print(f"  model:        {model} ({'reasoning' if profile.is_reasoning else 'direct'})")
+        if not one_pass and reduce_model != model and not structured_preview:
+            print(f"  models:       map={model}, reduce={reduce_model}")
         print(f"  input:        {total:,} chars across {len(labeled)} labeled item(s)")
         print(f"  output budget: {args.max_tokens:,} tokens/call")
         print(f"  strategy:     {'single-shot (one pass)' if one_pass else f'map-reduce → {n_chunks} chunks, up to {min(_resolve_parallel(args), n_chunks)} parallel + synthesis'}")
@@ -4224,11 +4621,15 @@ def cmd_audit(args, api_key, api_url, conf):
                       single)
     chunk_chars = max(MIN_REASONING_CHUNK, int(chunk_chars / dens))
     packed = pack_chunks(labeled, chunk_chars)
-    cost_gate(catalog, model, total, len(packed) * 2, args, conf)
+    # A deterministic reducer (structured findings merge) makes NO synthesis
+    # LLM call — price only the map lane (Codex M3).
+    cost_gate_mr(catalog, model, reduce_model, total, len(packed), args, conf,
+                 synthesis=reducer is None)
     final, partial, reason = run_map_reduce(
         api_key, api_url, model, sys_prompt,
         packed, args, AUDIT_SYNTH_PROMPT, single, reducer=reducer,
-        code_map=build_code_map(labeled),
+        code_map=build_code_map(labeled), reduce_model=reduce_model,
+        catalog=catalog,
     )
     if structured:
         eff = render_findings(final, args.format, api_key, partial, reason,
@@ -4246,10 +4647,18 @@ def cmd_code(args, api_key, api_url, conf):
                    'ambient code "write a rate limiter" -f context.py')
     warn_if_stdin_ignored("`code` does not read stdin — pass context with -f FILE")
     refuse_if_secrets([("task", task)], args.allow_secrets)
-    model = resolve_model(args, conf, "code")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
+    ctx_len = 0  # cheap size probe (stat only) for routing + budget sizing
+    for p in (args.context or []):
+        try:
+            ctx_len += os.path.getsize(p)
+        except OSError:
+            pass
+    model = route_model(args, conf, "code", catalog,
+                        input_chars=len(task) + ctx_len)
+    reduce_model = resolve_reduce_model(args, conf, model, catalog=catalog)
     # cmd_code previously used raw model_budget with NO reasoning cap, so its
     # default reasoner (kimi-k2.7-code) marathoned on large -f context. The
     # profile fixes that: reasoning-awareness is intrinsic.
@@ -4266,7 +4675,8 @@ def cmd_code(args, api_key, api_url, conf):
         packed = pack_chunks([("task", task)],
                              max(MIN_REASONING_CHUNK,
                                  int(chunk / density_factor(task))))
-        cost_gate(catalog, model, len(task), len(packed) * 2 + 1, args, conf)
+        cost_gate_mr(catalog, model, reduce_model, len(task), len(packed),
+                     args, conf, extra_calls=1)
         task, t_partial, t_reason = run_map_reduce(
             api_key, api_url, model,
             "From the given chunk of a long task brief, extract every "
@@ -4274,7 +4684,7 @@ def cmd_code(args, api_key, api_url, conf):
             packed, args,
             "Merge these extracts into one concise, complete task brief, "
             "preserving verbatim requirements and constraints.",
-            single,
+            single, reduce_model=reduce_model, catalog=catalog,
         )
         if t_partial and not getattr(args, "allow_partial", False):
             _fail_exit(
@@ -4287,12 +4697,7 @@ def cmd_code(args, api_key, api_url, conf):
             args.max_tokens = None  # re-derive below for the generation pass
     # Size the budget for the final generation input (task + context, capped at
     # single since oversized context is distilled below to <= single). A1.
-    ctx_len = 0
-    for p in (args.context or []):
-        try:
-            ctx_len += os.path.getsize(p)
-        except OSError:
-            pass
+    # (ctx_len was probed above, before routing.)
     apply_output_budget(args, profile, min(len(task) + ctx_len, single))
     context = ""
     if args.context:
@@ -4309,7 +4714,8 @@ def cmd_code(args, api_key, api_url, conf):
                                  max(MIN_REASONING_CHUNK,
                                      int(chunk / density_factor(context))))
             # +1 call for the final generation pass after distillation.
-            cost_gate(catalog, model, len(context), len(packed) * 2 + 1, args, conf)
+            cost_gate_mr(catalog, model, reduce_model, len(context),
+                         len(packed), args, conf, extra_calls=1)
             context, partial, reason = run_map_reduce(
                 api_key, api_url, model,
                 f"TASK: {task}\nFrom the given chunk of context files, extract "
@@ -4318,7 +4724,7 @@ def cmd_code(args, api_key, api_url, conf):
                 packed, args,
                 f"TASK: {task}\nMerge these context extracts into one concise, "
                 "non-redundant context brief preserving verbatim signatures/types.",
-                single,
+                single, reduce_model=reduce_model, catalog=catalog,
             )
             if partial and not getattr(args, "allow_partial", False):
                 _fail_exit(
@@ -4557,10 +4963,18 @@ def cmd_build(args, api_key, api_url, conf):
         if not args.yes:
             usage_exit("headless --apply also requires --yes "
                        "(explicit consent to write files)")
-    model = resolve_model(args, conf, "code")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
+    ctx_probe = 0  # cheap size probe (stat only) for routing
+    for p in (args.context or []):
+        try:
+            ctx_probe += os.path.getsize(p)
+        except OSError:
+            pass
+    model = route_model(args, conf, "code", catalog,
+                        input_chars=len(task) + ctx_probe)
+    reduce_model = resolve_reduce_model(args, conf, model, catalog=catalog)
     profile = model_profile(catalog, model)
     single = profile.single_shot_chars
     # Generation wants the full budget: reasoning + several complete files.
@@ -4590,14 +5004,28 @@ def cmd_build(args, api_key, api_url, conf):
     # context-distillation map-reduce, which makes billed calls and sends file
     # contents to the network. A flag that says "nothing sent" must send nothing.
     if getattr(args, "dry_run", False):
-        # A live run distills first: len(packed)*2+1 extra calls (offline count).
-        n_calls = max(2, args.max_files // 4 + 2) + (
-            len(packed) * 2 + 1 if needs_distill else 0)
-        expected, bound, assumed = estimate_cost(
-            catalog, model, len(task) + len(context), n_calls, args.max_tokens)
+        gen_calls = max(2, args.max_files // 4 + 2)
+        if needs_distill:
+            # The distillation lane is priced by the SAME split helper the
+            # live cost_gate_mr below uses (M2) — same chunk count, same +1
+            # generation call; the remaining generation calls are priced on
+            # the task at the map model.
+            expected, bound, assumed = estimate_cost_mr(
+                catalog, model, reduce_model, len(context), len(packed),
+                args.max_tokens, extra_calls=1)
+            e_g, b_g, a_g = estimate_cost(
+                catalog, model, len(task), gen_calls - 1, args.max_tokens)
+            expected, bound = expected + e_g, bound + b_g
+            assumed = assumed or a_g
+        else:
+            expected, bound, assumed = estimate_cost(
+                catalog, model, len(task) + len(context), gen_calls,
+                args.max_tokens)
         print("ambient build plan (dry run — nothing sent):")
         print(f"  model:         {model} "
               f"({'reasoning' if profile.is_reasoning else 'direct'})")
+        if needs_distill and reduce_model != model:
+            print(f"  models:        map={model}, reduce={reduce_model}")
         print(f"  task:          {len(task):,} chars"
               + (f" + context {len(context):,} chars" if context else ""))
         if needs_distill:
@@ -4617,8 +5045,8 @@ def cmd_build(args, api_key, api_url, conf):
         print("ambient: context exceeds half this model's window — "
               "distilling it first", file=sys.stderr)
         # `packed` was computed offline above (reused here — no recompute).
-        cost_gate(catalog, model, len(context), len(packed) * 2 + 1,
-                  args, conf)
+        cost_gate_mr(catalog, model, reduce_model, len(context), len(packed),
+                     args, conf, extra_calls=1)
         context, c_partial, c_reason = run_map_reduce(
             api_key, api_url, model,
             f"TASK: {task}\nFrom the given chunk of context files, extract "
@@ -4627,7 +5055,7 @@ def cmd_build(args, api_key, api_url, conf):
             packed, args,
             f"TASK: {task}\nMerge these context extracts into one concise "
             "brief preserving verbatim signatures/types.",
-            single,
+            single, reduce_model=reduce_model, catalog=catalog,
         )
         if c_partial and not getattr(args, "allow_partial", False):
             _fail_exit(args, "build", "partial",
@@ -5327,6 +5755,13 @@ def cmd_doctor(args):
     allow_c, hide_c, show_c, _notes_c = curation(conf)
     for kind in ("chat", "code"):
         m = resolve_model(ns, conf, kind)
+        if is_auto_model(m):
+            # A sticky `auto` default is a delegation, not a catalog id —
+            # it resolves to a READY model per call, so it can't be "missing".
+            report(f"{kind}_model", bool(ready),
+                   f"{m} — delegated; resolves per call "
+                   f"({len(ready)} model(s) READY right now)")
+            continue
         known = any(x.get("id") == m for x in models if isinstance(x, dict))
         live = m in ready
         hidden_tag = (" (hidden by curation — still works)"
@@ -5629,6 +6064,11 @@ def cmd_agent(args, api_key, api_url, conf):
     model = resolve_model(args, conf, "code")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
+    if is_auto_model(model):
+        # opencode needs a REAL model id — resolve the explicit auto spec
+        # against the live catalog (printed, like every auto pick).
+        model = resolve_auto_model(model, safe_catalog(api_url, api_key),
+                                   conf, 0, args)
     ensure_opencode_config(api_url, model)
     print(
         "ambient: the agent reads files itself — the secrets tripwire does "
@@ -5692,7 +6132,14 @@ def add_common_flags(parser):
     parser.add_argument(
         "-m", "--model", default=None, metavar="ID",
         help="model id for this run only (see: ambient models); overrides the "
-             "sticky default")
+             "sticky default. 'auto' delegates: cheapest READY model that "
+             "fits the input, resolved per call and printed "
+             "(auto:cheapest / auto:largest)")
+    parser.add_argument(
+        "--reduce-model", default=None, metavar="ID",
+        help="model for the map-reduce SYNTHESIS step only (cheap map, "
+             "strong reduce); default: the same model as the map step",
+    )
     parser.add_argument(
         "--max-tokens", type=int, default=None,
         help="output token budget (default: auto-sized per model; reasoning "
@@ -5812,7 +6259,10 @@ def main():
     sub.add_parser("doctor", help="diagnose key/funds/model/network/service issues")
 
     p_use = sub.add_parser("use", help="pick the sticky default model")
-    p_use.add_argument("model_id", nargs="?", help="model id (omit for interactive menu)")
+    p_use.add_argument(
+        "model_id", nargs="?",
+        help="model id (omit for interactive menu); 'auto[:cheapest|:largest]' "
+             "stores a per-call delegation instead of a fixed model")
     p_use.add_argument("--chat", action="store_true", help="only set the chat/audit default")
     p_use.add_argument("--code", action="store_true", help="only set the code/agent default")
     p_use.add_argument("--all", action="store_true",

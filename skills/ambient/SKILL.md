@@ -126,9 +126,23 @@ just work. Patterns, cheapest first:
 The user's picked model is never silently swapped. If the chosen model can't finish
 in one pass, the CLI escalates its token budget once, then SPLITS the work across
 the SAME model and merges. `--fallback` (or AMBIENT_FALLBACK=on) is the ONLY thing
-that authorizes a different model — off by default, curation-aware, and it prints
-the price delta. Never enable it on the user's behalf without asking. User
+that authorizes a different model — off by default, curation-aware, it prints
+the price delta, and it now picks the CHEAPEST fitting alternate (fit-then-cheapest),
+not the biggest. Never enable it on the user's behalf without asking. User
 curation (`ambient curate`) shapes what menus SHOW, never what `-m` can do.
+
+Advisory routing (v3) stays inside that rule: `-m auto[:cheapest|:largest]` is the
+user EXPLICITLY delegating the pick — resolved per call from READY, curation-visible
+models and ALWAYS printed (`ambient use auto` makes it sticky; it stores the literal
+spec and re-resolves each call). If a CONCRETE model is cold or the input outgrows
+its window, ambient prints a one-line stderr HINT naming READY alternatives with
+prices — information only; it never changes the model and never blocks.
+`--reduce-model ID` routes only the map-reduce SYNTHESIS step (cheap map, strong
+reduce). `AMBIENT_MODEL_MAP` (env/config, alongside `AMBIENT_MAX_PARALLEL` /
+`AMBIENT_MAX_SPEND`) is the user's per-phase routing config —
+`"map=ID,reduce=ID,chat=ID,code=ID"` — and explicit `-m` / `--reduce-model` always
+override it. Do NOT set AMBIENT_MODEL_MAP or pass `-m auto` on the user's behalf
+without telling them.
 
 ## Sizing, spend, and "no hard no"
 
