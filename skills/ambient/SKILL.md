@@ -119,7 +119,10 @@ models' single-shot input is ~120k chars by default (`AMBIENT_SINGLE_SHOT_MAX_CH
 raises it; big-window non-reasoners size off their real context). NOTHING is refused
 for size: bigger inputs auto map-reduce (split on file boundaries → parallel chunk
 calls → merge), whether they arrive as files, stdin, or a giant argv prompt. Failed
-chunks become explicit coverage gaps (exit 2), never silent holes. Spend is gated:
+chunks become explicit coverage gaps (exit 2), never silent holes. Fan-out width
+defaults to 3 concurrent calls — `--parallel N` (per run) or `AMBIENT_MAX_PARALLEL`
+(env) raises or lowers it, clamped to 1-16; it also sets how many `--consensus`
+models run at once. Spend is gated:
 estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`), jobs over
 $0.50 confirm on a TTY (`--yes` skips), `--allow-cost` overrides, and a worst-case
 guard blocks runs whose hard bound exceeds 3x the ceiling. Relay the printed

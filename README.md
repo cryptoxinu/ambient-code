@@ -97,7 +97,10 @@ ambient trust-url <url>  explicitly trust a self-hosted gateway (advanced)
 Every model is auto-tuned from the live catalog (context window, output cap,
 reasoning behavior) — **no input is refused for size**: anything past a model's
 single-pass budget is automatically split, processed in parallel by the *same*
-model, and merged, with failed pieces reported as explicit coverage gaps. Spend is
+model, and merged, with failed pieces reported as explicit coverage gaps. The
+fan-out width defaults to 3 concurrent calls — raise or lower it per run with
+`--parallel N` or persistently with `AMBIENT_MAX_PARALLEL` (clamped to 1-16); it
+also sets how many `--consensus` models run at once. Spend is
 gated: estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`),
 and jobs over $0.50 ask first (`--yes` skips, `--allow-cost` overrides).
 
@@ -111,7 +114,9 @@ Every task-running `--json` surface emits one envelope: `{"schema_version": 1, "
 "ask|code|audit|consensus|build", "status": "ok|partial", "model", "partial",
 "coverage_gap", "exit_code", …}` plus `content`, or `findings`+`verdict`, or
 `files[]`+`failed[]`+`advisory_steps[]`. The shape never depends on how the result
-was computed (single-shot vs map-reduce).
+was computed (single-shot vs map-reduce). A failed `--json` run is machine-readable
+too: `{"schema_version": 1, "kind", "status": "error", "category", "diagnosis",
+"exit_code": 1}` on stdout, exit 1 — never a bare stderr line.
 
 ## When something fails
 
