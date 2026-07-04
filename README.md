@@ -83,6 +83,8 @@ ambient use [id]         sticky default model picker (--chat/--code scopes)
 ambient curate …         choose which models the menus surface (hide/show/only/note)
 ambient ask "q"          one-shot answer · pipe docs: cat doc.txt | ambient ask "sum" -
 ambient audit [files]    adversarial code review · git diff | ambient audit · --consensus A,B
+ambient map "p" [files]  bulk lane: ONE prompt run independently over MANY items
+                         (files, or one item per stdin line; --jsonl objects)
 ambient code "task"      single-file code generation (-f context.py)
 ambient build "task"     plan + generate a whole file-set (manifest-first, --apply writes)
 ambient agent            interactive agentic terminal on Ambient (opencode)
@@ -104,6 +106,22 @@ also sets how many `--consensus` models run at once. Spend is
 gated: estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`),
 and jobs over $0.50 ask first (`--yes` skips, `--allow-cost` overrides).
 
+**Bulk per-item work is `ambient map`** — the "a thousand cheap things at once,
+with a receipt" lane. One prompt is applied *independently* to each item (each
+file, or each stdin line; `--jsonl` for `{"input": …, "id": …}` objects), one
+single-shot call per item, fanned out `--parallel` wide. **One batch cost gate
+up front** prices the whole run before the first call. Results stream per item
+as they complete; a re-run serves already-finished items from the local cache
+and re-bills only the missing ones (`--no-cache` disables). An item too large
+for the model's single-shot window is refused *per item* (use `ambient audit`
+for big files) — the rest of the batch still runs.
+
+```bash
+ambient map "summarize this file in one sentence" src/*.py
+cat titles.txt | ambient map "classify: bug, feature, or question?"
+cat questions.jsonl | ambient map "answer concisely" --jsonl --json > answers.jsonl
+```
+
 ## Agentic use (for scripts and orchestrators)
 
 Exit codes: `0` ok · `1` diagnosed error (`ambient [category]: …`) · `2` **partial
@@ -117,6 +135,15 @@ Every task-running `--json` surface emits one envelope: `{"schema_version": 1, "
 was computed (single-shot vs map-reduce). A failed `--json` run is machine-readable
 too: `{"schema_version": 1, "kind", "status": "error", "category", "diagnosis",
 "exit_code": 1}` on stdout, exit 1 — never a bare stderr line.
+
+`ambient map --json` streams **JSONL**: one envelope per line, per item, as each
+completes (out of order — the `id` field names the item: its path, stdin item
+index, or `--jsonl` id): `{"schema_version": 1, "kind": "map", "status":
+"ok|partial|error", "id", "content", "exit_code"}` (+`category`/`diagnosis` on
+errors, `"cached": true` on cache hits). Batch exit: `0` when every item is ok,
+`2` when any item failed or was truncated (unless `--allow-partial`), with a
+final `N ok / M failed / K cached` line on stderr; a fatal key/funds/network
+failure aborts the queue immediately and exits `1` via the error envelope.
 
 ## When something fails
 

@@ -22,6 +22,7 @@ always points at the active install, so never hardcode a path.
 | `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). |
 | `/ambient model` | Model picking UX below. |
 | `/ambient audit <target>` | `git diff \| ambient audit` or `ambient audit <files> [--focus X] --json`, then verify + report. |
+| `/ambient map <prompt> <items>` | Bulk lane: `ambient map "<prompt>" <files> --json` (or pipe one item per line; `--jsonl` for objects). One prompt, applied independently per item, one JSONL envelope per item out. |
 | `/ambient build <task>` | Native build lane: write a precise brief, run `ambient build "<brief>" --dir <target> [-f context] --json --apply --yes`, read the manifest, review every file, run tests yourself. |
 | `/ambient agent` | Interactive opencode TUI for the user (`ambient agent`); headless one-offs via `ambient agent run "task"`. The key enters opencode's process env — never ask the agent to print its environment. |
 | `/ambient curate ...` | User model curation: `ambient curate` (status) / `hide <id\|glob>` / `show <id>` / `only <ids>` / `note <id> "text"` / `reset`. Curation shapes menus + automatic selection only — explicit `-m` always works. |
@@ -41,6 +42,19 @@ envelope shape: `{"schema_version": 1, "kind": …, "status": "ok|partial", "mod
 "partial", "coverage_gap", "exit_code", …}` with `content` (ask/code), `findings` +
 `verdict` (audit/consensus), or `files[]` + `failed[]` + `advisory_steps[]` (build).
 `ambient models --json` emits a simpler catalog list (`{"schema_version": 1, "configured": …, "models": […]}`). Prefer `--json` for anything you script or fan out.
+
+`ambient map --json` is the exception to "ONE envelope": it streams **JSONL** —
+one envelope per ITEM, per line, as each completes (out of order; match on `id` =
+file path, stdin item index, or `--jsonl` id): `{"schema_version": 1, "kind":
+"map", "status": "ok|partial|error", "id", "content", "exit_code"}`
+(+`category`/`diagnosis` on errors, `"cached": true` on cache hits). Batch exit
+`0` only when every item succeeded; `2` if any item failed/truncated (unless
+`--allow-partial`), with a final `N ok / M failed / K cached` stderr line. ONE
+batch cost gate prices the whole run up front (n items = n calls); re-runs serve
+finished items from the cache and re-bill only the missing ones (`--no-cache`
+opts out). An item bigger than the model's single-shot window is a per-item
+error (route big files to `ambient audit`); a fatal key/funds/network failure
+cancels the queue instantly and exits 1 via the error envelope.
 
 ## Delegate mode contract ("Ambient codes everything")
 
@@ -90,6 +104,11 @@ One sentence, at most once per session per pattern — suggest, don't nag.
 
 The CLI is stateless — every call reads the shared key/config — so N parallel calls
 just work. Patterns, cheapest first:
+- **Native bulk lane (prefer this over hand-rolled fan-out)**: `ambient map
+  "<prompt>" <files> --json` runs one prompt independently over many items in
+  ONE process — one up-front cost gate, `--parallel`-wide, JSONL streaming out,
+  and cache-resume on re-run. Use it for bulk summarize/classify/extract
+  instead of spawning N separate `ambient ask` calls.
 - **Parallel one-shots**: several `ambient audit --json`/`ambient ask --json` Bash
   calls at once (different files, different `--focus`, or different `-m` models).
   Parse the envelopes, then verify.

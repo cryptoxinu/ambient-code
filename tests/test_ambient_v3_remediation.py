@@ -505,24 +505,28 @@ class TestTotalJsonFailureContract(unittest.TestCase):
     def _audit_no_input(self, fmt):
         args = _consensus_args(_src_file(), consensus=None, paths=[],
                                format=fmt)
-        out = io.StringIO()
+        out, err = io.StringIO(), io.StringIO()
         with patched(amb, read_stdin_if_piped=lambda: ""), \
                 contextlib.redirect_stdout(out), \
-                contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as cm:
                 amb.cmd_audit(args, KEY, "https://x", {})
-        return cm.exception.code, out.getvalue()
+        return cm.exception.code, out.getvalue(), err.getvalue()
 
     def test_audit_json_no_input_emits_usage_envelope(self):
-        code, out = self._audit_no_input("json")
+        code, out, _err = self._audit_no_input("json")
         self.assertEqual(code, amb.EXIT_USAGE)
         env = self._envelope(out, "audit", "usage", amb.EXIT_USAGE)
         self.assertIn("nothing to audit", env["diagnosis"])
 
-    def test_audit_no_input_prose_path_is_byte_identical(self):
-        code, out = self._audit_no_input("prose")
-        self.assertEqual(code, self._AUDIT_NO_INPUT_PROSE)  # sys.exit(str) → 1
+    def test_audit_no_input_prose_exits_64_with_prose_on_stderr(self):
+        # Phase-2 H2: _fail_exit now honors exit_code on the prose path too —
+        # a usage error exits EX_USAGE=64 (matching its --json twin), with the
+        # byte-identical prose line on stderr instead of a string exit 1.
+        code, out, err = self._audit_no_input("prose")
+        self.assertEqual(code, amb.EXIT_USAGE)
         self.assertEqual(out, "")
+        self.assertIn(self._AUDIT_NO_INPUT_PROSE, err)
 
     # ---- code: task-brief / context distillation incomplete ------------
 

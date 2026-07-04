@@ -10,6 +10,10 @@ Commands:
   ask       [prompt]   One-shot completion (prompt arg, stdin, or both via '-':
                        cat doc.txt | ambient ask "summarize" -)
   audit     [paths…]   Second-opinion code audit (files as args, diff via stdin)
+  map       "<p>" [f…] Bulk lane: run ONE prompt independently over MANY items
+                       (files, or stdin lines / --jsonl objects); one result
+                       streamed per item, one up-front batch cost gate,
+                       cache-resumable (re-runs re-bill only missing items)
   code      [task]     Single-file code generation on the code model
   build     [task]     Plan + generate a SET of files (manifest-first; writes
                        only with --apply, inside --dir; never executes)
@@ -2638,7 +2642,11 @@ def emit_json_error(kind, category, diagnosis, api_key="", exit_code=1):
         "diagnosis": redact(str(diagnosis), api_key),
         "exit_code": exit_code,
     }
-    print(redact(json.dumps(env, indent=2), api_key))
+    # `ambient map --json` is a JSONL stream (one object per line) — its
+    # terminal error envelope must stay ONE line like every item envelope,
+    # or a line-by-line consumer breaks on the very failure it must parse.
+    indent = None if kind == "map" else 2
+    print(redact(json.dumps(env, indent=indent), api_key))
     sys.exit(exit_code)
 
 
@@ -2662,7 +2670,8 @@ def _argv_command():
     vocabulary; anything else reports as 'usage'."""
     for tok in sys.argv[1:]:
         if not tok.startswith("-"):
-            return tok if tok in ("ask", "code", "audit", "build") else "usage"
+            return tok if tok in ("ask", "code", "audit", "build", "map") \
+                else "usage"
     return "usage"
 
 
@@ -2673,11 +2682,20 @@ def _fail_exit(args, kind, category, msg, exit_code=1, api_key="", prose=None):
     machine envelope, never a bare stderr line to scrape. `args=None` sniffs
     sys.argv for helpers that run before/without a parsed args object. The
     prose path prints exactly what every prior release printed (default
-    'ambient: {msg}'; pass `prose` where the historical line differs)."""
+    'ambient: {msg}'; pass `prose` where the historical line differs).
+    exit_code is honored on BOTH paths: runtime failures keep the historical
+    sys.exit(<string>) convention (stderr + exit 1); anything else (e.g.
+    EX_USAGE=64) prints the same prose to stderr, then exits with that code —
+    a usage error must not report as a runtime failure just because the
+    caller didn't ask for --json."""
     wants_json = _json_mode(args) if args is not None else _json_in_argv()
     if wants_json:
         emit_json_error(kind, category, msg, api_key, exit_code=exit_code)
-    sys.exit(prose if prose is not None else f"ambient: {msg}")
+    prose_line = prose if prose is not None else f"ambient: {msg}"
+    if exit_code == 1:
+        sys.exit(prose_line)
+    print(prose_line, file=sys.stderr)
+    sys.exit(exit_code)
 
 
 def _humanize_ctx(n):
@@ -3123,6 +3141,363 @@ def cmd_ask(args, api_key, api_url, conf):
         "output was salvaged/truncated", args, api_key, usage, model,
         already_streamed=clean_stream,
     )
+
+
+# --------------------------------------------------------------------------
+# `ambient map` — the bulk per-item inference lane (v3 Phase 2). ONE prompt
+# applied INDEPENDENTLY to MANY items: each file/stdin-line is its own
+# complete() call (NOT map-reduce — no synthesis pass), streamed out as it
+# finishes, resumable via the content-addressed cache, all behind ONE
+# up-front batch cost gate. map only READS items and PRINTS results — it
+# never writes files and never executes model output.
+
+MAP_OVERSIZE_MSG = ("input too large for map — use ambient audit for large "
+                    "files (map is one single-shot call per item)")
+
+
+def _read_map_item(path):
+    """(text, error) for ONE file item. Mirrors read_files' safety checks
+    (regular file, binary, size) but reports PER-ITEM instead of skipping or
+    aborting — map's unit of failure is the item, never the batch."""
+    if os.path.isdir(path):
+        return None, ("is a directory — map takes one FILE per item; glob "
+                      f"its files instead (e.g. {path}/*.py)")
+    try:
+        st = os.lstat(path)
+    except OSError as err:
+        return None, f"unreadable ({err})"
+    if not stat.S_ISREG(st.st_mode):
+        return None, "not a regular file"
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(ABS_MAX_CHARS + 1)
+    except OSError as err:
+        return None, f"unreadable ({err})"
+    if b"\x00" in raw[:8192]:
+        return None, "looks binary — map sends text items only"
+    if len(raw) > ABS_MAX_CHARS:
+        # NEVER ship a silently truncated item — even if a model's window
+        # somehow exceeded the ceiling, a half-read answered authoritatively
+        # is worse than a per-item refusal.
+        return None, (f"file exceeds the {ABS_MAX_CHARS:,}-char ceiling — "
+                      "too large for map; run ambient audit on it instead")
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        return None, "empty file"
+    return text, None
+
+
+def _map_gather_items(args):
+    """The per-item work list: [(id, text, pre_error)] by the documented
+    precedence — positional paths first (each FILE is one item), else stdin
+    (one item per non-empty line; --jsonl parses each line as a JSON object
+    with an \"input\" field and optional \"id\")."""
+    items = []
+    if args.paths:
+        warn_if_stdin_ignored("map reads stdin only when no paths are given")
+        # Cumulative cap while gathering (same overall ceiling read_files
+        # enforces): dozens of multi-MB files must not be held in memory
+        # simultaneously — items past the cap get a clean per-item error
+        # and are never read.
+        total, capped = 0, False
+        cap_msg = (f"batch input cap reached ({ABS_MAX_CHARS:,} chars "
+                   "total) — item skipped to bound memory; split the map "
+                   "into smaller runs")
+        for path in args.paths:
+            if capped:
+                items.append((path, None, cap_msg))
+                continue
+            text, err = _read_map_item(path)
+            if err is None:
+                total += len(text)
+                if total > ABS_MAX_CHARS:
+                    capped = True
+                    items.append((path, None, cap_msg))
+                    continue
+            items.append((path, text, err))
+        return items
+    data = read_stdin_if_piped()
+    idx = 0
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        idx += 1
+        if not getattr(args, "jsonl", False):
+            items.append((idx, line, None))
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as err:
+            items.append((idx, None, f"invalid JSONL line ({err})"))
+            continue
+        if not isinstance(obj, dict):
+            items.append((idx, None, "JSONL line is not a JSON object"))
+            continue
+        item_id = obj.get("id", idx)
+        text = obj.get("input")
+        if not isinstance(text, str) or not text.strip():
+            items.append((item_id, None,
+                          'JSONL item needs a non-empty string "input" field'))
+            continue
+        items.append((item_id, text, None))
+    return items
+
+
+def _emit_map_result(args, api_key, item_id, *, content=None, partial=False,
+                     cached=False, category=None, diagnosis=None):
+    """Stream ONE per-item result the moment it completes. Items finish out
+    of order, so the id always rides along. Under --json each result is ONE
+    LINE — a self-contained map envelope (JSONL), redacted like every other
+    surface. Returns the item's exit code (0 ok / 1 error / 2 partial)."""
+    if content is None:
+        status, code = "error", 1
+    elif partial:
+        status, code = "partial", EXIT_PARTIAL
+    else:
+        status, code = "ok", 0
+    if _json_mode(args):
+        env = {"schema_version": 1, "kind": "map", "status": status,
+               "id": item_id, "content": content, "exit_code": code}
+        if category is not None:
+            env["category"] = category
+        if diagnosis is not None:
+            env["diagnosis"] = diagnosis
+        if cached:
+            env["cached"] = True
+        print(redact(json.dumps(env), api_key), flush=True)
+        return code
+    if status == "error":
+        print(redact(f"===== ITEM {item_id} — FAILED [{category}]: "
+                     f"{diagnosis}", api_key), flush=True)
+        return code
+    note = " — PARTIAL (truncated)" if partial else (
+        " (cached)" if cached else "")
+    print(redact(f"===== ITEM {item_id}{note} =====\n{content}\n", api_key),
+          flush=True)
+    return code
+
+
+def cmd_map(args, api_key, api_url, conf):
+    prompt = (args.prompt or "").strip()
+    if not prompt:
+        _fail_exit(args, "map", "usage",
+                   'map needs a per-item instruction: ambient map "<prompt>" '
+                   "[FILES...] (or pipe one item per line on stdin)",
+                   exit_code=EXIT_USAGE, api_key=api_key)
+    items = _map_gather_items(args)
+    if not items:
+        _fail_exit(args, "map", "usage",
+                   "no items to map — pass file paths (one item per file) or "
+                   "pipe one item per line on stdin (--jsonl for JSON objects "
+                   'with an "input" field)',
+                   exit_code=EXIT_USAGE, api_key=api_key)
+    refuse_if_secrets(
+        [("prompt", prompt)] + [(str(i), t) for i, t, e in items if e is None],
+        getattr(args, "allow_secrets", False))
+    model = resolve_model(args, conf, "chat")
+    if getattr(args, "model", None):
+        note_if_hidden(args.model, conf)
+    catalog = safe_catalog(api_url, api_key)
+    profile = model_profile(catalog, model)
+    single = profile.single_shot_chars
+
+    # Partition: per-item pre-errors (directory/binary/oversized/bad JSONL)
+    # never bill and never block the runnable siblings. An item past the
+    # model's single-shot window is refused PER-ITEM — never silently
+    # truncated (that would answer over half an input and look authoritative).
+    runnable, pre_errors = [], []
+    for item_id, text, err in items:
+        if err is not None:
+            pre_errors.append((item_id, "input", err))
+            continue
+        eff = int((len(prompt) + len(text)) * density_factor(text))
+        if eff > single:
+            pre_errors.append((item_id, "input", MAP_OVERSIZE_MSG))
+            continue
+        runnable.append((item_id, text, eff))
+    fails = len(pre_errors)
+    ok = cached_n = 0
+    use_cache = not getattr(args, "no_cache", False)
+    cache_ttl = getattr(args, "cache_ttl", None) or CACHE_TTL_DEFAULT
+    cached_hits, to_run = [], []
+    explicit_budget = getattr(args, "max_tokens", None) is not None
+    if runnable and explicit_budget:
+        # An explicit --max-tokens applies to EVERY item (and is part of
+        # every key): clamp + warn ONCE on the shared args, then each item
+        # copy inherits the resolved value.
+        apply_output_budget(args, profile)
+    if runnable:
+        # Budget EACH ITEM INDEPENDENTLY from its OWN density-adjusted size
+        # (A1 right-sizing, per item) on a private args copy — so its cache
+        # key depends only on (model, prompt, item, its-own-budget, temp,
+        # response_format) and is stable no matter what else joins the batch.
+        # Sizing once to the batch max would re-key EVERY item when a larger
+        # item is added, re-billing already-cached work; it also over-budgeted
+        # small items. The per-item copy also keeps complete()'s budget
+        # escalation from mutating a sibling's args mid-flight.
+        # Cache is resolved BEFORE the gate (after the budget — the key
+        # includes max_tokens): a resumed / fully-cached re-run makes zero
+        # calls and must never be re-priced or refused by AMBIENT_MAX_SPEND.
+        for item_id, text, eff in runnable:
+            item_args = argparse.Namespace(**vars(args))
+            if not explicit_budget:
+                apply_output_budget(item_args, profile, eff)
+            key = _cache_key(model, prompt, text, item_args.max_tokens,
+                             args.temperature,
+                             getattr(args, "response_format", None))
+            hit = _cache_get(key, cache_ttl) if use_cache else None
+            if hit is not None:
+                cached_hits.append((item_id, hit))
+            else:
+                to_run.append((item_id, text, key, item_args))
+    if to_run:
+        total_chars = (sum(len(t) for _, t, _, _ in to_run)
+                       + len(prompt) * len(to_run))
+        print(f"ambient map: {len(items)} item(s), {len(to_run)} to run"
+              + (f" ({len(cached_hits)} cached)" if cached_hits else "")
+              + (f" ({fails} refused up front)" if fails else "")
+              + f" — one {model} call per item", file=sys.stderr)
+        # ONE batch cost gate BEFORE any network call: total input chars,
+        # one call per CACHE MISS. Respects AMBIENT_MAX_SPEND /
+        # --allow-cost / the 3x worst-case bound — a 500-item run must show
+        # its full price up front, not discover it item by item. Budgets are
+        # PER-ITEM now, so gate at the per-call MEAN budget on a private
+        # copy: estimate_cost is linear in max_tokens, so the batch figure
+        # equals the SUM of the per-item estimates.
+        budgets = [ia.max_tokens for _, _, _, ia in to_run]
+        gate_args = argparse.Namespace(**vars(args))
+        gate_args.max_tokens = -(-sum(budgets) // len(budgets))  # ceil mean
+        cost_gate(catalog, model, total_chars, len(to_run), gate_args, conf)
+    for item_id, category, diagnosis in pre_errors:
+        _emit_map_result(args, api_key, item_id,
+                         category=category, diagnosis=diagnosis)
+    # D7 resume: cache hits still emit their envelopes — for free.
+    for item_id, hit in cached_hits:
+        ok += 1
+        cached_n += 1
+        _emit_map_result(args, api_key, item_id, content=hit, cached=True)
+
+    width = min(_resolve_parallel(args), max(1, len(to_run)))
+    # Phase-1 shape: a shared gate around the network call + a cancel_event
+    # flipped on the first fatal failure so no queued item starts billing
+    # while the batch unwinds (re-checked after acquiring any gate slot).
+    gate = threading.Semaphore(width)
+    cancel_event = threading.Event()
+
+    def work(item_id, text, key, item_args):
+        if cancel_event.is_set():
+            raise ChatError("cancelled",
+                            "map cancelled before this item started")
+        messages = [{"role": "system", "content": prompt},
+                    {"role": "user", "content": text}]
+        for attempt in range(3):
+            try:
+                with gate:
+                    # Re-check after acquiring the slot: an item that raced
+                    # in after an abort must bill NOTHING.
+                    if cancel_event.is_set():
+                        raise ChatError(
+                            "cancelled",
+                            "map cancelled while waiting for a slot")
+                    try:
+                        out, _u, body = complete(
+                            api_key, api_url, model, messages, item_args)
+                    except NetworkError:
+                        # Fatal for every sibling — flip cancel BEFORE this
+                        # gate slot is released, so a waiting retry worker
+                        # that grabs the freed slot can't start a billed
+                        # call before cancellation is visible (race-free).
+                        cancel_event.set()
+                        raise
+                    except ChatError as err:
+                        if err.category in ("key", "funds"):
+                            cancel_event.set()  # same zero-race fail-fast
+                        raise
+                partial = (bool(body.get("salvaged_partial"))
+                           or body.get("finish_reason") == "length")
+                # Only a clean result from the REQUESTED model is cached —
+                # a fallback model's answer under this key would poison a
+                # later run (same rule as run_map_reduce).
+                served = body.get("_served_model", model)
+                if use_cache and not partial and served == model:
+                    _cache_put(key, out)
+                return out, partial
+            except ChatError as err:
+                if err.category == "rate" and attempt < 2 \
+                        and not cancel_event.is_set():
+                    ra = getattr(err, "retry_after", None)
+                    time.sleep(_retry_delay(3 * (attempt + 1),
+                                            {"Retry-After": ra} if ra
+                                            else None))
+                    continue
+                raise
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=width)
+    aborted = False
+
+    def _abort():
+        nonlocal aborted
+        aborted = True
+        cancel_event.set()
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)  # py3.9+
+        except TypeError:
+            pool.shutdown(wait=False)                       # py3.8
+
+    try:
+        futs = {pool.submit(work, i, t, k, ia): i for i, t, k, ia in to_run}
+        for fut in concurrent.futures.as_completed(futs):
+            item_id = futs[fut]
+            try:
+                text, partial = fut.result()
+            except (ChatError, NetworkError) as err:
+                if isinstance(err, NetworkError) \
+                        or getattr(err, "category", "") in ("key", "funds"):
+                    # Every sibling is doomed identically — cancel the queue,
+                    # stop billing, and surface the REAL problem now. main()
+                    # renders it as the --json error envelope / prose, exit 1.
+                    _abort()
+                    raise
+                fails += 1
+                _emit_map_result(
+                    args, api_key, item_id,
+                    category=getattr(err, "category", "network"),
+                    diagnosis=getattr(err, "diagnosis", None) or str(err))
+                continue
+            except Exception as err:  # noqa: BLE001 — one item must never
+                # abort the batch; record it as a failed item and keep going.
+                fails += 1
+                _emit_map_result(args, api_key, item_id, category="internal",
+                                 diagnosis=f"{type(err).__name__}: {err}")
+                continue
+            if partial:
+                fails += 1
+            else:
+                ok += 1
+            _emit_map_result(args, api_key, item_id, content=text,
+                             partial=partial)
+    except KeyboardInterrupt:
+        print("\nambient: cancelling map…", file=sys.stderr)
+        _abort()
+        # A real Ctrl-C must end the PROCESS now: the pool's worker threads
+        # are non-daemon, so re-raising would leave the interpreter joining
+        # the in-flight complete() at exit — stalling exit-130 for up to
+        # --timeout. os._exit skips interpreter teardown (no buffered-stream
+        # flushing), so flush BOTH streams first — no emitted envelope or
+        # diagnostic may be lost. Normal (non-interrupt) exits are untouched.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130)
+    finally:
+        # After an abort the queue is already cancelled — a second BLOCKING
+        # shutdown would sit there draining in-flight calls, turning Ctrl-C
+        # exit-130 from prompt into minutes.
+        if not aborted:
+            pool.shutdown(wait=True)
+    print(f"ambient map: {ok} ok / {fails} failed / {cached_n} cached "
+          f"(of {len(items)} item(s))", file=sys.stderr)
+    if fails and not getattr(args, "allow_partial", False):
+        sys.exit(EXIT_PARTIAL)
 
 
 AUDIT_FINDINGS_SCHEMA = {
@@ -5509,6 +5884,40 @@ def main():
     )
     add_common_flags(p_audit)
 
+    p_map = sub.add_parser(
+        "map",
+        help="bulk lane: run ONE prompt independently over MANY items "
+             "(files or stdin lines), streaming one result per item",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  ambient map "summarize this file in one sentence" src/*.py
+  cat titles.txt | ambient map "classify: bug, feature, or question?"
+  cat q.jsonl | ambient map "answer concisely" --jsonl --json
+Each item is ONE single-shot call (the prompt is the system instruction,
+the item is the user message). Output streams per item as it completes —
+under --json as JSONL (one envelope per line, always carrying the item id).
+One batch cost gate up front; re-runs serve finished items from the cache
+and re-bill only the missing ones.""")
+    p_map.add_argument(
+        "prompt",
+        help="the instruction applied INDEPENDENTLY to each item")
+    p_map.add_argument(
+        "paths", nargs="*",
+        help="files — each file is ONE item (glob via your shell); omit to "
+             "read one item per stdin line")
+    p_map.add_argument(
+        "--jsonl", action="store_true",
+        help='stdin lines are JSON objects: {"input": "...", "id": ...} '
+             "(id optional; falls back to the line's item index)")
+    p_map.add_argument(
+        "--json", action="store_true",
+        help="emit one JSON envelope per item (JSONL) instead of prose")
+    p_map.add_argument(
+        "--allow-secrets", action="store_true",
+        help="bypass the credentials tripwire (false positives only)",
+    )
+    add_common_flags(p_map)
+
     p_code = sub.add_parser("code", help="code generation")
     p_code.add_argument("task", nargs="*", help="what to build, in plain words")
     p_code.add_argument("-f", "--context", action="append", metavar="FILE",
@@ -5678,6 +6087,7 @@ def main():
         "use": cmd_use,
         "ask": cmd_ask,
         "audit": cmd_audit,
+        "map": cmd_map,
         "code": cmd_code,
         "build": cmd_build,
         "agent": cmd_agent,
