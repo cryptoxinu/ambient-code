@@ -13,7 +13,7 @@ keywords = ["ambient", "llm", "code-review", "claude-code", "inference"]
 dependencies = []                       # stdlib only — no third-party runtime deps
 
 [project.urls]
-Homepage = "https://ambient.xyz"
+Homepage = "https://github.com/cryptoxinu/ambient-code"
 
 # Single-file CLI: install bin/ambient onto PATH as `ambient` with NO second copy
 # of the source (avoids the two-divergent-copies problem). `pipx install .` works.

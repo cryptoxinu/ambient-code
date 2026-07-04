@@ -7,7 +7,7 @@ vulnerability.
 
 - Open a [GitHub security advisory](https://docs.github.com/en/code-security/security-advisories)
   on this repository (preferred), or
-- Contact the maintainer listed in `.claude-plugin/plugin.json`.
+- Open a private security advisory on GitHub (github.com/cryptoxinu/ambient-code → Security → Report a vulnerability).
 
 Please include repro steps and the affected version (`ambient --version`). We aim
 to acknowledge within a few days.

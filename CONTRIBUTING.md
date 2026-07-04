@@ -25,7 +25,7 @@ pure function (budgeting, chunking, JSON extraction, dedup, config, redaction).
 
 ## Releasing
 
-Bump the version in **all three** places (a test enforces the first two match):
+Bump the version in **all three** places (tests + CI enforce all three stay in sync):
 `bin/ambient` `__version__`, `.claude-plugin/plugin.json`, `pyproject.toml`, and
 add a `CHANGELOG.md` entry.
 
@@ -34,4 +34,4 @@ add a `CHANGELOG.md` entry.
 - One focused change per PR; explain the *why*.
 - Keep the never-crash posture: a single bad input, chunk, or model must never
   abort the whole run.
-- CI (GitHub Actions) runs compile + tests on macOS/Linux across Python 3.8–3.13.
+- CI (GitHub Actions) runs compile + tests on macOS, Linux, and Windows across Python 3.8–3.13, plus a ruff lint gate and a version tri-sync check.

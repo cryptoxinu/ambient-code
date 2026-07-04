@@ -5,14 +5,14 @@ endpoint you configure.
 
 ## What leaves your machine
 - **Only** the prompts/code you explicitly send, and **only** to the Ambient API
-  URL in your config (`https://api.ambient.xyz/v1` by default). Nothing else.
+  URL in your config (`https://api.ambient.xyz` by default). Nothing else.
 - No analytics, no telemetry, no phone-home, no crash reporting. The single
   outbound host is your configured `AMBIENT_API_URL`.
 
 ## What stays on your machine
 - Your API key: in the macOS Keychain (or a `chmod 600` file / OS secret store).
 - Token/cost metering: a local `~/.config/ambient/usage.jsonl`, never uploaded.
-- The optional chunk cache (if enabled): local only.
+- The chunk cache (on by default; `--no-cache` skips it): local only.
 
 ## Your responsibility
 - Auditing code publishes it to the network you chose. The built-in secrets

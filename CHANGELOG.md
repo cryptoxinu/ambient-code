@@ -1,5 +1,7 @@
 # Changelog
 
+All notable changes to ambient-code. Format loosely follows Keep a Changelog.
+
 ## 2.0.0 — 2026-07-03
 
 Production/marketplace release. Breaking: exit codes and --json envelopes changed.
@@ -16,7 +18,7 @@ Production/marketplace release. Breaking: exit codes and --json envelopes change
   curation-aware --fallback ranking with price-visible switches.
 - **Exit-code contract**: 0 ok · 1 error · 2 partial · 3 unconfigured · 64 usage ·
   130 interrupt. One --json envelope (schema_version 1) across ask/code/audit/
-  consensus/build/models.
+  consensus/build.
 - **Honest consensus**: pre-validated ids (did-you-mean), per-model pricing, partial
   model failures exit 2, --json support.
 - **Resilience**: binary-safe stdin, giant argv prompts auto-split, token-density-aware

@@ -15,7 +15,7 @@ decentralized network. `--fallback` / `ambient models` handle this.
 |---|---|---|---|---|---|
 | moonshotai/kimi-k2.7-code | 1.5s | **16.5s** | 100% | **100%** | 0% |
 | ambient/large (GLM-5.1) | 1.5s | 45.7s | 100% | **100%** | 0% |
-| z-ai/glm-5.2 *(current default)* | 3.0s | 37.0s | 100% | **33%** | 0% |
+| z-ai/glm-5.2 *(default at probe time; since replaced by Kimi — see below)* | 3.0s | 37.0s | 100% | **33%** | 0% |
 
 **Two things stand out:**
 1. **Reliability was excellent this run — 0% stalls, 100% valid JSON** across every
@@ -30,7 +30,7 @@ decentralized network. `--fallback` / `ambient models` handle this.
 ## Scale + cache
 - **176,349-char input → 4-chunk map-reduce → 70s**, valid structured verdict.
 - **Cache re-run: 0.8s — ~88× faster** (served from cache, no re-bill). The
-  resumable-cache payoff (D7) is large in practice.
+  resumable-cache payoff (resumable-cache payoff) is large in practice.
 
 ## Consensus
 - `--consensus` across the two GLM/Kimi models: 61.7s, ran and merged.

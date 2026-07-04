@@ -107,7 +107,7 @@ Exit codes: `0` ok · `1` diagnosed error (`ambient [category]: …`) · `2` **p
 result** (output delivered, coverage incomplete — never a clean pass) · `3` no key
 configured · `64` usage error · `130` interrupted.
 
-Every `--json` surface emits one envelope: `{"schema_version": 1, "kind":
+Every task-running `--json` surface emits one envelope: `{"schema_version": 1, "kind":
 "ask|code|audit|consensus|build", "status": "ok|partial", "model", "partial",
 "coverage_gap", "exit_code", …}` plus `content`, or `findings`+`verdict`, or
 `files[]`+`failed[]`+`advisory_steps[]`. The shape never depends on how the result

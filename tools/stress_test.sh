@@ -83,6 +83,10 @@ run env AMBIENT_API_KEY="$FAKEKEY" "$AMB" audit "$WORK/secret.py" --dry-run
 grep -qi "credential" "$OUT" && pass "secrets tripwire blocks a key" || fail "secrets tripwire" "did not block"
 run env AMBIENT_API_KEY="$FAKEKEY" "$AMB" audit "$WORK/blob.bin" --dry-run
 grep -qi "binary\|nothing to audit" "$OUT" && pass "binary file skipped" || fail "binary skip" "not skipped"
+run env AMBIENT_API_KEY="$FAKEKEY" "$AMB" audit "$WORK/empty.py" --dry-run
+grep -qi "empty\|nothing to audit" "$OUT" && pass "empty file skipped" || fail "empty skip" "not skipped"
+run env AMBIENT_API_KEY="$FAKEKEY" "$AMB" audit "$WORK/big.txt" "$WORK/minified.js" --dry-run
+[ $RC -eq 0 ] && grep -qi "map-reduce" "$OUT" && pass "5.4MB + 400KB-line inputs plan a map-reduce (dry run, no spend)" || fail "big-input dry-run" "rc=$RC"
 ( cd "$WORK" && AMBIENT_API_KEY="$FAKEKEY" "$AMB" audit --staged --dry-run >"$WORK/staged.out" 2>&1; echo $? > "$WORK/staged.rc" )
 cat "$WORK/staged.out" >> "$LOG"; OUT="$WORK/staged.out"; RC=$(cat "$WORK/staged.rc")
 grep -qi "git repository" "$OUT" && pass "--staged outside repo: clean error" || fail "--staged guard" "no clean error"

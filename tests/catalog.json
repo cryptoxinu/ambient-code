@@ -1,1 +1,930 @@
-{"object":"list","data":[{"id":"zai-org/GLM-5.1-FP8","object":"model","name":"GLM 5.1","created":1775520000,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":"fp8","context_length":202752,"max_output_length":131072,"pricing":{"input":1.4,"output":4.4,"prompt":"0.0000014","completion":"0.0000044","image":"0","request":"0","input_cache_read":"0","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","max_tokens","temperature","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning"],"description":null,"hugging_face_id":"zai-org/GLM-5.1-FP8","openrouter":{"slug":"z-ai/glm-5.1"},"datacenters":null,"is_ready":false},{"id":"z-ai/glm-5.2","object":"model","name":"GLM 5.2","created":1781631930,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":"fp8","context_length":202752,"max_output_length":202752,"pricing":{"input":1.5,"output":3.6,"prompt":"0.0000015","completion":"0.0000036","image":"0","request":"0","input_cache_read":"0.00000021","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"Z.ai GLM-5.2.","hugging_face_id":"zai-org/GLM-5.2-FP8","openrouter":{"slug":"z-ai/glm-5.2"},"datacenters":[{"country_code":"US"}],"is_ready":true},{"id":"z-ai/glm-4.5-air","object":"model","name":"GLM 4.5 Air","created":1753471258,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":null,"context_length":131072,"max_output_length":131072,"pricing":{"input":0.125,"output":0.85,"prompt":"0.000000125","completion":"0.00000085","image":"0","request":"0","input_cache_read":"0.00000006","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","max_tokens","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"Z.ai GLM-4.5-Air.","hugging_face_id":"zai-org/GLM-4.5-Air","openrouter":{"slug":"z-ai/glm-4.5-air"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"google/gemma-4-26b-a4b-it","object":"model","name":"Gemma 4 26B A4B","created":1775227989,"owned_by":"ambient","input_modalities":["text","image","video"],"output_modalities":["text"],"quantization":null,"context_length":262144,"max_output_length":262144,"pricing":{"input":0.1,"output":0.3,"prompt":"0.0000001","completion":"0.0000003","image":"0","request":"0","input_cache_read":"0.00000002","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"Google Gemma 4 26B A4B.","hugging_face_id":"google/gemma-4-26B-A4B-it","openrouter":{"slug":"google/gemma-4-26b-a4b-it"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"google/gemma-4-31b-it","object":"model","name":"Gemma 4 31B","created":1775148486,"owned_by":"ambient","input_modalities":["text","image"],"output_modalities":["text"],"quantization":null,"context_length":65536,"max_output_length":16384,"pricing":{"input":0.2,"output":0.8,"prompt":"0.0000002","completion":"0.0000008","image":"0","request":"0","input_cache_read":"0.000000065","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"Google Gemma 4 31B.","hugging_face_id":"google/gemma-4-31B-it","openrouter":{"slug":"google/gemma-4-31b-it"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"openai/gpt-oss-120b","object":"model","name":"gpt-oss-120b","created":1754414231,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":null,"context_length":131072,"max_output_length":131072,"pricing":{"input":0.15,"output":0.6,"prompt":"0.00000015","completion":"0.0000006","image":"0","request":"0","input_cache_read":"0.000000075","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","structured_outputs","reasoning","logprobs"],"description":"OpenAI gpt-oss-120b.","hugging_face_id":"openai/gpt-oss-120b","openrouter":{"slug":"openai/gpt-oss-120b"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"openai/gpt-oss-20b","object":"model","name":"gpt-oss-20b","created":1754414229,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":null,"context_length":131072,"max_output_length":131072,"pricing":{"input":0.029,"output":0.14,"prompt":"0.000000029","completion":"0.00000014","image":"0","request":"0","input_cache_read":"0","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning"],"description":"OpenAI gpt-oss-20b.","hugging_face_id":"openai/gpt-oss-20b","openrouter":{"slug":"openai/gpt-oss-20b"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"moonshotai/kimi-k2.5","object":"model","name":"Kimi K2.5","created":1774051200,"owned_by":"ambient","input_modalities":["text","image"],"output_modalities":["text"],"quantization":null,"context_length":262144,"max_output_length":262144,"pricing":{"input":0.4,"output":1.98,"prompt":"0.0000004","completion":"0.00000198","image":"0","request":"0","input_cache_read":"0.00000005","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","max_tokens","temperature","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"MoonshotAI Kimi K2.5.","hugging_face_id":"moonshotai/Kimi-K2.5","openrouter":{"slug":"moonshotai/kimi-k2.5"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"moonshotai/kimi-k2.6","object":"model","name":"Kimi K2.6","created":1776643200,"owned_by":"ambient","input_modalities":["text","image"],"output_modalities":["text"],"quantization":"int4","context_length":262144,"max_output_length":262144,"pricing":{"input":0.55,"output":3.2,"prompt":"0.00000055","completion":"0.0000032","image":"0","request":"0","input_cache_read":"0.00000011","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","max_tokens","temperature","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"MoonshotAI Kimi K2.6.","hugging_face_id":"moonshotai/Kimi-K2.6","openrouter":{"slug":"moonshotai/kimi-k2.6"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"moonshotai/kimi-k2.7-code","object":"model","name":"Kimi K2.7 Code","created":1781136000,"owned_by":"ambient","input_modalities":["text","image","video"],"output_modalities":["text"],"quantization":"int4","context_length":262144,"max_output_length":262144,"pricing":{"input":0.9,"output":3.83,"prompt":"0.0000009","completion":"0.00000383","image":"0","request":"0","input_cache_read":"0.00000018","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","max_tokens","temperature","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"MoonshotAI Kimi K2.7 Code.","hugging_face_id":"moonshotai/Kimi-K2.7-Code","openrouter":{"slug":"moonshotai/kimi-k2.7-code"},"datacenters":null,"is_ready":true},{"id":"nvidia/nemotron-3-nano-30b-a3b","object":"model","name":"Nemotron 3 Nano 30B A3B","created":1765731275,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":"fp4","context_length":262144,"max_output_length":228000,"pricing":{"input":0.05,"output":0.2,"prompt":"0.00000005","completion":"0.0000002","image":"0","request":"0","input_cache_read":"0.00000001","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","reasoning"],"description":"NVIDIA Nemotron 3 Nano 30B A3B.","hugging_face_id":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16","openrouter":{"slug":"nvidia/nemotron-3-nano-30b-a3b"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"qwen/qwen3-coder-30b-a3b-instruct","object":"model","name":"Qwen3 Coder 30B A3B Instruct","created":1753972379,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":null,"context_length":160000,"max_output_length":32768,"pricing":{"input":0.07,"output":0.27,"prompt":"0.00000007","completion":"0.00000027","image":"0","request":"0","input_cache_read":"0","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","max_tokens","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs"],"description":"Qwen3 Coder 30B A3B Instruct.","hugging_face_id":"Qwen/Qwen3-Coder-30B-A3B-Instruct","openrouter":{"slug":"qwen/qwen3-coder-30b-a3b-instruct"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"qwen/qwen3-next-80b-a3b-instruct","object":"model","name":"Qwen3 Next 80B A3B Instruct","created":1757612213,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":null,"context_length":262144,"max_output_length":262144,"pricing":{"input":0.09,"output":1.1,"prompt":"0.00000009","completion":"0.0000011","image":"0","request":"0","input_cache_read":"0.00000003","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","logprobs"],"description":"Qwen3 Next 80B A3B Instruct.","hugging_face_id":"Qwen/Qwen3-Next-80B-A3B-Instruct","openrouter":{"slug":"qwen/qwen3-next-80b-a3b-instruct"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"qwen/qwen3.5-35b-a3b","object":"model","name":"Qwen3.5 35B A3B","created":1771977600,"owned_by":"ambient","input_modalities":["text","image","video"],"output_modalities":["text"],"quantization":null,"context_length":262144,"max_output_length":262144,"pricing":{"input":0.14,"output":1.0,"prompt":"0.00000014","completion":"0.000001","image":"0","request":"0","input_cache_read":"0.00000005","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"Qwen3.5 35B A3B.","hugging_face_id":"Qwen/Qwen3.5-35B-A3B","openrouter":{"slug":"qwen/qwen3.5-35b-a3b"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"qwen/qwen3.6-27b","object":"model","name":"Qwen3.6 27B","created":1777248000,"owned_by":"ambient","input_modalities":["text","image","video"],"output_modalities":["text"],"quantization":null,"context_length":262144,"max_output_length":81920,"pricing":{"input":0.32,"output":3.2,"prompt":"0.00000032","completion":"0.0000032","image":"0","request":"0","input_cache_read":"0.00000016","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"Qwen3.6 27B.","hugging_face_id":"Qwen/Qwen3.6-27B","openrouter":{"slug":"qwen/qwen3.6-27b"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"qwen/qwen3.6-35b-a3b","object":"model","name":"Qwen3.6 35B A3B","created":1777260255,"owned_by":"ambient","input_modalities":["text","image","video"],"output_modalities":["text"],"quantization":null,"context_length":262144,"max_output_length":262144,"pricing":{"input":0.15,"output":1.0,"prompt":"0.00000015","completion":"0.000001","image":"0","request":"0","input_cache_read":"0.00000005","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","logit_bias","max_tokens","min_p","presence_penalty","repetition_penalty","seed","stop","temperature","top_k","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning","logprobs"],"description":"Qwen3.6 35B A3B.","hugging_face_id":"Qwen/Qwen3.6-35B-A3B","openrouter":{"slug":"qwen/qwen3.6-35b-a3b"},"datacenters":[{"country_code":"US"}],"is_ready":false},{"id":"ambient/large","object":"model","name":"GLM 5.1","created":1775520000,"owned_by":"ambient","input_modalities":["text"],"output_modalities":["text"],"quantization":"fp8","context_length":202752,"max_output_length":131072,"pricing":{"input":1.4,"output":4.4,"prompt":"0.0000014","completion":"0.0000044","image":"0","request":"0","input_cache_read":"0","input_cache_write":"0"},"supported_sampling_parameters":["frequency_penalty","max_tokens","temperature","top_p"],"supported_features":["tools","json_mode","structured_outputs","reasoning"],"description":null,"hugging_face_id":"zai-org/GLM-5.1-FP8","openrouter":{"slug":"z-ai/glm-5.1"},"datacenters":null,"is_ready":false}],"has_more":false}
+{
+ "object": "list",
+ "data": [
+  {
+   "id": "zai-org/GLM-5.1-FP8",
+   "object": "model",
+   "name": "GLM 5.1",
+   "created": 1775520000,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": "fp8",
+   "context_length": 202752,
+   "max_output_length": 131072,
+   "pricing": {
+    "input": 1.4,
+    "output": 4.4,
+    "prompt": "0.0000014",
+    "completion": "0.0000044",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "temperature",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning"
+   ],
+   "description": null,
+   "hugging_face_id": "zai-org/GLM-5.1-FP8",
+   "openrouter": {
+    "slug": "z-ai/glm-5.1"
+   },
+   "datacenters": null,
+   "is_ready": false
+  },
+  {
+   "id": "z-ai/glm-5.2",
+   "object": "model",
+   "name": "GLM 5.2",
+   "created": 1781631930,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": "fp8",
+   "context_length": 202752,
+   "max_output_length": 202752,
+   "pricing": {
+    "input": 0.96,
+    "output": 3.06,
+    "prompt": "0.00000096",
+    "completion": "0.00000306",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.000000179",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "Z.ai GLM-5.2.",
+   "hugging_face_id": "zai-org/GLM-5.2-FP8",
+   "openrouter": {
+    "slug": "z-ai/glm-5.2"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": true
+  },
+  {
+   "id": "z-ai/glm-4.5-air",
+   "object": "model",
+   "name": "GLM 4.5 Air",
+   "created": 1753471258,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 131072,
+   "max_output_length": 131072,
+   "pricing": {
+    "input": 0.125,
+    "output": 0.85,
+    "prompt": "0.000000125",
+    "completion": "0.00000085",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000006",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "Z.ai GLM-4.5-Air.",
+   "hugging_face_id": "zai-org/GLM-4.5-Air",
+   "openrouter": {
+    "slug": "z-ai/glm-4.5-air"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "google/gemma-4-26b-a4b-it",
+   "object": "model",
+   "name": "Gemma 4 26B A4B",
+   "created": 1775227989,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image",
+    "video"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.1,
+    "output": 0.3,
+    "prompt": "0.0000001",
+    "completion": "0.0000003",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000002",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "Google Gemma 4 26B A4B.",
+   "hugging_face_id": "google/gemma-4-26B-A4B-it",
+   "openrouter": {
+    "slug": "google/gemma-4-26b-a4b-it"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "google/gemma-4-31b-it",
+   "object": "model",
+   "name": "Gemma 4 31B",
+   "created": 1775148486,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 65536,
+   "max_output_length": 16384,
+   "pricing": {
+    "input": 0.2,
+    "output": 0.8,
+    "prompt": "0.0000002",
+    "completion": "0.0000008",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.000000065",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "Google Gemma 4 31B.",
+   "hugging_face_id": "google/gemma-4-31B-it",
+   "openrouter": {
+    "slug": "google/gemma-4-31b-it"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "openai/gpt-oss-120b",
+   "object": "model",
+   "name": "gpt-oss-120b",
+   "created": 1754414231,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 131072,
+   "max_output_length": 131072,
+   "pricing": {
+    "input": 0.15,
+    "output": 0.6,
+    "prompt": "0.00000015",
+    "completion": "0.0000006",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.000000075",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "OpenAI gpt-oss-120b.",
+   "hugging_face_id": "openai/gpt-oss-120b",
+   "openrouter": {
+    "slug": "openai/gpt-oss-120b"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "openai/gpt-oss-20b",
+   "object": "model",
+   "name": "gpt-oss-20b",
+   "created": 1754414229,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 131072,
+   "max_output_length": 131072,
+   "pricing": {
+    "input": 0.029,
+    "output": 0.14,
+    "prompt": "0.000000029",
+    "completion": "0.00000014",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning"
+   ],
+   "description": "OpenAI gpt-oss-20b.",
+   "hugging_face_id": "openai/gpt-oss-20b",
+   "openrouter": {
+    "slug": "openai/gpt-oss-20b"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "moonshotai/kimi-k2.5",
+   "object": "model",
+   "name": "Kimi K2.5",
+   "created": 1774051200,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.4,
+    "output": 1.98,
+    "prompt": "0.0000004",
+    "completion": "0.00000198",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000005",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "temperature",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "MoonshotAI Kimi K2.5.",
+   "hugging_face_id": "moonshotai/Kimi-K2.5",
+   "openrouter": {
+    "slug": "moonshotai/kimi-k2.5"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "moonshotai/kimi-k2.6",
+   "object": "model",
+   "name": "Kimi K2.6",
+   "created": 1776643200,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": "int4",
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.55,
+    "output": 3.2,
+    "prompt": "0.00000055",
+    "completion": "0.0000032",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000011",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "temperature",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "MoonshotAI Kimi K2.6.",
+   "hugging_face_id": "moonshotai/Kimi-K2.6",
+   "openrouter": {
+    "slug": "moonshotai/kimi-k2.6"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "moonshotai/kimi-k2.7-code",
+   "object": "model",
+   "name": "Kimi K2.7 Code",
+   "created": 1781136000,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image",
+    "video"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": "int4",
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.88,
+    "output": 3.81,
+    "prompt": "0.00000088",
+    "completion": "0.00000381",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000017",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "temperature",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "MoonshotAI Kimi K2.7 Code.",
+   "hugging_face_id": "moonshotai/Kimi-K2.7-Code",
+   "openrouter": {
+    "slug": "moonshotai/kimi-k2.7-code"
+   },
+   "datacenters": null,
+   "is_ready": true
+  },
+  {
+   "id": "nvidia/nemotron-3-nano-30b-a3b",
+   "object": "model",
+   "name": "Nemotron 3 Nano 30B A3B",
+   "created": 1765731275,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": "fp4",
+   "context_length": 262144,
+   "max_output_length": 228000,
+   "pricing": {
+    "input": 0.05,
+    "output": 0.2,
+    "prompt": "0.00000005",
+    "completion": "0.0000002",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000001",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "reasoning"
+   ],
+   "description": "NVIDIA Nemotron 3 Nano 30B A3B.",
+   "hugging_face_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+   "openrouter": {
+    "slug": "nvidia/nemotron-3-nano-30b-a3b"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "qwen/qwen3-coder-30b-a3b-instruct",
+   "object": "model",
+   "name": "Qwen3 Coder 30B A3B Instruct",
+   "created": 1753972379,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 160000,
+   "max_output_length": 32768,
+   "pricing": {
+    "input": 0.07,
+    "output": 0.27,
+    "prompt": "0.00000007",
+    "completion": "0.00000027",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs"
+   ],
+   "description": "Qwen3 Coder 30B A3B Instruct.",
+   "hugging_face_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+   "openrouter": {
+    "slug": "qwen/qwen3-coder-30b-a3b-instruct"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "qwen/qwen3-next-80b-a3b-instruct",
+   "object": "model",
+   "name": "Qwen3 Next 80B A3B Instruct",
+   "created": 1757612213,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.09,
+    "output": 1.1,
+    "prompt": "0.00000009",
+    "completion": "0.0000011",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000003",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "logprobs"
+   ],
+   "description": "Qwen3 Next 80B A3B Instruct.",
+   "hugging_face_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+   "openrouter": {
+    "slug": "qwen/qwen3-next-80b-a3b-instruct"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "qwen/qwen3.5-35b-a3b",
+   "object": "model",
+   "name": "Qwen3.5 35B A3B",
+   "created": 1771977600,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image",
+    "video"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.14,
+    "output": 1.0,
+    "prompt": "0.00000014",
+    "completion": "0.000001",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000005",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "Qwen3.5 35B A3B.",
+   "hugging_face_id": "Qwen/Qwen3.5-35B-A3B",
+   "openrouter": {
+    "slug": "qwen/qwen3.5-35b-a3b"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "qwen/qwen3.6-27b",
+   "object": "model",
+   "name": "Qwen3.6 27B",
+   "created": 1777248000,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image",
+    "video"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 262144,
+   "max_output_length": 81920,
+   "pricing": {
+    "input": 0.32,
+    "output": 3.2,
+    "prompt": "0.00000032",
+    "completion": "0.0000032",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000016",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "Qwen3.6 27B.",
+   "hugging_face_id": "Qwen/Qwen3.6-27B",
+   "openrouter": {
+    "slug": "qwen/qwen3.6-27b"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "qwen/qwen3.6-35b-a3b",
+   "object": "model",
+   "name": "Qwen3.6 35B A3B",
+   "created": 1777260255,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image",
+    "video"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": null,
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.15,
+    "output": 1.0,
+    "prompt": "0.00000015",
+    "completion": "0.000001",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000005",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_k",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "Qwen3.6 35B A3B.",
+   "hugging_face_id": "Qwen/Qwen3.6-35B-A3B",
+   "openrouter": {
+    "slug": "qwen/qwen3.6-35b-a3b"
+   },
+   "datacenters": [
+    {
+     "country_code": "US"
+    }
+   ],
+   "is_ready": false
+  },
+  {
+   "id": "ambient/large",
+   "object": "model",
+   "name": "Kimi K2.7 Code",
+   "created": 1781136000,
+   "owned_by": "ambient",
+   "input_modalities": [
+    "text",
+    "image",
+    "video"
+   ],
+   "output_modalities": [
+    "text"
+   ],
+   "quantization": "int4",
+   "context_length": 262144,
+   "max_output_length": 262144,
+   "pricing": {
+    "input": 0.88,
+    "output": 3.81,
+    "prompt": "0.00000088",
+    "completion": "0.00000381",
+    "image": "0",
+    "request": "0",
+    "input_cache_read": "0.00000017",
+    "input_cache_write": "0"
+   },
+   "supported_sampling_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "temperature",
+    "top_p"
+   ],
+   "supported_features": [
+    "tools",
+    "json_mode",
+    "structured_outputs",
+    "reasoning",
+    "logprobs"
+   ],
+   "description": "MoonshotAI Kimi K2.7 Code.",
+   "hugging_face_id": "moonshotai/Kimi-K2.7-Code",
+   "openrouter": {
+    "slug": "moonshotai/kimi-k2.7-code"
+   },
+   "datacenters": null,
+   "is_ready": true
+  }
+ ],
+ "has_more": false
+}

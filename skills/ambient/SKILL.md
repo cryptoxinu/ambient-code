@@ -36,11 +36,11 @@ findings/content still delivered but coverage is incomplete; never treat as a cl
 pass · `3` no API key configured · `64` usage error (your flags were wrong) ·
 `130` interrupted.
 
-Every `--json` surface (ask, code, audit, consensus, build, models) emits ONE
+Every task-running `--json` surface (ask, code, audit, consensus, build) emits ONE
 envelope shape: `{"schema_version": 1, "kind": …, "status": "ok|partial", "model",
 "partial", "coverage_gap", "exit_code", …}` with `content` (ask/code), `findings` +
 `verdict` (audit/consensus), or `files[]` + `failed[]` + `advisory_steps[]` (build).
-Prefer `--json` for anything you script or fan out.
+`ambient models --json` emits a simpler catalog list (`{"schema_version": 1, "configured": …, "models": […]}`). Prefer `--json` for anything you script or fan out.
 
 ## Delegate mode contract ("Ambient codes everything")
 
