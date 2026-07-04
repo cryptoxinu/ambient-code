@@ -168,6 +168,55 @@ class TestFakeSSE(unittest.TestCase):
         self.assertEqual(body["choices"][0]["message"]["content"], "hi")
 
 
+class TestTransportClassification(unittest.TestCase):
+    """re-verify coverage: the stream_completion error-classification sweep."""
+
+    def test_connect_oserror_becomes_networkerror(self):
+        # #3: a bare OSError from urlopen (RemoteDisconnected/ConnectionReset
+        # out of getresponse(), before headers) must map to NetworkError, not
+        # surface raw as an [internal] error.
+        def boom(req, timeout=None):
+            raise ConnectionResetError("peer reset before headers")
+        with patched(amb.urllib.request, urlopen=boom):
+            with self.assertRaises(amb.NetworkError):
+                amb.stream_completion("https://x", "k", {"model": "m"}, 30)
+
+    def test_non_sse_body_read_reset_becomes_networkerror(self):
+        # #4: a reset mid-body on the non-SSE fallback must map to NetworkError.
+        class ResetOnRead:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                raise ConnectionResetError("reset mid-body")
+        with patched(amb.urllib.request,
+                     urlopen=lambda req, timeout=None: ResetOnRead()):
+            with self.assertRaises(amb.NetworkError):
+                amb.stream_completion("https://x", "k", {"model": "m"}, 30)
+
+    def test_non_sse_invalid_utf8_decodes_lossily(self):
+        # #4: invalid UTF-8 in the non-SSE body must decode with errors=replace
+        # (→ clean non-JSON report), never a raw UnicodeDecodeError.
+        class BadUtf8:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b"\xff\xfe not valid json"
+        with patched(amb.urllib.request,
+                     urlopen=lambda req, timeout=None: BadUtf8()):
+            status, body = amb.stream_completion("https://x", "k",
+                                                 {"model": "m"}, 30)
+        self.assertEqual(status, 200)
+        self.assertIn("error", body)  # reported cleanly, no crash
+
+
 def stream_seq(*results):
     """Fake stream_completion returning canned results per call; StallError
     instances raise. Returns (fake, payload-log)."""

@@ -387,20 +387,173 @@ class TestBuildMode(unittest.TestCase):
         self.assertEqual(env["files"][0]["action"], "skip-exists")
         self.assertEqual(env["status"], "partial")
 
+    def test_dry_run_makes_zero_calls_even_with_large_context(self):
+        # HIGH #1: --dry-run must spend + egress NOTHING, even when a big -f
+        # context would otherwise trigger a distillation map-reduce first.
+        root = tempfile.mkdtemp()
+        ctxf = os.path.join(root, "big.py")
+        with open(ctxf, "w") as fh:
+            fh.write("x = 1  # padding line\n" * 200_000)  # ~4MB → would distill
+
+        def boom(*a, **k):
+            self.fail("--dry-run must make ZERO API calls")
+
+        buf = io.StringIO()
+        with patched(amb, complete=boom, safe_catalog=lambda *a: CAT,
+                     run_map_reduce=boom, cost_gate=lambda *a, **k: None,
+                     warn_if_stdin_ignored=lambda *a: None):
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                amb.cmd_build(build_ns(root, dry_run=True, context=[ctxf]),
+                              "k", "https://x", {})
+        out = buf.getvalue()
+        self.assertIn("dry run", out.lower())
+        self.assertIn("distills it first", out)  # discloses the live-run cost
+
+    def test_force_backup_failure_refuses_to_destroy_original(self):
+        # HIGH #2: if the --force backup move fails, the original file must NOT
+        # be overwritten (silent data loss is disqualifying).
+        root = tempfile.mkdtemp()
+        keep = os.path.join(root, "keep.py")
+        with open(keep, "w") as fh:
+            fh.write("ORIGINAL\n")
+        plan = [{"path": "keep.py", "purpose": "p", "est_lines": 3}]
+        fake, _ = fake_build_complete(plan, [
+            {"files": [{"path": "keep.py", "content": "CLOBBER\n"}]}])
+        real_replace = os.replace
+
+        def replace_fail_on_backup(src, dst, *a, **k):
+            if ".ambient-build.bak" in str(dst):
+                raise OSError("backup target unwritable")
+            return real_replace(src, dst, *a, **k)
+
+        buf = io.StringIO()
+        with patched(amb, complete=fake, safe_catalog=lambda *a: CAT,
+                     cost_gate=lambda *a, **k: None,
+                     warn_if_stdin_ignored=lambda *a: None):
+            with patched(amb.os, replace=replace_fail_on_backup):
+                with contextlib.redirect_stdout(buf), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    amb.cmd_build(
+                        build_ns(root, apply=True, force=True, yes=True),
+                        "k", "https://x", {})
+        env = json.loads(buf.getvalue())
+        self.assertEqual(open(keep).read(), "ORIGINAL\n")  # preserved
+        self.assertEqual(env["files"][0]["action"], "write-failed")
+        self.assertTrue(any("backup failed" in f["reason"]
+                            for f in env["failed"]))
+        self.assertEqual(env["status"], "partial")
+
+    def test_generation_drops_files_not_in_the_plan(self):
+        # MED #6 (+ re-verify): an unplanned file the model slips in must be
+        # dropped + never written, but a fully-delivered plan must still be
+        # status ok — the drop is surfaced in `dropped`, NOT counted as a
+        # failure (so a chatty model can't turn a complete build into exit 2).
+        root = tempfile.mkdtemp()
+        plan = [{"path": "a.py", "purpose": "p", "est_lines": 3}]
+        fake, _ = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "A\n"},
+                       {"path": "sneaky.py", "content": "SNEAK\n"}]}])
+        env = self._run(build_ns(root, apply=True, yes=True), fake)
+        self.assertEqual([f["path"] for f in env["files"]], ["a.py"])
+        self.assertFalse(os.path.exists(os.path.join(root, "sneaky.py")))
+        self.assertIn("sneaky.py", env["dropped"])
+        self.assertEqual(env["failed"], [])
+        self.assertEqual(env["status"], "ok")
+
+    def test_completed_apply_rerun_is_idempotent_and_not_rebilled(self):
+        # MED #7 (+ re-verify): re-running a finished --apply build is an
+        # "unchanged" no-op (status ok / exit 0), AND it resumes from state
+        # without re-billing a single API call.
+        root = tempfile.mkdtemp()
+        plan = [{"path": "a.py", "purpose": "p", "est_lines": 3}]
+        fake1, _ = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "A\n"}]}])
+        env1 = self._run(build_ns(root, apply=True, yes=True), fake1)
+        self.assertEqual(env1["files"][0]["action"], "create")
+        fake2, s2 = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "A\n"}]}])
+        env2 = self._run(build_ns(root, apply=True, yes=True), fake2)
+        self.assertEqual(env2["files"][0]["action"], "unchanged")
+        self.assertEqual(env2["status"], "ok")
+        self.assertEqual(s2["calls"], 0)  # resumed from state — zero re-bill
+
+    def test_unchanged_context_still_resumes_without_rebilling(self):
+        # MED #5 converse: an UNCHANGED -f context must still resume (0 calls).
+        # An over-invalidating raw_context_sha would re-bill every -f resume.
+        root = tempfile.mkdtemp()
+        ctxf = os.path.join(root, "ctx.py")
+        with open(ctxf, "w") as fh:
+            fh.write("SHARED = 1\n")
+        plan = [{"path": "a.py", "purpose": "p", "est_lines": 3}]
+        fake1, s1 = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "A\n"}]}])
+        self._run(build_ns(root, context=[ctxf]), fake1)
+        self.assertEqual(s1["calls"], 2)
+        fake2, s2 = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "A\n"}]}])
+        self._run(build_ns(root, context=[ctxf]), fake2)  # same content
+        self.assertEqual(s2["calls"], 0)  # sha stable → resumed, no re-bill
+
+    def test_crlf_content_reruns_as_unchanged(self):
+        # re-verify: CRLF content must round-trip byte-faithfully so a completed
+        # build re-runs as "unchanged", not skip-exists/partial.
+        root = tempfile.mkdtemp()
+        plan = [{"path": "a.py", "purpose": "p", "est_lines": 3}]
+        fake1, _ = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "line1\r\nline2\r\n"}]}])
+        env1 = self._run(build_ns(root, apply=True, yes=True), fake1)
+        self.assertEqual(env1["files"][0]["action"], "create")
+        fake2, _ = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "line1\r\nline2\r\n"}]}])
+        env2 = self._run(build_ns(root, apply=True, yes=True), fake2)
+        self.assertEqual(env2["files"][0]["action"], "unchanged")
+        self.assertEqual(env2["status"], "ok")
+
+    def test_editing_context_invalidates_stale_resume(self):
+        # MED #5: task_sha must depend on -f CONTENT, so editing a context file
+        # forces a re-plan instead of serving a stale cached plan/files.
+        root = tempfile.mkdtemp()
+        ctxf = os.path.join(root, "ctx.py")
+        with open(ctxf, "w") as fh:
+            fh.write("VERSION = 1\n")
+        plan = [{"path": "a.py", "purpose": "p", "est_lines": 3}]
+        fake1, s1 = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "A1\n"}]}])
+        self._run(build_ns(root, context=[ctxf]), fake1)
+        self.assertEqual(s1["calls"], 2)         # plan + 1 generation
+        with open(ctxf, "w") as fh:
+            fh.write("VERSION = 2\n")            # edit the context
+        fake2, s2 = fake_build_complete(plan, [
+            {"files": [{"path": "a.py", "content": "A2\n"}]}])
+        self._run(build_ns(root, context=[ctxf]), fake2)
+        # Re-planned (2 calls). With the old path-only sha this would be 0
+        # (stale resume: state found, todo empty).
+        self.assertEqual(s2["calls"], 2)
+
     def test_headless_apply_needs_dir_and_yes(self):
+        # Misuse of headless --apply is a USAGE error: EX_USAGE (64) with the
+        # message on stderr, not a runtime failure (exit 1) with the message
+        # buried in the exception.
         fake, _ = fake_build_complete([], [])
         with patched(amb.sys, stdin=NotATTY()):
             with patched(amb, complete=fake, safe_catalog=lambda *a: CAT,
                          warn_if_stdin_ignored=lambda *a: None):
-                with self.assertRaises(SystemExit) as cm:
-                    amb.cmd_build(build_ns(None, dir=None, apply=True),
-                                  "k", "https://x", {})
-                self.assertIn("--dir", str(cm.exception))
-                with self.assertRaises(SystemExit) as cm2:
-                    amb.cmd_build(
-                        build_ns(tempfile.mkdtemp(), apply=True, yes=False),
-                        "k", "https://x", {})
-                self.assertIn("--yes", str(cm2.exception))
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as cm:
+                        amb.cmd_build(build_ns(None, dir=None, apply=True),
+                                      "k", "https://x", {})
+                self.assertEqual(cm.exception.code, amb.EXIT_USAGE)
+                self.assertIn("--dir", err.getvalue())
+                err2 = io.StringIO()
+                with contextlib.redirect_stderr(err2):
+                    with self.assertRaises(SystemExit) as cm2:
+                        amb.cmd_build(
+                            build_ns(tempfile.mkdtemp(), apply=True, yes=False),
+                            "k", "https://x", {})
+                self.assertEqual(cm2.exception.code, amb.EXIT_USAGE)
+                self.assertIn("--yes", err2.getvalue())
 
     def test_resume_skips_plan_and_done_files(self):
         root = tempfile.mkdtemp()

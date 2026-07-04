@@ -33,9 +33,6 @@ Production/marketplace release. Breaking: exit codes and --json envelopes change
 - **Packaging**: self-hosting marketplace.json, plugin.json polish, CI on
   main+master with version tri-sync + ruff gate, RELEASING.md, uninstall story.
 
-All notable changes to `ambient-code`. Format loosely follows
-[Keep a Changelog](https://keepachangelog.com/); this project uses semver.
-
 ## [1.2.0] — Kimi default + metering fix
 ### Changed
 - **Default model for chat/audit is now `moonshotai/kimi-k2.7-code`** (both

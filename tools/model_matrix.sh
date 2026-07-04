@@ -59,7 +59,10 @@ done < "$WORK/ids.txt"
 
 echo "--- READY models must do real WORK (planted-bug audit + codegen) ---"
 printf 'def divide(a, b):\n    return a / b\n' > "$WORK/bug.py"
-grep '^READY' "$WORK/ids.txt" | while read -r _ mid; do
+# Process substitution (NOT `grep | while`): keep the loop in the CURRENT shell
+# so pass()/fail() update the summary counters + exit code. A pipe would run the
+# body in a subshell, silently dropping every real-WORK result from the tally.
+while read -r _ mid; do
   run wk "$AMB" audit "$WORK/bug.py" -m "$mid" --json --yes --timeout 240
   if python3 -c "
 import json,sys
@@ -75,9 +78,7 @@ raw=open('$OUT').read(); d=json.JSONDecoder().raw_decode(raw[raw.index('{'):])[0
 assert d['status']=='ok' and 'def add' in d['content']
 " 2>/dev/null; then pass "codegen on $mid returns working envelope"
   else fail "codegen on $mid" "$(head -c 150 "$OUT")"; fi
-done
-# the while|pipe runs in a subshell — recount from the log for the summary
-MODEL_WORK_FAILS=$(grep -c "^  FAIL" "$LOG" 2>/dev/null || true)
+done < <(grep '^READY' "$WORK/ids.txt")
 
 # ---- 2. COMMANDS the battery doesn't reach live ----------------------------
 echo "--- use / mode / curate / cache / link / trust-url cycles (sandbox) ---"

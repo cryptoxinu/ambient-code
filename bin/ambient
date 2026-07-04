@@ -823,7 +823,8 @@ def api_request(api_url, api_key, path, payload=None, timeout=DEFAULT_TIMEOUT_S)
     for attempt in (1, 2):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status, json.loads(resp.read().decode("utf-8"))
+                return resp.status, json.loads(
+                    resp.read().decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as err:
             body = err.read().decode("utf-8", errors="replace")
             if err.code in (502, 503, 504) and attempt == 1 and retryable:
@@ -987,9 +988,12 @@ def _gate_amount(expected, args, conf, bound=None):
         )
     if (expected > 0.50 and sys.stdin.isatty()
             and not getattr(args, "yes", False)):
+        # Prompt on STDERR, not stdout: `ambient audit --json > out.json` from an
+        # interactive shell must not write "Proceed?" into the captured JSON.
+        sys.stderr.write(f"Proceed with an estimated ~${expected:.2f}? [y/N] ")
+        sys.stderr.flush()
         try:
-            ans = input(
-                f"Proceed with an estimated ~${expected:.2f}? [y/N] ").strip().lower()
+            ans = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
             ans = ""
         if ans not in ("y", "yes"):
@@ -1332,6 +1336,12 @@ SECRET_PATTERNS = [
     re.compile(r"(?:github_pat|gh[pousr])_[A-Za-z0-9_]{20,}"),
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),
+    # Unlabeled high-value creds the label pattern above misses. Both are
+    # tightly anchored (fixed prefix + separators) so they stay linear on long
+    # lines and carry a low false-positive rate.
+    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
+    re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"
+               r"\.[A-Za-z0-9_\-]{6,}"),    # JWT (header.payload.signature)
 ]
 # Kept OUT of SECRET_PATTERNS: this pattern backtracks quadratically on long
 # lowercase-alnum runs (measured 129s on a 400k-char line — an effective hang
@@ -1574,12 +1584,26 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
         raise NetworkError(f"cannot reach {url} ({err.reason})") from err
     except TimeoutError as err:
         raise NetworkError(f"{url} timed out connecting after {timeout}s") from err
+    except (OSError, http.client.IncompleteRead) as err:
+        # urlopen can also raise a bare OSError out of getresponse() — a
+        # RemoteDisconnected/ConnectionReset before the headers arrive, or (on
+        # py<=3.9) a socket.timeout that is NOT TimeoutError. Categorize it as
+        # a network fault instead of letting it surface as [internal].
+        raise NetworkError(f"cannot reach {url} ({err})") from err
     with resp:
         ctype = resp.headers.get("Content-Type", "")
         if "text/event-stream" not in ctype:
             # Endpoint answered non-streamed anyway — parse it as one body.
             try:
-                body = json.loads(resp.read().decode("utf-8"))
+                raw_body = resp.read()
+            except (OSError, http.client.IncompleteRead) as err:
+                # A reset/timeout mid-body is a transient network fault, not a
+                # crash — mirror api_request's hardening (Ambient self-audit #4).
+                raise NetworkError(
+                    f"connection dropped reading response from {url} "
+                    f"({err})") from err
+            try:
+                body = json.loads(raw_body.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
                 return resp.status, {"error": {"message": "non-JSON response"}}
             return resp.status, body
@@ -1850,7 +1874,9 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             if ready:
                 diagnosis += f" READY now: {', '.join(ready)}"
         err_obj = ChatError(category, diagnosis)
-        if body.get("_retry_after"):  # let the fan-out honor a server cooldown
+        # body may be a valid non-object JSON (str/list/number) on an error
+        # response — guard before .get so it never AttributeErrors to [internal].
+        if isinstance(body, dict) and body.get("_retry_after"):
             err_obj.retry_after = body["_retry_after"]
         raise err_obj
     if "content" in body and "choices" not in body:
@@ -2292,7 +2318,11 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                 # never cache it as a full result (Codex Wave D HIGH).
                 partial = (bool(body.get("salvaged_partial"))
                            or body.get("finish_reason") == "length")
-                if use_cache and not partial:
+                # If the network fell back to a DIFFERENT model, do not cache its
+                # answer under the requested model's key — a later run of the
+                # requested model would be served the wrong model's result.
+                served = body.get("_served_model", model)
+                if use_cache and not partial and served == model:
                     _cache_put(key, text)
                 return text, partial
             except ChatError as err:
@@ -3438,7 +3468,7 @@ def cmd_audit(args, api_key, api_url, conf):
         # — the old models[0]-priced single-chunk-count estimate was ~30x off
         # on mixed pairs (Codex W2/3 HIGH: a small-window second model runs
         # many more calls than the default model's chunking suggests).
-        parts, expected_sum = [], 0.0
+        parts, expected_sum, bound_sum = [], 0.0, 0.0
         for m in models:
             prof_m = model_profile(catalog, m)
             if total <= prof_m.single_shot_chars:
@@ -3447,13 +3477,17 @@ def cmd_audit(args, api_key, api_url, conf):
                 n_calls_m = max(1, len(pack_chunks(
                     labeled, min(prof_m.chunk_chars,
                                  prof_m.single_shot_chars))) * 2)
-            exp_m, _b, _a = estimate_cost(catalog, m, total, n_calls_m,
-                                          prof_m.output_budget)
+            exp_m, bnd_m, _a = estimate_cost(catalog, m, total, n_calls_m,
+                                             prof_m.output_budget)
             expected_sum += exp_m
+            bound_sum += bnd_m
             parts.append(f"{m.split('/')[-1]} ~${exp_m:.2f}")
         print(f"ambient: consensus estimated ~${expected_sum:.2f} "
               f"({' + '.join(parts)})", file=sys.stderr)
-        _gate_amount(expected_sum, args, conf)
+        # Pass the summed worst-case bound so the 3x-ceiling guard fires for
+        # consensus too (a multi-model fan-out at large --max-tokens can be far
+        # over the ceiling even when the 'expected' figure is under it).
+        _gate_amount(expected_sum, args, conf, bound=bound_sum)
         agg = []
         failed = []
         for m in models:
@@ -3911,11 +3945,11 @@ def cmd_build(args, api_key, api_url, conf):
     headless = not sys.stdin.isatty()
     if args.apply and headless:
         if not args.dir:
-            sys.exit("ambient: headless --apply requires an explicit --dir "
-                     "(refusing to write into an implicit working directory)")
+            usage_exit("headless --apply requires an explicit --dir "
+                       "(refusing to write into an implicit working directory)")
         if not args.yes:
-            sys.exit("ambient: headless --apply also requires --yes "
-                     "(explicit consent to write files)")
+            usage_exit("headless --apply also requires --yes "
+                       "(explicit consent to write files)")
     model = resolve_model(args, conf, "code")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
@@ -3926,44 +3960,42 @@ def cmd_build(args, api_key, api_url, conf):
     apply_output_budget(args, profile, single)
 
     context = ""
+    # Digest of the RAW (pre-distillation) context so that editing any -f file
+    # invalidates the resume cache (task_sha) instead of serving a stale plan.
+    raw_context_sha = ""
+    needs_distill = False
+    packed = None
     if args.context:
         chunks = read_files(args.context)
         refuse_if_secrets(chunks, args.allow_secrets)
         context = files_block(chunks)
-        if len(context) > single // 2:
-            print("ambient: context exceeds half this model's window — "
-                  "distilling it first", file=sys.stderr)
+        raw_context_sha = hashlib.sha256(context.encode()).hexdigest()
+        needs_distill = len(context) > single // 2
+        if needs_distill:
+            # Offline (no egress) — computed once so the dry-run estimate below
+            # and the live distillation both use the REAL packed-chunk count.
             packed = pack_chunks(chunks,
                                  max(MIN_REASONING_CHUNK,
                                      int(profile.chunk_chars
                                          / density_factor(context))))
-            cost_gate(catalog, model, len(context), len(packed) * 2 + 1,
-                      args, conf)
-            context, c_partial, c_reason = run_map_reduce(
-                api_key, api_url, model,
-                f"TASK: {task}\nFrom the given chunk of context files, extract "
-                "verbatim every part (signatures, types, conventions, key "
-                "logic) needed to build the task. Be selective.",
-                packed, args,
-                f"TASK: {task}\nMerge these context extracts into one concise "
-                "brief preserving verbatim signatures/types.",
-                single,
-            )
-            if c_partial and not getattr(args, "allow_partial", False):
-                sys.exit(f"ambient: context distillation was incomplete "
-                         f"({c_reason}) — re-run, narrow -f, or pass "
-                         "--allow-partial.")
-            context = context[:max(1000, single // 2)]
 
+    # DRY RUN spends nothing and egresses nothing — decide + return BEFORE the
+    # context-distillation map-reduce, which makes billed calls and sends file
+    # contents to the network. A flag that says "nothing sent" must send nothing.
     if getattr(args, "dry_run", False):
+        # A live run distills first: len(packed)*2+1 extra calls (offline count).
+        n_calls = max(2, args.max_files // 4 + 2) + (
+            len(packed) * 2 + 1 if needs_distill else 0)
         expected, bound, assumed = estimate_cost(
-            catalog, model, len(task) + len(context),
-            max(2, args.max_files // 4 + 2), args.max_tokens)
+            catalog, model, len(task) + len(context), n_calls, args.max_tokens)
         print("ambient build plan (dry run — nothing sent):")
         print(f"  model:         {model} "
               f"({'reasoning' if profile.is_reasoning else 'direct'})")
         print(f"  task:          {len(task):,} chars"
               + (f" + context {len(context):,} chars" if context else ""))
+        if needs_distill:
+            print("  note:          context exceeds half the window — a live "
+                  "run distills it first (extra billed calls)")
         print(f"  output budget: {args.max_tokens:,} tokens/call")
         print(f"  target dir:    {root} "
               f"({'writes ON (--apply)' if args.apply else 'manifest only'})")
@@ -3973,8 +4005,32 @@ def cmd_build(args, api_key, api_url, conf):
               + (" — assumed pricing" if assumed else ""))
         return
 
+    # LIVE path only: distill an oversized context now that dry-run is ruled out.
+    if needs_distill:
+        print("ambient: context exceeds half this model's window — "
+              "distilling it first", file=sys.stderr)
+        # `packed` was computed offline above (reused here — no recompute).
+        cost_gate(catalog, model, len(context), len(packed) * 2 + 1,
+                  args, conf)
+        context, c_partial, c_reason = run_map_reduce(
+            api_key, api_url, model,
+            f"TASK: {task}\nFrom the given chunk of context files, extract "
+            "verbatim every part (signatures, types, conventions, key "
+            "logic) needed to build the task. Be selective.",
+            packed, args,
+            f"TASK: {task}\nMerge these context extracts into one concise "
+            "brief preserving verbatim signatures/types.",
+            single,
+        )
+        if c_partial and not getattr(args, "allow_partial", False):
+            sys.exit(f"ambient: context distillation was incomplete "
+                     f"({c_reason}) — re-run, narrow -f, or pass "
+                     "--allow-partial.")
+        context = context[:max(1000, single // 2)]
+
     task_sha = hashlib.sha256(
-        f"{task}\0{model}\0{','.join(sorted(args.context or []))}".encode()
+        (f"{task}\0{model}\0{','.join(sorted(args.context or []))}"
+         f"\0{raw_context_sha}").encode()
     ).hexdigest()
     state = None if args.no_resume else _load_build_state(root, task_sha)
     if state:
@@ -3996,6 +4052,9 @@ def cmd_build(args, api_key, api_url, conf):
         user = f"TASK: {task}"
         if context:
             user += f"\n\nContext files:\n\n{context}"
+        # Gate the (cheap) planning call too so AMBIENT_MAX_SPEND is a true
+        # ceiling across BOTH phases, not just generation.
+        cost_gate(catalog, model, len(task) + len(context), 1, args, conf)
         obj = None
         for attempt in (1, 2):
             try:
@@ -4042,6 +4101,7 @@ def cmd_build(args, api_key, api_url, conf):
         _save_build_state(root, state)
 
     plan = state["plan"]
+    plan_paths = {p["path"] for p in plan}   # the reviewed plan is a CONTRACT
     advisory = state.get("advisory_steps") or []
     if getattr(args, "plan_only", False):
         if args.json:
@@ -4073,6 +4133,10 @@ def cmd_build(args, api_key, api_url, conf):
     done = dict(state["done"])   # path -> {"content":…, "sha256":…}
     failed = [f for f in (state.get("failed") or [])
               if str(f.get("reason", "")).startswith("unsafe path")]
+    # Paths the model returned that are NOT in the approved plan: never written,
+    # surfaced as a warning, but NOT counted as a failure — a chatty extra file
+    # must not turn a fully-delivered plan into a partial/exit-2 result.
+    dropped = []
     todo = [p for p in plan if p["path"] not in done]
     est = {p["path"]: max(200, _as_pos_int(p.get("est_lines"), 50) * 40)
            for p in todo}
@@ -4168,6 +4232,15 @@ def cmd_build(args, api_key, api_url, conf):
                     failed.append({"path": str(f.get("path")),
                                    "reason": f"unsafe path: {why}"})
                     continue
+                if rel not in plan_paths:
+                    # The reviewed plan is the contract: refuse any path the
+                    # user never approved (guards --plan-only review, the
+                    # --max-files cap, and prompt-injected extra files). Record
+                    # it as a DROP (surfaced) — not a failure — so delivering
+                    # every approved file still yields status ok.
+                    if rel not in dropped:
+                        dropped.append(rel)
+                    continue
                 if len(f["content"].encode()) > args.max_file_bytes:
                     failed.append({"path": rel,
                                    "reason": f"file exceeds --max-file-bytes "
@@ -4247,6 +4320,24 @@ def cmd_build(args, api_key, api_url, conf):
                     continue
                 action = "create"
                 if os.path.lexists(dest):
+                    # Idempotent re-run: an existing file whose content already
+                    # matches is an "unchanged" no-op, NOT a partial result —
+                    # so re-running a finished build exits 0, not 2.
+                    if os.path.isfile(dest) and not os.path.islink(dest):
+                        try:
+                            # newline="" so CRLF/CR content round-trips byte-
+                            # faithfully — universal-newline translation would
+                            # otherwise defeat the sha compare and a completed
+                            # CRLF build would never read back as "unchanged".
+                            with open(dest, encoding="utf-8",
+                                      errors="replace", newline="") as fh:
+                                cur = fh.read()
+                        except OSError:
+                            cur = None
+                        if cur is not None and hashlib.sha256(
+                                cur.encode()).hexdigest() == rec["sha256"]:
+                            actions[rel] = "unchanged"
+                            continue
                     if not args.force:
                         actions[rel] = "skip-exists"
                         partial = True
@@ -4256,8 +4347,17 @@ def cmd_build(args, api_key, api_url, conf):
                         bpath = os.path.join(bak_dir, *rel.split("/"))
                         os.makedirs(os.path.dirname(bpath), exist_ok=True)
                         os.replace(dest, bpath)
-                    except OSError:
-                        pass
+                    except OSError as err:
+                        # Backup failed — REFUSE to overwrite. Silently
+                        # destroying the user's original file (while reporting
+                        # "overwrite") is disqualifying for an official plugin.
+                        actions[rel] = "write-failed"
+                        failed.append(
+                            {"path": rel,
+                             "reason": f"backup failed, refused to overwrite "
+                                       f"without a backup: {err}"})
+                        partial = True
+                        continue
                 try:
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     # Re-validate IMMEDIATELY before writing: a parent dir
@@ -4270,7 +4370,11 @@ def cmd_build(args, api_key, api_url, conf):
                         raise OSError("parent escaped the target directory")
                     fd, tmp = tempfile.mkstemp(
                         dir=os.path.dirname(dest), prefix=".ambient-")
-                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    # newline="" writes the model's content byte-faithfully (no
+                    # \n->\r\n translation), so the manifest sha matches disk on
+                    # every platform and re-runs read back as "unchanged".
+                    with os.fdopen(fd, "w", encoding="utf-8",
+                                   newline="") as fh:
                         fh.write(rec["content"])
                     if os.path.islink(dest):
                         raise OSError("destination became a symlink")
@@ -4294,11 +4398,20 @@ def cmd_build(args, api_key, api_url, conf):
     if failed:
         reason = f"{len(failed)} file(s) failed: " + "; ".join(
             f"{f['path']} ({f['reason']})" for f in failed[:10])
+    elif partial:
+        # partial with no hard failures = files skipped because they already
+        # exist and --force was not given. A partial must never be reason-less.
+        skipped = [r for r, a in actions.items() if a == "skip-exists"]
+        if skipped:
+            reason = (f"{len(skipped)} file(s) already exist and were left "
+                      "unchanged (pass --force to overwrite): "
+                      + ", ".join(skipped[:10]))
     if args.json:
         emit_json("build", model=model, api_key=api_key,
                   partial=partial, reason=reason,
                   allow_partial=getattr(args, "allow_partial", False),
                   extra={"root": root, "files": files_out, "failed": failed,
+                         "dropped": dropped,
                          "advisory_steps": advisory,
                          "notes": state.get("notes", ""),
                          "written": written, "total_bytes": total_bytes})
@@ -4310,6 +4423,8 @@ def cmd_build(args, api_key, api_url, conf):
         print(f"  {f['action']:>11}  {f['path']:44} {f['bytes']:>8,} bytes")
     for f in failed:
         print(redact(f"       FAILED  {f['path']:44} {f['reason']}", api_key))
+    for d in dropped:
+        print(f"      DROPPED  {d:44} not in the approved plan (not written)")
     if state.get("notes"):
         print(f"\n{redact(state['notes'], api_key)}")
     if advisory:

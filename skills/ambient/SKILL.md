@@ -130,7 +130,8 @@ for the tuned default.
 
 When ANY ambient command fails, do NOT guess and never tell the user "Ambient is
 down" by default. Errors are prefixed `ambient [category]:` — key / funds / model /
-rate / budget / context / service / network / setup. Relay that diagnosis. Exit 3 =
+rate / budget / context / service / network / stall / empty / setup. Relay that
+diagnosis. Exit 3 =
 not configured (run first-run setup). Exit 2 = partial coverage — report the
 findings AND the gap. If the category is unclear, run `ambient doctor` and relay its
 DIAGNOSIS line: it distinguishes a revoked key from an out-of-funds account from a
