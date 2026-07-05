@@ -119,6 +119,9 @@ EXPECTED_DEFAULTS = {
     "_auto_budget": False,          # getattr(..., False)
     "_cache_salt": None,            # getattr(..., None)
     "escalation_ceiling": 65536,    # getattr(..., MAX_AUTO_BUDGET_TOKENS)
+    "gate_fallback": True,          # getattr(..., True) — single-call lanes
+                                    # re-gate a live --fallback swap; fan-out
+                                    # workers set False (batch reserved it)
 }
 
 

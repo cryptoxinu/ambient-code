@@ -1628,12 +1628,22 @@ def _fleet_reserve(expected, ceiling, args, conf):
         _fleet_warn(f"{err.__class__.__name__}: {err}")
 
 
-def cost_gate(catalog, model, input_chars, n_calls, args, conf):
+def cost_gate(catalog, model, input_chars, n_calls, args, conf,
+              per_call_chars=None, per_call_tokens=None):
     """Show a cost estimate before a large spend; enforce a ceiling; confirm on
     a TTY. Makes runaway spend impossible to trigger accidentally — including
-    when pricing is unknown (assumed worst-case pricing, never fail-open)."""
-    expected, bound, assumed = estimate_cost(
-        catalog, model, input_chars, n_calls, args.max_tokens)
+    when pricing is unknown (assumed worst-case pricing, never fail-open).
+    FALLBACK-AWARE (capstone re-audit HIGH, tightened by the final re-audit):
+    with --fallback live the batch reserves the PER-CALL SUM-OF-MAXIMA
+    Σ_i max(requested_i, fallback-candidate_i), so ANY mixture of workers
+    succeeding on the requested model or swapping to a pricier alt is fully
+    reserved UP FRONT — parity when fallback is off or no candidate is
+    pricier. Lanes with UNEVEN per-call inputs (map's items) pass
+    `per_call_chars`/`per_call_tokens` so each call's candidate and budget
+    come from its OWN real size (see estimate_cost_fb)."""
+    expected, bound, assumed = estimate_cost_fb(
+        catalog, model, input_chars, n_calls, args.max_tokens, args, conf,
+        per_call_chars=per_call_chars, per_call_tokens=per_call_tokens)
     note = " — assumed worst-case pricing (model unpriced)" if assumed else ""
     in_tok = int(input_chars / _cost_cpt(model))
     print(
@@ -1712,6 +1722,31 @@ def cost_gate_soft(catalog, model, input_chars, n_calls, args, conf):
     return True
 
 
+def _single_call_gate(catalog, model, input_chars, args, conf):
+    """Capstone H1: cost-gate + FLEET-RESERVE one direct complete() call.
+    The single-call lanes (normal ask, code's final generation, single-shot
+    audit) used to spend without any reservation, so a fan-out fleet could
+    sit at the AMBIENT_MAX_SPEND ceiling while single calls kept slipping
+    through — the ceiling was not whole-system. Prices the call from the
+    RESOLVED output budget (every caller runs apply_output_budget at the
+    cmd_* boundary first; an unresolved spec is resolved here through the
+    same _resolve_output_budget core) plus the ACTUAL input chars, and
+    routes through _gate_amount — inheriting the ceiling, the 3x worst-case
+    bound, the Phase-4 aggregate fleet reservation, the TTY confirm, and
+    the --allow-cost bypass, exactly like the sibling fan-out gates.
+    PARITY: silent on the allow path — no estimate line, no prompt on a
+    non-TTY — so a normal small ask/code/audit call behaves exactly as
+    before; it is just fleet-accounted now."""
+    spec = RequestSpec.from_args(args)
+    max_tokens = spec.max_tokens
+    if max_tokens is None:  # defensive: caller skipped apply_output_budget
+        max_tokens = spec.with_output_budget(
+            model_profile(catalog, model), input_chars).max_tokens
+    expected, bound, _assumed = estimate_cost(
+        catalog, model, input_chars, 1, max_tokens)
+    _gate_amount(expected, spec, conf, bound=bound)
+
+
 def _lane_pricing(catalog, model):
     """(pricing tuple, assumed?) — the worst-case substitution estimate_cost
     applies, exposed for the per-lane split estimate."""
@@ -1719,6 +1754,220 @@ def _lane_pricing(catalog, model):
     if price is None:
         return (ASSUMED_MAX_INPUT_PRICE, ASSUMED_MAX_OUTPUT_PRICE), True
     return price, False
+
+
+def _fallback_enabled(spec, conf):
+    """Is the opt-in fallback lane live for this request? ONE derivation
+    (--fallback flag OR AMBIENT_FALLBACK env/config, with the SACRED
+    _no_fallback override) shared by complete()'s live swap and the
+    fallback-aware up-front batch gates — the two can never disagree about
+    whether a swap is possible."""
+    if spec._no_fallback:
+        return False  # SACRED: the model IS the choice — no swap, ever
+    raw = (os.environ.get("AMBIENT_FALLBACK")
+           or (conf or {}).get("AMBIENT_FALLBACK", ""))
+    return bool(spec.fallback or str(raw).lower() in ("1", "on", "true"))
+
+
+def _batch_fallback_alt(catalog, model, args, conf, per_call_input_chars):
+    """The ONE deterministic fallback candidate an UP-FRONT batch gate must
+    ALSO price (capstone re-audit HIGH). Fan-out workers do not re-gate a
+    live --fallback swap per call (see RequestSpec.gate_fallback) — instead
+    the batch reserves the swap exposure up front. This returns the same
+    fit-then-cheapest candidate pick_fallback_model would hand a live worker
+    (sized to the per-call input; ONE hop — complete()'s fallback_retried
+    flag means a call only ever swaps once), or None when fallback is off /
+    SACRED-disabled / nothing fits. The candidate-hidden stderr note is
+    suppressed: at gate time nothing has failed yet — a live swap still
+    prints it."""
+    spec = RequestSpec.from_args(args)
+    if not _fallback_enabled(spec, conf):
+        return None
+    min_ctx = int(per_call_input_chars / _cost_cpt(model))
+    with contextlib.redirect_stderr(io.StringIO()):
+        return pick_fallback_model(catalog, model, min_context=min_ctx,
+                                   conf=conf or {})
+
+
+def _fb_call_cost(catalog, model, chars, max_tokens, in_factor,
+                  cpt_model=None):
+    """(expected, bound, assumed) for ONE call of a batch — the per-call
+    term of the fallback-aware SUM-OF-MAXIMA reserve. `in_factor` is the
+    lane's share of the input billing (1.3 = estimate_cost's single-model
+    batches; 1.0 map / 0.3 synthesis re-read / 0.0 output-only extra call =
+    estimate_cost_mr's lane split), so summing the per-call terms over a
+    lane reproduces the base estimate's own decomposition exactly.
+    `cpt_model` (the MAP model in the synthesis lane) keeps the
+    chars→tokens basis identical to that decomposition."""
+    price = model_pricing(catalog, model)
+    assumed = price is None
+    if assumed:
+        price = (ASSUMED_MAX_INPUT_PRICE, ASSUMED_MAX_OUTPUT_PRICE)
+    in_cost = (chars / _cost_cpt(cpt_model or model)) * in_factor * price[0]
+    bound = (in_cost + max_tokens * price[1]) / 1e6
+    expected_out = min(max_tokens, ANSWER_TOKENS_RESERVE)
+    expected = (in_cost + expected_out * price[1]) / 1e6
+    return expected, bound, assumed
+
+
+def _fb_alt_budget(catalog, alt, requested_max_tokens, auto_budget):
+    """The output budget a live worker RESENDS after swapping to `alt` —
+    the exact alt_tokens re-derivation complete() performs (final re-audit
+    H1): auto-budget → the ALT's own profile budget (which can be far
+    LARGER than a small-cap requested model's resolved max_tokens);
+    explicit --max-tokens → that value clamped to the alt's real output
+    cap. Pricing the alt at the requested model's budget under-reserved
+    every auto-budget swap onto a bigger-budget candidate."""
+    profile = model_profile(catalog, alt)
+    if auto_budget:
+        return profile.output_budget
+    return min(requested_max_tokens, profile.max_output_length)
+
+
+def estimate_cost_fb(catalog, model, input_chars, n_calls, max_tokens,
+                     args, conf, per_call_chars=None, per_call_tokens=None):
+    """estimate_cost made FALLBACK-AWARE for the up-front batch gates and
+    plans (capstone re-audit HIGH, tightened by the final re-audit): with
+    --fallback/AMBIENT_FALLBACK live, ANY SUBSET of the batch may legally
+    be re-served by a fallback candidate, so the reserve is the PER-CALL
+    SUM-OF-MAXIMA  Σ_i max(cost_requested(call_i), cost_alt(call_i)) —
+    computed as base + Σ_i max(0, alt_i − requested_i), which dominates
+    EVERY requested/fallback mixture (the old max(sum_requested, sum_alt)
+    did not: uneven inputs + crossed price vectors let a mixture exceed
+    both totals). Per call, the candidate is picked from THAT call's own
+    input size (`per_call_chars` — map's uneven items would otherwise hide
+    a big item's pricier large-context candidate behind the batch average)
+    and priced at the ALT's OWN resolved output budget exactly as live
+    complete() re-derives it (`per_call_tokens` carries per-item budgets;
+    see _fb_alt_budget). PARITY: fallback off / SACRED _no_fallback / no
+    pricier candidate → the figures are byte-identical to estimate_cost.
+    Never under-counts spend."""
+    exp, bnd, asm = estimate_cost(catalog, model, input_chars, n_calls,
+                                  max_tokens)
+    spec = RequestSpec.from_args(args)
+    if n_calls < 1 or not _fallback_enabled(spec, conf):
+        return exp, bnd, asm
+    if per_call_chars is None:  # uneven lanes may thread these on args
+        per_call_chars = getattr(args, "_fb_per_call_chars", None)
+    if per_call_tokens is None:
+        per_call_tokens = getattr(args, "_fb_per_call_tokens", None)
+    uniform = per_call_chars is None and per_call_tokens is None
+    sizes = (list(per_call_chars) if per_call_chars is not None
+             else [input_chars / n_calls] * n_calls)
+    budgets = (list(per_call_tokens) if per_call_tokens is not None
+               else [max_tokens] * n_calls)
+    d_exp = d_bnd = 0.0
+    alt_assumed = False
+    memo = {}  # (chars, budget) → per-call uplift; uniform lanes hit once
+    for chars_i, mt_i in zip(sizes, budgets):
+        cell = memo.get((chars_i, mt_i))
+        if cell is None:
+            alt = _batch_fallback_alt(catalog, model, args, conf, chars_i)
+            if alt is None:
+                cell = (0.0, 0.0, False, None, None)
+            else:
+                alt_mt = _fb_alt_budget(catalog, alt, mt_i,
+                                        spec._auto_budget)
+                r_exp, r_bnd, _r_asm = _fb_call_cost(
+                    catalog, model, chars_i, mt_i, 1.3)
+                a_exp, a_bnd, a_asm = _fb_call_cost(
+                    catalog, alt, chars_i, alt_mt, 1.3)
+                cell = (max(0.0, a_exp - r_exp), max(0.0, a_bnd - r_bnd),
+                        a_asm, alt, alt_mt)
+            memo[(chars_i, mt_i)] = cell
+        de, db, a_asm, _alt, _alt_mt = cell
+        if de > 0.0 or db > 0.0:
+            d_exp += de
+            d_bnd += db
+            alt_assumed = alt_assumed or a_asm
+    if d_exp <= 0.0 and d_bnd <= 0.0:
+        return exp, bnd, asm  # no pricier candidate — byte-identical parity
+    exp_fb, bnd_fb = exp + d_exp, bnd + d_bnd
+    if uniform:
+        # A uniform batch's sum-of-maxima equals the all-alt total
+        # analytically when the candidate is pricier on every component —
+        # floor at that exact figure so float association can never leave
+        # the reserve an ulp under it (the fleet record pins exactness).
+        _de, _db, _asm2, alt, alt_mt = memo[(sizes[0], budgets[0])]
+        if alt is not None:
+            f_exp, f_bnd, _f_asm = estimate_cost(catalog, alt, input_chars,
+                                                 n_calls, alt_mt)
+            exp_fb = max(exp_fb, f_exp)
+            bnd_fb = max(bnd_fb, f_bnd)
+    return exp_fb, bnd_fb, asm or alt_assumed
+
+
+def estimate_cost_mr_fb(catalog, model, reduce_model, input_chars, n_chunks,
+                        max_tokens, args, conf, extra_calls=0,
+                        synthesis=True):
+    """estimate_cost_mr made FALLBACK-AWARE (same SUM-OF-MAXIMA contract as
+    estimate_cost_fb): each LANE's calls may independently swap to that
+    lane's own fallback candidate, so each lane adds its per-call
+    max(0, alt − requested) uplift — map chunks at the full 1.0× per-call
+    input, extra calls output-only (the base bills them no input), the
+    synthesis re-read at its 0.3× share — and the alt is priced at ITS OWN
+    resolved output budget (_fb_alt_budget). Dominates every mixture of
+    requested-success and fallback across both lanes; byte-identical to
+    estimate_cost_mr when fallback is off / SACRED / no candidate is
+    pricier."""
+    rmodel = reduce_model or model
+    base = estimate_cost_mr(catalog, model, rmodel, input_chars, n_chunks,
+                            max_tokens, extra_calls=extra_calls,
+                            synthesis=synthesis)
+    spec = RequestSpec.from_args(args)
+    if not _fallback_enabled(spec, conf):
+        return base
+    per_call = input_chars / max(1, n_chunks)
+
+    def lane_uplift(lane_model, alt, n_lane_calls, in_factor):
+        """(d_exp, d_bnd, assumed) this lane's calls add — zeros when the
+        candidate is missing or cheaper-or-equal (parity)."""
+        if alt is None or n_lane_calls < 1:
+            return 0.0, 0.0, False
+        alt_mt = _fb_alt_budget(catalog, alt, max_tokens, spec._auto_budget)
+        r_exp, r_bnd, _r_asm = _fb_call_cost(
+            catalog, lane_model, per_call, max_tokens, in_factor,
+            cpt_model=model)  # base tokenizes ALL input at the map model
+        a_exp, a_bnd, a_asm = _fb_call_cost(catalog, alt, per_call, alt_mt,
+                                            in_factor)
+        de = max(0.0, a_exp - r_exp)
+        db = max(0.0, a_bnd - r_bnd)
+        if de <= 0.0 and db <= 0.0:
+            return 0.0, 0.0, False
+        return de * n_lane_calls, db * n_lane_calls, a_asm
+
+    alt_m = _batch_fallback_alt(catalog, model, args, conf, per_call)
+    alt_r = None
+    lanes = [lane_uplift(model, alt_m, n_chunks, 1.0),
+             lane_uplift(model, alt_m, extra_calls, 0.0)]
+    if synthesis:
+        alt_r = (alt_m if rmodel == model
+                 else _batch_fallback_alt(catalog, rmodel, args, conf,
+                                          per_call))
+        if alt_r == rmodel:
+            alt_r = None
+        lanes.append(lane_uplift(rmodel, alt_r, n_chunks, 0.3))
+    d_exp = sum(lane[0] for lane in lanes)
+    d_bnd = sum(lane[1] for lane in lanes)
+    if d_exp <= 0.0 and d_bnd <= 0.0:
+        return base  # no pricier candidate — byte-identical parity
+    exp_fb, bnd_fb = base[0] + d_exp, base[1] + d_bnd
+    # Floor at the exact all-alt lane-combination totals (the uniform
+    # analogue of estimate_cost_fb's floor): the uplift sum equals the
+    # worst combination analytically — never let float association leave
+    # the reserve an ulp under it.
+    map_models = [model] + ([alt_m] if alt_m else [])
+    red_models = [rmodel] + ([alt_r] if synthesis and alt_r else [])
+    for m in map_models:
+        for r in red_models:
+            if (m, r) == (model, rmodel):
+                continue
+            c = estimate_cost_mr(catalog, m, r, input_chars, n_chunks,
+                                 max_tokens, extra_calls=extra_calls,
+                                 synthesis=synthesis)
+            exp_fb = max(exp_fb, c[0])
+            bnd_fb = max(bnd_fb, c[1])
+    return exp_fb, bnd_fb, base[2] or any(lane[2] for lane in lanes)
 
 
 def estimate_cost_mr(catalog, model, reduce_model, input_chars, n_chunks,
@@ -1774,9 +2023,10 @@ def cost_gate_mr(catalog, model, reduce_model, input_chars, n_chunks, args,
         cost_gate(catalog, model, input_chars,
                   n_chunks * 2 + extra_calls, args, conf)
         return
-    expected, bound, assumed = estimate_cost_mr(
+    expected, bound, assumed = estimate_cost_mr_fb(
         catalog, model, reduce_model, input_chars, n_chunks,
-        args.max_tokens, extra_calls=extra_calls, synthesis=synthesis)
+        args.max_tokens, args, conf, extra_calls=extra_calls,
+        synthesis=synthesis)
     note = (" — assumed worst-case pricing (model unpriced)"
             if assumed else "")
     detail = (f"map={model}, deterministic merge — no synthesis call"
@@ -2935,6 +3185,15 @@ class RequestSpec:
     _auto_budget: bool = False           # getattr(..., False)
     _cache_salt: object = None           # getattr(..., None) — best-of lanes
     escalation_ceiling: int = MAX_AUTO_BUDGET_TOKENS  # getattr default
+    # Capstone re-audit: True (default) = SINGLE-CALL lane — complete()
+    # re-gates a live --fallback swap per call (main thread; sys.exit on a
+    # refusal is correct). Fan-out workers (map/consensus/best-of) set False:
+    # their batch gate already reserved the swap exposure UP FRONT
+    # (fallback-aware estimates), and a per-worker gate cannot compose with
+    # concurrent fan-out — the same-process fleet reservation REFRESHES to
+    # max(batch, one alt) instead of adding (N alt swaps under-reserved
+    # N-fold), and a refusal would SystemExit inside a pool thread.
+    gate_fallback: bool = True           # getattr(..., True)
 
     @classmethod
     def from_args(cls, args):
@@ -3112,13 +3371,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 # when --fallback/AMBIENT_FALLBACK is on. The model IS the
                 # choice; it fails as itself instead of silently becoming
                 # another model.
-                fallback_on = not spec._no_fallback and (
-                    spec.fallback or (
-                        (os.environ.get("AMBIENT_FALLBACK")
-                         or fb_conf.get("AMBIENT_FALLBACK", "")).lower()
-                        in ("1", "on", "true")
-                    )
-                )
+                fallback_on = _fallback_enabled(spec, fb_conf)
                 if fallback_on and not state.fallback_retried:
                     # The chunk was already sized for `model`; only fall back
                     # to a model whose context can hold the input we're about
@@ -3166,6 +3419,32 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                                 alt_rf = {"type": "json_object"}
                             else:
                                 alt_rf = None
+                        # Capstone H2: the up-front gate priced the
+                        # REQUESTED model — an opt-in fallback to a pricier
+                        # alt would otherwise spend UNRESERVED dollars.
+                        # Re-price this attempt at the ALT model (actual
+                        # input chars, the alt's resolved budget) and route
+                        # it through the same ceiling + fleet reservation
+                        # BEFORE any swap; --allow-cost bypasses like every
+                        # spend gate. SACRED is untouched: _no_fallback
+                        # blocked the swap long before this, and --fallback
+                        # is the user's own opt-in.
+                        # Capstone re-audit: SINGLE-CALL lanes only
+                        # (gate_fallback). Fan-out workers reserved the swap
+                        # exposure UP FRONT via the fallback-aware batch
+                        # gate — re-gating here would max-refresh (not add
+                        # to) the same-process fleet reservation, leaving N
+                        # concurrent alt swaps under-reserved, and a refusal
+                        # would SystemExit inside a pool thread.
+                        if not spec.allow_cost and spec.gate_fallback:
+                            fb_expected, fb_bound, _fb_assumed = \
+                                estimate_cost(
+                                    catalog, alt,
+                                    sum(len(m.get("content", ""))
+                                        for m in messages),
+                                    1, alt_tokens)
+                            _gate_amount(fb_expected, spec, fb_conf,
+                                         bound=fb_bound)
                         state = dataclasses.replace(
                             state, model=alt,
                             spec=dataclasses.replace(
@@ -3846,7 +4125,16 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     budgets sized for the map model."""
     session = _session_or(session, api_key, api_url)
     api_key, api_url = session.api_key, session.api_url
-    spec = RequestSpec.from_args(args)
+    # FAN-OUT lane: the caller's batch gate already reserved any --fallback
+    # swap exposure up front (fallback-aware estimates) — per-worker
+    # re-gating is off (see RequestSpec.gate_fallback). Applies to the
+    # synthesis spec too (derived below), which the same batch gate priced.
+    spec = dataclasses.replace(RequestSpec.from_args(args),
+                               gate_fallback=False)
+    if cancel_event is None:
+        # Local fail-fast lane (capstone re-audit MED): a worker-side fatal
+        # must be able to stop siblings even when no caller event exists.
+        cancel_event = threading.Event()
     total = sum(map(len, chunks))
     width = min(_resolve_parallel(spec), len(chunks))
     synth_model = reduce_model or model
@@ -3956,6 +4244,17 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                 missed_ranges.extend(cov)
                 where = f" [{'; '.join(cov)}]" if cov else ""
                 errors.append(f"chunk {i + 1}{where}: {type(err).__name__}: {err}")
+            except BaseException:
+                # Capstone re-audit MED: a worker-side FATAL (SystemExit &
+                # co) fails the whole fan-out FAST — trip the cancel event
+                # and drop the queue so no sibling starts billing while the
+                # unwind propagates (in-flight calls drain in finally).
+                cancel_event.set()
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)  # py3.9+
+                except TypeError:
+                    pool.shutdown(wait=False)                       # py3.8
+                raise
     except KeyboardInterrupt:
         # Cancel QUEUED chunks so Ctrl-C feels instant instead of waiting on the
         # whole backlog (D4). in-flight calls still drain in finally.
@@ -4695,6 +4994,11 @@ def cmd_ask(args, api_key, api_url, conf):
         sys.stdout.flush()
         streamed_parts.append(piece)
 
+    # Capstone H1: the single-shot ask is real spend — gate + fleet-reserve
+    # it up front like every fan-out lane (silent pass when under ceiling).
+    _single_call_gate(catalog, model,
+                      sum(len(m.get("content", "")) for m in messages),
+                      args, conf)
     try:
         content, usage, body = complete(
             api_key, api_url, model, messages, args,
@@ -4874,6 +5178,10 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
         width = min(_resolve_parallel(spec), n)
         gate = threading.Semaphore(width)
         cancel_event = threading.Event()
+        # FAN-OUT workers: the batch gate above already reserved any
+        # --fallback swap exposure (fallback-aware estimate) — no per-worker
+        # fallback re-gate (see RequestSpec.gate_fallback).
+        wspec = dataclasses.replace(spec, gate_fallback=False)
 
         def work(i, key):
             if cancel_event.is_set():
@@ -4888,7 +5196,7 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
                     # rides its own replaced copy, so sibling samples can
                     # never see each other's budget (no per-sample clone).
                     out, usage, body = complete(
-                        api_key, api_url, model, messages, spec,
+                        api_key, api_url, model, messages, wspec,
                         session=session)
                 except NetworkError:
                     cancel_event.set()  # fatal for every sibling — stop billing
@@ -4930,6 +5238,12 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
                     errors.append((i, getattr(err, "category", "network"),
                                    getattr(err, "diagnosis", None) or str(err)))
                     continue
+                except BaseException:
+                    # Capstone re-audit MED: any worker-side fatal (incl.
+                    # SystemExit) fails the batch FAST — no sibling may keep
+                    # billing while the unwind propagates.
+                    _abort()
+                    raise
                 if served != model:
                     # H4 disclosure: fallback stayed available on this lane
                     # (a lone best-of model is not an explicit SET), but a
@@ -5159,6 +5473,11 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
                     raise  # every sibling is doomed identically
                 failures[i] = err
             except NetworkError:
+                _abort()
+                raise
+            except BaseException:
+                # Capstone re-audit MED: worker-side fatal → fail-fast, no
+                # sibling may keep billing during the unwind.
                 _abort()
                 raise
     except KeyboardInterrupt:
@@ -5422,6 +5741,10 @@ def cmd_map(args, api_key, api_url, conf):
         # calls and must never be re-priced or refused by AMBIENT_MAX_SPEND.
         for item_id, text, eff in runnable:
             item_args = argparse.Namespace(**vars(args))
+            # FAN-OUT worker: the batch gate below reserves any --fallback
+            # swap exposure up front (fallback-aware estimate) — no
+            # per-worker fallback re-gate (see RequestSpec.gate_fallback).
+            item_args.gate_fallback = False
             if not explicit_budget:
                 apply_output_budget(item_args, profile, eff)
             key = _cache_key(model, prompt, text, item_args.max_tokens,
@@ -5449,6 +5772,17 @@ def cmd_map(args, api_key, api_url, conf):
         budgets = [ia.max_tokens for _, _, _, ia in to_run]
         gate_args = argparse.Namespace(**vars(args))
         gate_args.max_tokens = -(-sum(budgets) // len(budgets))  # ceil mean
+        # The fallback-aware reserve needs each ITEM's real size + budget:
+        # items are arbitrary sizes, and a big item live-switches to a
+        # large-context (possibly pricier) candidate that an average-input
+        # pick would miss (final re-audit H2). Whether the batch is
+        # auto-budgeted also decides the ALT's own resend budget (H1) —
+        # thread the per-item data on the gate's private args copy (the
+        # gate signature stays stable for its many callers).
+        gate_args._auto_budget = not explicit_budget
+        gate_args._fb_per_call_chars = [len(prompt) + len(t)
+                                        for _, t, _, _ in to_run]
+        gate_args._fb_per_call_tokens = budgets
         cost_gate(catalog, model, total_chars, len(to_run), gate_args, conf)
     for item_id, category, diagnosis in pre_errors:
         _emit_map_result(args, api_key, item_id,
@@ -5553,6 +5887,11 @@ def cmd_map(args, api_key, api_url, conf):
                 _emit_map_result(args, api_key, item_id, category="internal",
                                  diagnosis=f"{type(err).__name__}: {err}")
                 continue
+            except BaseException:
+                # Capstone re-audit MED: a worker-side fatal (SystemExit &
+                # co) cancels the whole batch — siblings must stop billing.
+                _abort()
+                raise
             if partial:
                 fails += 1
             else:
@@ -6504,11 +6843,17 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
 
 
 def _audit_split_estimate(catalog, model, reduce_model, labeled, total,
-                          eff_total, profile, dens, max_tokens, structured):
+                          eff_total, profile, dens, max_tokens, structured,
+                          fb_args=None, fb_conf=None):
     """(n_chunks, expected, bound, assumed) — the ONE sizing/pricing helper
     shared by --dry-run and the --repo upfront plan, mirroring exactly what
     the live path will gate: single-shot when it fits, else the same
-    pack_chunks split with the structured (deterministic-merge) discount."""
+    pack_chunks split with the structured (deterministic-merge) discount.
+    `fb_args`/`fb_conf` (capstone re-audit HIGH): the chunked lane's live
+    gate (cost_gate_mr) is fallback-aware, so the plan prices the same
+    max(requested, candidate) figure — plan == gate by construction. The
+    single-shot lane keeps the requested-only price on purpose: it gates
+    per call in complete() (main thread), exactly like the live path."""
     single, chunk = profile.single_shot_chars, profile.chunk_chars
     if eff_total <= single:
         expected, bound, assumed = estimate_cost(
@@ -6520,9 +6865,15 @@ def _audit_split_estimate(catalog, model, reduce_model, labeled, total,
     # real billed input (map size x chunk count) the estimate must include
     # or the printed plan under-states the actual spend (Codex M1).
     map_chars = len(build_code_map(labeled, budget=code_map_budget(single)))
-    expected, bound, assumed = estimate_cost_mr(
-        catalog, model, reduce_model, total + map_chars * n_chunks,
-        n_chunks, max_tokens, synthesis=not structured)
+    if fb_args is not None:
+        expected, bound, assumed = estimate_cost_mr_fb(
+            catalog, model, reduce_model, total + map_chars * n_chunks,
+            n_chunks, max_tokens, fb_args, fb_conf,
+            synthesis=not structured)
+    else:
+        expected, bound, assumed = estimate_cost_mr(
+            catalog, model, reduce_model, total + map_chars * n_chunks,
+            n_chunks, max_tokens, synthesis=not structured)
     return n_chunks, expected, bound, assumed
 
 
@@ -6555,7 +6906,8 @@ def _parse_consensus_models(args, catalog, api_key):
     return models
 
 
-def _consensus_estimate(catalog, models, labeled, total):
+def _consensus_estimate(catalog, models, labeled, total,
+                        explicit_max_tokens=None, fb_args=None, fb_conf=None):
     """(expected_sum, bound_sum, parts, per_model_chunks, assumed_any) — the
     ONE consensus pricing, shared by the --repo upfront plan and the
     consensus cost gate so the printed plan and the gated amount agree BY
@@ -6566,7 +6918,18 @@ def _consensus_estimate(catalog, models, labeled, total):
     consensus audits reduce with the deterministic findings_reducer (NO
     synthesis LLM call), so a chunked model costs n_chunks calls, not
     n_chunks*2, which over-priced every chunked consensus batch 2x into
-    spurious spend/fleet refusals (Codex M2)."""
+    spurious spend/fleet refusals (Codex M2). Capstone H3: each model is
+    priced at the SAME max_tokens its live worker resolves —
+    `explicit_max_tokens` is the user's --max-tokens (as the worker specs
+    carry it; None = auto) run through the same with_output_budget core
+    _audit_sample_prep uses, so plan == gate == live by construction. The
+    old prof_m.output_budget figure under-priced any explicit budget LARGER
+    than the profile default and weakened the 3x worst-case guard.
+    `fb_args`/`fb_conf` (capstone re-audit HIGH): ONLY the --best-of lanes
+    pass them — their samples may legally --fallback to a pricier alt, so
+    each sample is priced fallback-aware (estimate_cost_fb). Consensus
+    lanes must NOT pass them: their workers pin the SACRED _no_fallback, a
+    swap is impossible, and the estimate stays byte-identical."""
     expected_sum, bound_sum, assumed_any = 0.0, 0.0, False
     parts, per_model_chunks = [], {}
     for m in models:
@@ -6582,8 +6945,18 @@ def _consensus_estimate(catalog, models, labeled, total):
             est_input += n_calls_m * len(build_code_map(
                 labeled,
                 budget=code_map_budget(prof_m.single_shot_chars)))
-        exp_m, bnd_m, assumed_m = estimate_cost(
-            catalog, m, est_input, n_calls_m, prof_m.output_budget)
+        # the exact budget run_one_audit resolves for this worker
+        # (_audit_sample_prep passes the same input_chars figure)
+        mt_m = RequestSpec(max_tokens=explicit_max_tokens).with_output_budget(
+            prof_m,
+            total if total <= prof_m.single_shot_chars
+            else prof_m.chunk_chars).max_tokens
+        if fb_args is not None:
+            exp_m, bnd_m, assumed_m = estimate_cost_fb(
+                catalog, m, est_input, n_calls_m, mt_m, fb_args, fb_conf)
+        else:
+            exp_m, bnd_m, assumed_m = estimate_cost(
+                catalog, m, est_input, n_calls_m, mt_m)
         expected_sum += exp_m
         bound_sum += bnd_m
         assumed_any = assumed_any or assumed_m
@@ -6594,13 +6967,17 @@ def _consensus_estimate(catalog, models, labeled, total):
 
 def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
                           explicit_max_tokens):
-    """[(miss_calls, miss_input_chars)] per best-of sample — the salted
-    cache entries the live run will NOT find, so the cost gate can price
-    ONLY what will actually be billed (Codex H3: the cache must be resolved
-    BEFORE the gate, exactly like run_map_reduce's own resume lane). Each
-    sample's spec/keys are built through the SAME helpers run_one_audit
-    uses (_audit_sample_prep/_audit_single_key/_map_note), so a predicted
-    hit here is a real hit there by construction."""
+    """[(miss_calls, miss_input_chars, sample_max_tokens)] per best-of
+    sample — the salted cache entries the live run will NOT find, so the
+    cost gate can price ONLY what will actually be billed (Codex H3: the
+    cache must be resolved BEFORE the gate, exactly like run_map_reduce's
+    own resume lane). Each sample's spec/keys are built through the SAME
+    helpers run_one_audit uses (_audit_sample_prep/_audit_single_key/
+    _map_note), so a predicted hit here is a real hit there by
+    construction. Capstone H3: sample_max_tokens is the RESOLVED budget the
+    live sample runs at (a.max_tokens) — the gate must price that exact
+    figure, not the profile default, or a larger explicit --max-tokens
+    under-prices the run and weakens the 3x worst-case guard."""
     spec = RequestSpec.from_args(args)
     use_cache = not spec.no_cache
     ttl = spec.cache_ttl or CACHE_TTL_DEFAULT
@@ -6615,9 +6992,9 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
         if total <= single:
             key = _audit_single_key(model, sp, labeled, a)
             if use_cache and _cache_get(key, ttl) is not None:
-                plans.append((0, 0))
+                plans.append((0, 0, a.max_tokens))
             else:
-                plans.append((1, total))
+                plans.append((1, total, a.max_tokens))
             continue
         packed = pack_chunks(labeled, min(chunk, single))
         code_map = build_code_map(labeled, budget=code_map_budget(single))
@@ -6632,13 +7009,14 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
             miss_calls += 1
             # each billed chunk re-sends the repo map in its system prompt
             miss_input += len(ch) + len(code_map)
-        plans.append((miss_calls, miss_input))
+        plans.append((miss_calls, miss_input, a.max_tokens))
     return plans
 
 
 def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
                      eff_total, profile, dens, args, api_key,
-                     consensus_models=None, best_of=None):
+                     consensus_models=None, best_of=None, explicit_mt=None,
+                     conf=None):
     """5b: the upfront `audit --repo` plan — file count, chars, chunking and
     the est. cost, BEFORE anything is sent or billed. Prose goes to stderr;
     under --format json ONE compact plan object precedes the standard audit
@@ -6651,19 +7029,23 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
         # across the (already validated) model set — never the lone default
         # model's figure, which is not what gets gated or billed (Codex M1).
         expected, bound, _parts, per_model_chunks, assumed = \
-            _consensus_estimate(catalog, consensus_models, labeled, total)
+            _consensus_estimate(catalog, consensus_models, labeled, total,
+                                explicit_mt)
         n_chunks = sum(per_model_chunks.values())
     elif best_of:
         # Under --best-of the plan prices the FULL K-sample work
         # (_consensus_estimate over [model]*K); the live gate prices only
         # its cache-missing share (H3) — equal cold, less on a resume.
+        # Fallback-aware (fb_args): best-of samples may --fallback, and the
+        # live gate prices that — plan == gate.
         expected, bound, _parts, chunks_by, assumed = \
-            _consensus_estimate(catalog, [model] * best_of, labeled, total)
+            _consensus_estimate(catalog, [model] * best_of, labeled, total,
+                                explicit_mt, fb_args=args, fb_conf=conf)
         n_chunks = sum(chunks_by.values())
     else:
         n_chunks, expected, bound, assumed = _audit_split_estimate(
             catalog, model, reduce_model, labeled, total, eff_total, profile,
-            dens, args.max_tokens, structured)
+            dens, args.max_tokens, structured, fb_args=args, fb_conf=conf)
     # Whether the deep cross-file pass will run: default ON for --repo,
     # honoring --deep/--no-deep — but NEVER under --consensus or --best-of,
     # where corroboration replaces it (Codex M2). Stated in the plan
@@ -6799,6 +7181,10 @@ def cmd_audit(args, api_key, api_url, conf):
     # Right-size the output budget to the actual work (A1): whole input if it
     # fits single-shot, else a chunk's worth.
     apply_output_budget(args, profile, total if eff_total <= single else chunk)
+    # Capstone H3: what the consensus/best-of worker specs will carry as
+    # max_tokens (the user's explicit budget, or None = per-model auto) —
+    # threaded into the shared estimates so plan == gate == live.
+    explicit_mt = args.max_tokens if explicit_max_tokens else None
 
     consensus_models = None
     if getattr(args, "consensus", None):
@@ -6814,7 +7200,8 @@ def cmd_audit(args, api_key, api_url, conf):
         _print_repo_plan(repo_meta, catalog, model, reduce_model, labeled,
                          total, eff_total, profile, dens, args, api_key,
                          consensus_models=consensus_models,
-                         best_of=best_of_k)
+                         best_of=best_of_k, explicit_mt=explicit_mt,
+                         conf=conf)
 
     if getattr(args, "dry_run", False):
         # D6: preview using the SAME sizing functions, then exit without a call.
@@ -6825,7 +7212,7 @@ def cmd_audit(args, api_key, api_url, conf):
             # helper the live gate uses (map-only, per-model chunking) — never
             # the lone default model (Codex final gate M).
             expected, bound, _parts, chunks_by, assumed = _consensus_estimate(
-                catalog, consensus_models, labeled, total)
+                catalog, consensus_models, labeled, total, explicit_mt)
             print("ambient audit plan (dry run — nothing sent):")
             print(f"  models:       consensus: {', '.join(consensus_models)}")
             print(f"  input:        {total:,} chars across "
@@ -6846,12 +7233,14 @@ def cmd_audit(args, api_key, api_url, conf):
             # prices only the cache-missing share of it (H3) — equal on a
             # cold cache, strictly less on a resume, never more.
             expected, bound, _parts, chunks_by, assumed = _consensus_estimate(
-                catalog, [model] * best_of_k, labeled, total)
+                catalog, [model] * best_of_k, labeled, total, explicit_mt,
+                fb_args=args, fb_conf=conf)
             n_chunks = sum(chunks_by.values())
         else:
             n_chunks, expected, bound, assumed = _audit_split_estimate(
                 catalog, model, reduce_model, labeled, total, eff_total,
-                profile, dens, args.max_tokens, structured_preview)
+                profile, dens, args.max_tokens, structured_preview,
+                fb_args=args, fb_conf=conf)
         print("ambient audit plan (dry run — nothing sent):")
         print(f"  model:        {model} ({'reasoning' if profile.is_reasoning else 'direct'})")
         if best_of_k:
@@ -6889,7 +7278,7 @@ def cmd_audit(args, api_key, api_url, conf):
         # (_consensus_estimate), so plan and gate can never disagree
         # (Codex M1): each model priced on its own chunking, map-only.
         expected_sum, bound_sum, parts, _per_chunks, _assumed = \
-            _consensus_estimate(catalog, models, labeled, total)
+            _consensus_estimate(catalog, models, labeled, total, explicit_mt)
         print(f"ambient: consensus estimated ~${expected_sum:.2f} "
               f"({' + '.join(parts)})", file=sys.stderr)
         # Pass the summed worst-case bound so the 3x-ceiling guard fires for
@@ -6968,6 +7357,11 @@ def cmd_audit(args, api_key, api_url, conf):
                 except Exception as err:  # noqa: BLE001 — re-raised below in
                     # model order, preserving the sequential lane's semantics.
                     worker_errs[i] = err
+                except BaseException:
+                    # Capstone re-audit MED: worker-side fatal → fail-fast,
+                    # no sibling model may keep billing during the unwind.
+                    _abort_consensus()
+                    raise
         except KeyboardInterrupt:
             print("\nambient: cancelling consensus…", file=sys.stderr)
             _abort_consensus()
@@ -7071,17 +7465,21 @@ def cmd_audit(args, api_key, api_url, conf):
         miss_plans = _best_of_audit_misses(
             catalog, model, labeled, AUDIT_SYSTEM_PROMPT + focus, args,
             best_of_k, explicit_max_tokens)
-        miss_calls_total = sum(c for c, _ in miss_plans)
-        cached_samples = sum(1 for c, _ in miss_plans if c == 0)
+        miss_calls_total = sum(c for c, _, _ in miss_plans)
+        cached_samples = sum(1 for c, _, _ in miss_plans if c == 0)
         if miss_calls_total:
-            prof_bo = model_profile(catalog, model)
             expected_sum = bound_sum = 0.0
-            for n_calls_m, in_chars_m in miss_plans:
+            for n_calls_m, in_chars_m, mt_m in miss_plans:
                 if not n_calls_m:
                     continue
-                exp_m, bnd_m, _asm = estimate_cost(
-                    catalog, model, in_chars_m, n_calls_m,
-                    prof_bo.output_budget)
+                # Capstone H3: price each sample at ITS resolved budget
+                # (the same a.max_tokens the live run sends) — never the
+                # profile default, which under-priced a larger explicit
+                # --max-tokens and weakened the 3x worst-case guard.
+                # Fallback-aware (capstone re-audit HIGH): samples may
+                # --fallback to a pricier alt — reserve that up front.
+                exp_m, bnd_m, _asm = estimate_cost_fb(
+                    catalog, model, in_chars_m, n_calls_m, mt_m, args, conf)
                 expected_sum += exp_m
                 bound_sum += bnd_m
             print(f"ambient: best-of {best_of_k} audit estimated "
@@ -7104,8 +7502,11 @@ def cmd_audit(args, api_key, api_url, conf):
                   file=sys.stderr)
             # per-sample cache lane (resume) via frozen replace (8b-2);
             # run_one_audit re-derives the budget per profile when auto.
+            # gate_fallback=False: FAN-OUT worker — the batch gate above
+            # reserved any --fallback swap exposure up front.
             sa = dataclasses.replace(
                 RequestSpec.from_args(args), _cache_salt=f"best-of:{i}",
+                gate_fallback=False,
                 max_tokens=args.max_tokens if explicit_max_tokens else None)
             return run_one_audit(model, catalog, labeled,
                                  AUDIT_SYSTEM_PROMPT + focus, sa, api_key,
@@ -7138,6 +7539,11 @@ def cmd_audit(args, api_key, api_url, conf):
                     raise
                 except Exception as err:  # noqa: BLE001 — re-raised below
                     worker_errs[i] = err
+                except BaseException:
+                    # Capstone re-audit MED: worker-side fatal → fail-fast,
+                    # no sibling sample may keep billing during the unwind.
+                    _abort_best_of()
+                    raise
         except KeyboardInterrupt:
             print("\nambient: cancelling best-of…", file=sys.stderr)
             _abort_best_of()
@@ -7260,14 +7666,18 @@ def cmd_audit(args, api_key, api_url, conf):
                           None, model)
 
     if eff_total <= single:
-        # A large single pass is still real spend — gate it like the map path
-        # instead of skipping the estimate entirely (resilience sweep MED).
-        if total > 150_000:
-            cost_gate(catalog, model, total, 1, args, conf)
+        # Capstone H1: a single audit pass of ANY size is real spend — gate
+        # + fleet-reserve it unconditionally (the old >150k-chars-only
+        # cost_gate exception let every smaller single-shot audit spend
+        # outside the aggregate AMBIENT_MAX_SPEND ceiling). Silent pass when
+        # under ceiling — same UX as before for the common small audit.
         messages = [
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": files_block(labeled)},
         ]
+        _single_call_gate(catalog, model,
+                          sum(len(m.get("content", "")) for m in messages),
+                          args, conf)
         try:
             content, _usage, body = complete(api_key, api_url, model, messages,
                                              args, session=session)
@@ -7456,6 +7866,12 @@ def cmd_code(args, api_key, api_url, conf):
         _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
                       catalog, conf, kind="code", session=session)
         return
+    # Capstone H1: the final generation call is real spend — gate +
+    # fleet-reserve it up front like every fan-out lane (silent pass when
+    # under ceiling; any distillation passes above ran their own gates).
+    _single_call_gate(catalog, model,
+                      sum(len(m.get("content", "")) for m in messages),
+                      args, conf)
     chat(api_key, api_url, model, messages, args, kind="code",
          session=session)
 
