@@ -35,6 +35,7 @@ support pointer), and finishes with a command showcase. Key entry happens in
 ```bash
 git diff | ambient audit            # independent adversarial review of your changes
 ambient audit src/auth.py --focus security --json
+ambient audit --repo .              # the WHOLE repo — plan + cost shown before anything is sent
 ```
 
 Independent eyes on every commit at a price where "always" is affordable — Claude
@@ -83,6 +84,7 @@ ambient use [id]         sticky default model picker (--chat/--code scopes)
 ambient curate …         choose which models the menus surface (hide/show/only/note)
 ambient ask "q"          one-shot answer · pipe docs: cat doc.txt | ambient ask "sum" -
 ambient audit [files]    adversarial code review · git diff | ambient audit · --consensus A,B
+                         · --repo [DIR] audits a whole repository (git-aware walker)
 ambient map "p" [files]  bulk lane: ONE prompt run independently over MANY items
                          (files, or one item per stdin line; --jsonl objects)
 ambient code "task"      single-file code generation (-f context.py)
@@ -143,6 +145,37 @@ for big files) — the rest of the batch still runs.
 ambient map "summarize this file in one sentence" src/*.py
 cat titles.txt | ambient map "classify: bug, feature, or question?"
 cat questions.jsonl | ambient map "answer concisely" --jsonl --json > answers.jsonl
+```
+
+**Whole-repo audits are `ambient audit --repo [DIR]`** (default `.`). Inside a
+git repo the walker uses `git ls-files` so `.gitignore` is respected; anywhere
+else it walks the directory, pruning `.git`/`node_modules`/`dist`/`build`/
+`vendor`/`__pycache__` and dot-directories and never following symlinks out of
+`DIR`. Binaries (NUL-sniffed), lockfiles, empty files, and files over ~1 MB are
+skipped with counts. **Before anything is sent** it reports the plan — file
+count, total chars, chunk count, and the estimated cost (under `--format json`,
+one compact `{"status": "plan", …}` object precedes the standard audit
+envelope) — and a repo bigger than the 20M-char input ceiling is refused
+cleanly unless `--allow-cost`/`--allow-partial` accepts auditing the files that
+fit (the rest becomes an explicit coverage gap). The audit itself runs through
+the same map-reduce as any oversized input, so `--parallel`, `--reduce-model`,
+`--consensus`, `--focus`, the cost gate, and the fleet budget all apply
+unchanged; every chunk carries a multi-language repo map (Python via ast;
+JS/TS, Go, Rust, Ruby, Java/C#/C/C++ via top-level signature scans) sized to
+the model's window, with an explicit `(+N files omitted)` marker when it can't
+hold everything. After a chunked repo pass, ONE bounded **cross-file
+confirmation pass** re-checks findings that span files reviewed in separate
+chunks (at most one extra gated call over the suspect files; `--no-deep` skips
+it, `--deep` enables it for non-repo audits). If the spend gate refuses that
+optional extra call, the pass is skipped with a note and the pass-1 findings
+are rendered unchanged — a refused deep pass never discards the paid result.
+Under `--consensus` the deep pass never runs (multi-model corroboration
+already cross-checks findings), so `--deep`/`--no-deep` are no-ops there; the
+repo plan's `deep` field states what will actually happen.
+
+```bash
+ambient audit --repo . --focus security --format report
+ambient audit --repo src/ --json --reduce-model z-ai/glm-5.2 > findings.json
 ```
 
 ## Agentic use (for scripts and orchestrators)
