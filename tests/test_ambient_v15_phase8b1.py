@@ -210,7 +210,8 @@ class AttemptLoopTests(unittest.TestCase):
         self.assertEqual(cm.exception.category, "internal")
 
     def test_attempt_state_is_frozen_and_replace_makes_a_new_one(self):
-        st = amb.AttemptState(model="m", messages=[], args=ns())
+        st = amb.AttemptState(model="m", messages=[],
+                              spec=amb.RequestSpec.from_args(ns()))
         with self.assertRaises(dataclasses.FrozenInstanceError):
             st.model = "other"
         nxt = dataclasses.replace(st, stall_retried=True,
