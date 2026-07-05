@@ -1,6 +1,6 @@
 ---
 name: ambient
-description: Control panel for the Ambient (ambient.xyz) decentralized inference network — configure once, then pick models, toggle "Ambient codes everything" delegate mode, run second-opinion audits, and build whole file-sets on cheap open-source models. Use for /ambient, "ambient", "second opinion", "have ambient audit/build X", "switch ambient model", or delegate-mode sessions. Also use when the user wants to save tokens/cost, delegate bulk code-writing to a cheaper model, bulk-summarize files, or get a pre-commit second opinion.
+description: Control panel for the Ambient (ambient.xyz) decentralized inference network — pick models, toggle "Ambient codes everything" delegate mode, run second-opinion audits, and build whole file-sets on cheap open-source models. Use for /ambient, "ambient", "use ambient", "use ambient to build/audit X", "ask ambient to do X", "run this on ambient", "have ambient do/audit/build X", "second opinion", "switch ambient model", or delegate-mode sessions. Also use when the user wants to save tokens/cost, delegate bulk code-writing to a cheaper model, bulk-summarize files, or get a pre-commit second opinion.
 ---
 
 # Ambient — decentralized second-model lane
@@ -17,7 +17,7 @@ always points at the active install, so never hardcode a path.
 
 | Invocation | What to do |
 |---|---|
-| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else show a compact status (delegate mode, defaults, READY models from `ambient models`) and an AskUserQuestion action picker: toggle delegate mode / switch model / audit something / build something / spawn terminal. |
+| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else show a compact status (delegate mode, defaults, READY models from `ambient models` — describe non-READY models only as "not currently serving"; see **Plain-language status** below) and an AskUserQuestion action picker: toggle delegate mode / switch model / audit something / build something / spawn terminal. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
 | `/ambient on` | `ambient mode on`, announce the delegate contract (below), follow it all session. |
 | `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). |
 | `/ambient model` | Model picking UX below. |
@@ -30,6 +30,20 @@ always points at the active install, so never hardcode a path.
 | `/ambient setup` | First-run setup below (key rotation: `setup --force`; removal: `setup --remove`). |
 | `/ambient doctor` | Run `ambient doctor`, relay the PASS/FAIL table + DIAGNOSIS plainly. |
 | `/ambient usage` | Run `ambient usage`, report calls/tokens/actual cost AND the savings vs the frontier reference (per model + total, `$` and `%`; `--json` adds `reference_price`/`frontier_cost`/`saved`). ALWAYS relay its agent-lane disclosure: `ambient agent` spend is billed by Ambient but NOT visible to local metering — never present the totals as complete if the user runs the agent lane. |
+
+**Natural-language invocation (no slash needed):** when the user says it in plain
+words, route straight to the matching row above and run it — "use ambient to build
+X" / "have ambient build X" → `/ambient build <task>`; "use ambient to audit X" /
+"have ambient audit X" / "get a second opinion on X" → `/ambient audit <target>`;
+"ask ambient <question>" / "run this on ambient" → `ambient ask` (or the closest
+row). Don't make the user learn the commands.
+
+**Plain-language status (MANDATORY user-facing wording):** when showing model
+status to the user — the panel, the model list, or any narration — NEVER mention
+miners/mining/429/workers/HTTP codes or other network mechanics. Say a model is
+READY or "not currently serving right now" (e.g. "READY models: … — the others
+aren't serving right now"). If asked what Ambient is, the plain one-liner is: a
+decentralized network of open-source AI models behind one API, paid per token.
 
 ## Exit codes + machine output (parse these, not prose)
 
@@ -133,8 +147,9 @@ just work. Patterns, cheapest first:
 - **Claude-orchestrated fleets**: Claude subagents/workflows where each worker
   shells out to `ambient …` — Claude fans out, Ambient does the token-heavy
   lifting, Claude synthesizes.
-- Only 1-3 models usually have live workers — a 10-wide fan-out on ONE model is fine
-  (miners load-balance); check `ambient models` before spreading across models.
+- Only 1-3 models are usually READY at any moment — a 10-wide fan-out on ONE model
+  is fine (the network load-balances); check `ambient models` before spreading
+  across models.
 - **Quality from cheapness (v3 Phase 7)** — on a 10-40x-cheaper network, MORE
   SAMPLES often beats a bigger model. `--best-of K` (ask/code/audit, K=2-8)
   draws K independent samples behind ONE up-front gate that prices all K;
@@ -164,9 +179,11 @@ curation (`ambient curate`) shapes what menus SHOW, never what `-m` can do.
 Advisory routing (v3) stays inside that rule: `-m auto[:cheapest|:largest]` is the
 user EXPLICITLY delegating the pick — resolved per call from READY, curation-visible
 models and ALWAYS printed (`ambient use auto` makes it sticky; it stores the literal
-spec and re-resolves each call). If a CONCRETE model is cold or the input outgrows
-its window, ambient prints a one-line stderr HINT naming READY alternatives with
-prices — information only; it never changes the model and never blocks.
+spec and re-resolves each call). If a CONCRETE model is not currently serving or the
+input outgrows its window, ambient prints a one-line stderr HINT naming READY
+alternatives with prices — information only; it never changes the model and never
+blocks. (Relay that to the user in plain words: the model "isn't serving right now",
+never network mechanics.)
 `--reduce-model ID` routes only the map-reduce SYNTHESIS step (cheap map, strong
 reduce). `AMBIENT_MODEL_MAP` (env/config, alongside `AMBIENT_MAX_PARALLEL` /
 `AMBIENT_MAX_SPEND`) is the user's per-phase routing config —
@@ -240,9 +257,8 @@ busy model from the user's own network from a real Ambient outage.
 
 ## First-run setup (newcomer-friendly — assume zero Ambient knowledge)
 
-1. One sentence: Ambient is a decentralized network of miners serving open-source
-   models behind one OpenAI-style API, paid per token (keys at
-   https://app.ambient.xyz).
+1. One sentence: Ambient is a decentralized network of open-source AI models behind
+   one OpenAI-style API, paid per token (keys at https://app.ambient.xyz).
 2. Run `ambient link` yourself via Bash (puts `ambient` on the user's terminal PATH;
    relay its PATH hint if it prints one).
 3. The ONLY key path: the user runs `ambient setup` in THEIR OWN terminal
@@ -259,9 +275,11 @@ busy model from the user's own network from a real Ambient outage.
 
 ## Model picking UX
 
-1. `ambient models` — live list; READY = miners serving now (changes hourly);
-   non-ready models 429 until workers arrive. Defaults marked `*chat`/`*code`;
-   curation notes shown inline; curated-out models behind `--all`.
+1. `ambient models` — live list; READY = available to use right now (availability
+   changes hourly); describe non-READY models to the user only as "not currently
+   serving" (never miners/429/workers — see **Plain-language status**). Defaults
+   marked `*chat`/`*code`; curation notes shown inline; curated-out models behind
+   `--all`.
 2. Present READY models first via AskUserQuestion with price + context + note.
 3. Persist with `ambient use <id>` (`--chat`/`--code` scopes; bare sets both).
    Resolution order everywhere: `-m` flag > env vars > saved default > built-in
