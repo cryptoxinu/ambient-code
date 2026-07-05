@@ -16,6 +16,8 @@ Commands:
                        (files, or stdin lines / --jsonl objects); one result
                        streamed per item, one up-front batch cost gate,
                        cache-resumable (re-runs re-bill only missing items)
+  chat                 Interactive REPL — streams each reply, per-turn cost/
+                       savings receipt; /model /clear /help /exit
   code      [task]     Single-file code generation on the code model
   build     [task]     Plan + generate a SET of files (manifest-first; writes
                        only with --apply, inside --dir; never executes)
@@ -1149,6 +1151,55 @@ def savings_note(model, usage, catalog=None, conf=None):
         return ""
 
 
+def savings_note_by_served(usage_by_model, catalog=None, conf=None):
+    """Receipt suffix for a run whose samples may have been SERVED by
+    DIFFERENT models (best-of under --fallback). Pricing the token
+    aggregate at the selected sample's model would OVER-state the saving
+    whenever a pricier fallback served part of the tokens (Codex H1), so
+    the true cost prices EACH model's OWN tokens and sums; the frontier
+    reference prices the total. Same honesty rules as savings_note — a
+    single serving model delegates to it outright, assumed pricing claims
+    no saving, saved-% is floored, negative savings read 'costlier', and
+    it never raises."""
+    try:
+        if not usage_by_model:
+            return ""
+        if len(usage_by_model) == 1:
+            (m, u), = usage_by_model.items()
+            return savings_note(m, u, catalog, conf)
+        tot = {"prompt_tokens": 0, "completion_tokens": 0}
+        cost, assumed_any, est_any = 0.0, False, False
+        for m, u in usage_by_model.items():
+            tot["prompt_tokens"] += _as_pos_int(u.get("prompt_tokens"), 0)
+            tot["completion_tokens"] += _as_pos_int(
+                u.get("completion_tokens"), 0)
+            c, assumed = usage_cost(m, u, catalog)
+            cost += c
+            assumed_any = assumed_any or assumed
+            est_any = est_any or bool(u.get("_estimated"))
+        if tot["prompt_tokens"] + tot["completion_tokens"] == 0:
+            return ""
+        est = " (est.)" if est_any else ""
+        mixed = f"mixed serving, {len(usage_by_model)} models; "
+        if assumed_any:
+            return f" ≈ {_fmt_usd(cost)} ({mixed}assumed pricing){est}"
+        fcost = reference_cost(tot, resolve_reference_price(conf))
+        if fcost <= 0:
+            return f" ≈ {_fmt_usd(cost)} ({mixed.rstrip('; ')}){est}"
+        saved = fcost - cost
+        if saved <= 0:
+            return (f" ≈ {_fmt_usd(cost)} ({mixed}vs ~{_fmt_usd(fcost)} "
+                    f"frontier — costlier, no saving){est}")
+        pct = int(saved / fcost * 100)  # floored: 93.7% claims 93%
+        if pct < 1:
+            return (f" ≈ {_fmt_usd(cost)} ({mixed}vs ~{_fmt_usd(fcost)} "
+                    f"frontier){est}")
+        return (f" ≈ {_fmt_usd(cost)} ({mixed}vs ~{_fmt_usd(fcost)} "
+                f"frontier — saved {pct}%){est}")
+    except Exception:  # pragma: no cover — a receipt must never kill a result
+        return ""
+
+
 # --- Fleet spend budget (v3 Phase 4a) ----------------------------------------
 # AMBIENT_MAX_SPEND used to gate each invocation in ISOLATION, so the
 # documented 10-wide fan-out (SKILL.md) could spend up to 10x the ceiling.
@@ -2271,11 +2322,15 @@ CACHE_MAX_FILES = 4000            # LRU-ish cap; oldest pruned past this
 CACHE_TTL_DEFAULT = 7 * 86400     # a cached chunk older than this is ignored
 
 
-def _cache_key(model, system, chunk, max_tokens, temperature, response_format=None):
+def _cache_key(model, system, chunk, max_tokens, temperature,
+               response_format=None, salt=None):
     """Content address for one chunk call (D7). MUST include model + max_tokens
     (per-model budgets differ) AND response_format — a strict-schema model shares
     the same system prompt for prose vs --json, so omitting it would serve cached
-    prose into the JSON reducer or vice-versa (Codex Wave D MED)."""
+    prose into the JSON reducer or vice-versa (Codex Wave D MED). `salt`
+    (Phase 7a) namespaces otherwise-identical calls — each --best-of sample
+    index gets its OWN cache entry so re-runs resume per sample; salt=None is
+    byte-identical to the pre-salt key."""
     h = hashlib.sha256()
     h.update(f"{model}\0{max_tokens}\0{temperature}\0".encode())
     h.update(json.dumps(response_format, sort_keys=True).encode())
@@ -2283,6 +2338,8 @@ def _cache_key(model, system, chunk, max_tokens, temperature, response_format=No
     h.update(system.encode("utf-8", "replace"))
     h.update(b"\0")
     h.update(chunk.encode("utf-8", "replace"))
+    if salt is not None:
+        h.update(f"\0salt:{salt}".encode())
     return h.hexdigest()
 
 
@@ -2770,10 +2827,17 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 catalog = []
             ready = ready_model_ids(catalog)
             fb_conf = read_config_file()
-            fallback_on = getattr(args, "fallback", False) or (
-                (os.environ.get("AMBIENT_FALLBACK")
-                 or fb_conf.get("AMBIENT_FALLBACK", "")).lower()
-                in ("1", "on", "true")
+            # SACRED override (Codex H4): callers running a model the user
+            # EXPLICITLY chose (a --consensus set member, a chat /model pick)
+            # set _no_fallback — the swap is disabled outright, even when
+            # --fallback/AMBIENT_FALLBACK is on. The model IS the choice;
+            # it fails as itself instead of silently becoming another model.
+            fallback_on = not getattr(args, "_no_fallback", False) and (
+                getattr(args, "fallback", False) or (
+                    (os.environ.get("AMBIENT_FALLBACK")
+                     or fb_conf.get("AMBIENT_FALLBACK", "")).lower()
+                    in ("1", "on", "true")
+                )
             )
             if fallback_on and not _fallback_retried:
                 # The chunk was already sized for `model`; only fall back to a
@@ -3431,6 +3495,18 @@ def _reduce_response_format(rf, reduce_profile):
     return rf
 
 
+def _map_note(map_system, code_map, n_chunks):
+    """The per-chunk system prompt run_map_reduce sends (chunk index patched
+    in per call). Factored out so the best-of audit miss-plan (H3) can
+    precompute the SAME salted cache keys the live fan-out will use — key
+    parity by construction, never by copy-paste."""
+    return (map_system
+            + (f"\n\n{code_map}" if code_map else "")
+            + f"\n\n(You are seeing chunk {{i}} of {n_chunks} of a larger "
+            "input. File boundaries may be split across chunks — flag suspected "
+            "split artifacts as such instead of guessing.)")
+
+
 def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                    synth_system, reduce_budget, reducer=None, code_map="",
                    gate=None, cancel_event=None, reduce_model=None,
@@ -3481,11 +3557,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
         file=sys.stderr,
     )
 
-    map_note = (map_system
-                + (f"\n\n{code_map}" if code_map else "")
-                + f"\n\n(You are seeing chunk {{i}} of {len(chunks)} of a larger "
-                "input. File boundaries may be split across chunks — flag suspected "
-                "split artifacts as such instead of guessing.)")
+    map_note = _map_note(map_system, code_map, len(chunks))
 
     use_cache = not getattr(args, "no_cache", False)
     cache_ttl = getattr(args, "cache_ttl", None) or CACHE_TTL_DEFAULT
@@ -3507,8 +3579,11 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
         ]
         # D7: content-addressed cache — a re-run after a Ctrl-C / failed synthesis
         # / PARTIAL exit re-bills only the MISSING chunks, not the whole fan-out.
+        # _cache_salt (Phase 7a) keeps each --best-of sample's chunks in its
+        # own cache lane so samples stay independent AND resumable.
         key = _cache_key(model, system, chunks[i], args.max_tokens,
-                         args.temperature, getattr(args, "response_format", None))
+                         args.temperature, getattr(args, "response_format", None),
+                         salt=getattr(args, "_cache_salt", None))
         if use_cache:
             cached = _cache_get(key, cache_ttl)
             if cached is not None:
@@ -3698,12 +3773,15 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
 
 
 def render_result(text, partial, reason, args, api_key, usage=None, model=None,
-                  already_streamed=False):
+                  already_streamed=False, usage_by_model=None):
     """Single place that prints a result and sets the exit code. Partial/
     incomplete results get a loud header and a non-zero exit unless the caller
     passed --allow-partial, so a truncated audit can never masquerade as clean.
     `already_streamed` = the body was live-streamed to stdout (D1), so don't
-    reprint it — just close the line, warn, and set the exit code."""
+    reprint it — just close the line, warn, and set the exit code.
+    `usage_by_model` (Codex H1): per-SERVED-model token split for runs whose
+    samples were served by different models — the receipt then prices each
+    model's own tokens instead of the aggregate at `model`'s price."""
     if partial:
         header = (
             paint("⚠ PARTIAL / INCOMPLETE RESULT", "1;33")
@@ -3730,11 +3808,13 @@ def render_result(text, partial, reason, args, api_key, usage=None, model=None,
         # Phase 6: the receipt now shows what the run COST and what the same
         # tokens would have cost at the frontier reference price — the tool's
         # whole value proposition, previously invisible. savings_note() owns
-        # the honesty rules (assumed pricing → no savings claim; est. label).
+        # the honesty rules (assumed pricing → no savings claim; est. label);
+        # mixed-served runs price per served model (Codex H1).
+        note = (savings_note_by_served(usage_by_model) if usage_by_model
+                else savings_note(model, usage))
         print(
             f"\n[ambient {model} | in={usage.get('prompt_tokens')} "
-            f"out={usage.get('completion_tokens')} tokens"
-            f"{savings_note(model, usage)}]",
+            f"out={usage.get('completion_tokens')} tokens{note}]",
             file=sys.stderr,
         )
 
@@ -4210,6 +4290,15 @@ def cmd_ask(args, api_key, api_url, conf):
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
+    # 7a/7b are distinct corroboration lanes — combining them would fan out
+    # K×N calls for no defined semantics. Validated before any spend.
+    best_of_k = _resolve_best_of(args)
+    if getattr(args, "consensus", None):
+        if best_of_k:
+            usage_exit("--consensus and --best-of cannot be combined — "
+                       "pick one corroboration lane")
+        _ask_consensus(args, api_key, api_url, conf, catalog, question, doc)
+        return
     input_size = len(question) + (len(doc) if doc else 0)
     # Phase 3 advisory routing: expands an explicit `-m auto` (printed) or
     # prints the readiness/fit hint — a concrete model is NEVER changed.
@@ -4257,6 +4346,12 @@ def cmd_ask(args, api_key, api_url, conf):
             "are embedded within it).")
     eff_total = int((len(question) + len(doc)) * density_factor(doc or question))
     if doc and eff_total > single:
+        if best_of_k:
+            # K independent samples of a map-reduce would K× every chunk with
+            # no per-sample selection semantics — refuse honestly up front.
+            usage_exit("--best-of needs a single-shot-sized input — this one "
+                       "requires map-reduce splitting; shrink the input or "
+                       "drop --best-of")
         split_over_doc()
         return
     prompt = f"{question}\n\n{doc}".strip() if doc else question
@@ -4264,6 +4359,12 @@ def cmd_ask(args, api_key, api_url, conf):
     if args.system:
         messages.append({"role": "system", "content": args.system})
     messages.append({"role": "user", "content": prompt})
+    if best_of_k:
+        # 7a: K independent samples + deterministic selection (its own gate,
+        # streaming is per-sample-concurrent so the live-stream lane is off).
+        _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
+                      catalog, conf, kind="ask")
+        return
     # D1: live-stream the answer to stdout on an interactive terminal (not --raw,
     # not --json). Reasoning shows as heartbeats first, then the answer streams.
     live_stream = sys.stdout.isatty() and not args.raw and not want_json
@@ -4323,6 +4424,469 @@ def cmd_ask(args, api_key, api_url, conf):
         body.get("_served_model", model),
         already_streamed=clean_stream,
     )
+
+
+# --------------------------------------------------------------------------
+# Phase 7a/7b — quality from cheapness. `--best-of K` buys quality with K
+# cheap independent samples (one up-front gate, salted cache lanes, honest
+# deterministic selection); `ask --consensus A,B` triangulates one question
+# across an EXPLICIT model set (model choice SACRED) and reports agreement.
+
+BEST_OF_MAX = 8            # sanity clamp on --best-of K
+BEST_OF_TEMPERATURE = 0.7  # diversity floor when the user asked for temp 0
+BEST_OF_WEAK_TEMP = 0.3    # at/below this, samples barely differ — say so
+
+
+def _resolve_best_of(args):
+    """Validated K for --best-of (None when off). K<2 is a usage error; K is
+    clamped to BEST_OF_MAX. Sampling at temperature 0 would draw K identical
+    answers — bump to BEST_OF_TEMPERATURE with a printed note (the user's 0
+    bought determinism, which best-of by definition forgoes). A LOW non-zero
+    temperature is the user's explicit choice and is KEPT, but the weak-
+    corroboration tradeoff is disclosed: near-identical samples make the
+    majority/similarity vote self-confirming rather than corroborating."""
+    k = getattr(args, "best_of", None)
+    if k is None:
+        return None
+    if k < 2:
+        usage_exit("--best-of needs K >= 2 (K independent samples)")
+    if k > BEST_OF_MAX:
+        print(f"ambient: --best-of {k} capped at {BEST_OF_MAX}",
+              file=sys.stderr)
+        k = BEST_OF_MAX
+    if getattr(args, "temperature", None) == 0:
+        print(
+            f"ambient: --best-of needs sampling diversity — raising "
+            f"temperature 0 to {BEST_OF_TEMPERATURE}",
+            file=sys.stderr,
+        )
+        args.temperature = BEST_OF_TEMPERATURE
+    elif 0 < (getattr(args, "temperature", None) or 0) <= BEST_OF_WEAK_TEMP:
+        print(
+            f"ambient: note — best-of at temperature {args.temperature} "
+            "draws near-identical samples, so corroboration is WEAK "
+            "(self-confirming, not independent); pass --temperature "
+            f"{BEST_OF_TEMPERATURE} for real diversity",
+            file=sys.stderr,
+        )
+    return k
+
+
+def select_best_sample(texts):
+    """(index, method, note) — deterministic, honest selection among K
+    samples. Short answers: exact-normalized majority vote when 2+ agree.
+    Otherwise the pairwise-similarity centroid (self-consistency proxy):
+    the sample most similar to all the others, clipped for cost. No LLM
+    judge — the note states exactly what was done."""
+    if len(texts) == 1:
+        return 0, "single", "only one sample available"
+    norm = [re.sub(r"\s+", " ", t.strip().lower()) for t in texts]
+    if all(len(n) <= 120 for n in norm):
+        top, votes = collections.Counter(norm).most_common(1)[0]
+        if votes >= 2:
+            idx = norm.index(top)
+            return idx, "majority", f"{votes}/{len(texts)} samples agree"
+    clipped = [t[:20_000] for t in texts]
+    best_i, best_score = 0, -1.0
+    for i, a in enumerate(clipped):
+        score = sum(
+            difflib.SequenceMatcher(None, a, b).ratio()
+            for j, b in enumerate(clipped) if j != i
+        ) / (len(clipped) - 1)
+        if score > best_score:
+            best_i, best_score = i, score
+    return best_i, "similarity", (
+        f"most representative of {len(texts)} samples "
+        f"(mean pairwise similarity {int(best_score * 100)}%)")
+
+
+def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
+                  kind):
+    """7a for ask/code: draw K INDEPENDENT single-shot samples of `messages`
+    (shared gate + cancel_event fan-out, per-sample salted cache so re-runs
+    resume), then emit the K candidates plus a deterministic selection. ONE
+    up-front cost gate covers every cache-missing sample BEFORE any call."""
+    want_json = getattr(args, "json", False)
+    system_text = "".join(m.get("content", "") for m in messages
+                          if m.get("role") == "system")
+    user_text = "\n".join(m.get("content", "") for m in messages
+                          if m.get("role") != "system")
+    rf = getattr(args, "response_format", None)
+    use_cache = not getattr(args, "no_cache", False)
+    ttl = getattr(args, "cache_ttl", None) or CACHE_TTL_DEFAULT
+    keys = [_cache_key(model, system_text, user_text, args.max_tokens,
+                       args.temperature, rf, salt=f"best-of:{i}")
+            for i in range(k)]
+    samples = {}
+    to_run = []
+    for i, key in enumerate(keys):
+        hit = _cache_get(key, ttl) if use_cache else None
+        if hit is not None:
+            # cache entries are only ever written for the REQUESTED model
+            # (served == model below), so a hit's served model is `model`.
+            samples[i] = {"index": i, "content": hit, "partial": False,
+                          "cached": True, "served_model": model}
+        else:
+            to_run.append((i, key))
+    errors = []
+    usage_tot = {"prompt_tokens": 0, "completion_tokens": 0}
+    # Codex H1: token counts are also kept PER SERVED MODEL — with
+    # --fallback a sample can be served by a different (pricier) model,
+    # and pricing the aggregate at the selected sample's model would
+    # over-state the saving. The receipt/JSON price each model's own
+    # tokens instead.
+    usage_by_served = {}
+    est_any = saw_usage = False
+    if to_run:
+        n = len(to_run)
+        print(f"ambient: best-of {k} — drawing {n} sample(s)"
+              + (f" ({k - n} cached, not re-billed)" if k - n else "")
+              + f" on {model} at temperature {args.temperature}",
+              file=sys.stderr)
+        # ONE up-front gate for the whole K-sample batch: the same input is
+        # sent once PER SAMPLE, so both input chars and n_calls scale by the
+        # number of cache misses (cached samples bill nothing).
+        cost_gate(catalog, model,
+                  (len(system_text) + len(user_text)) * n, n, args, conf)
+        width = min(_resolve_parallel(args), n)
+        gate = threading.Semaphore(width)
+        cancel_event = threading.Event()
+
+        def work(i, key):
+            if cancel_event.is_set():
+                raise ChatError("cancelled",
+                                "best-of cancelled before this sample started")
+            with gate:
+                if cancel_event.is_set():
+                    raise ChatError("cancelled",
+                                    "best-of cancelled while waiting for a slot")
+                try:
+                    # Private args copy: complete()'s budget escalation must
+                    # not mutate a sibling sample's budget mid-flight.
+                    out, usage, body = complete(
+                        api_key, api_url, model, messages,
+                        argparse.Namespace(**vars(args)))
+                except NetworkError:
+                    cancel_event.set()  # fatal for every sibling — stop billing
+                    raise
+                except ChatError as err:
+                    if err.category in ("key", "funds"):
+                        cancel_event.set()  # same zero-race fail-fast as map
+                    raise
+            partial = (bool(body.get("salvaged_partial"))
+                       or body.get("finish_reason") == "length")
+            served = body.get("_served_model", model)
+            if use_cache and not partial and served == model:
+                _cache_put(key, out)
+            return out, partial, usage, served
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=width)
+        aborted = False
+
+        def _abort():
+            nonlocal aborted
+            aborted = True
+            cancel_event.set()
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)  # py3.9+
+            except TypeError:
+                pool.shutdown(wait=False)                       # py3.8
+
+        try:
+            futs = {pool.submit(work, i, key): i for i, key in to_run}
+            for fut in concurrent.futures.as_completed(futs):
+                i = futs[fut]
+                try:
+                    out, partial, usage, served = fut.result()
+                except (ChatError, NetworkError) as err:
+                    if isinstance(err, NetworkError) \
+                            or getattr(err, "category", "") in ("key", "funds"):
+                        _abort()
+                        raise  # every sibling is doomed identically
+                    errors.append((i, getattr(err, "category", "network"),
+                                   getattr(err, "diagnosis", None) or str(err)))
+                    continue
+                if served != model:
+                    # H4 disclosure: fallback stayed available on this lane
+                    # (a lone best-of model is not an explicit SET), but a
+                    # swap must never be silent — name requested → served.
+                    print(f"ambient: best-of sample {i + 1} was served by "
+                          f"'{served}' (requested '{model}' — --fallback)",
+                          file=sys.stderr)
+                samples[i] = {"index": i, "content": out, "partial": partial,
+                              "cached": False, "served_model": served}
+                if usage:
+                    saw_usage = True
+                    tin = _as_pos_int(usage.get("prompt_tokens"), 0)
+                    tout = _as_pos_int(usage.get("completion_tokens"), 0)
+                    usage_tot["prompt_tokens"] += tin
+                    usage_tot["completion_tokens"] += tout
+                    per = usage_by_served.setdefault(
+                        served, {"prompt_tokens": 0, "completion_tokens": 0})
+                    per["prompt_tokens"] += tin
+                    per["completion_tokens"] += tout
+                    if usage.get("_estimated"):
+                        per["_estimated"] = True
+                    est_any = est_any or bool(usage.get("_estimated"))
+        except KeyboardInterrupt:
+            print("\nambient: cancelling best-of…", file=sys.stderr)
+            _abort()
+            raise
+        finally:
+            if not aborted:
+                pool.shutdown(wait=True)
+    if not samples:
+        cat, diag = ((errors[0][1], errors[0][2]) if errors
+                     else ("empty", "no sample produced output"))
+        raise ChatError(cat, f"all {k} best-of samples failed — first: {diag}")
+    ordered = [samples[i] for i in sorted(samples)]
+    best_i, method, note = select_best_sample([s["content"] for s in ordered])
+    best = ordered[best_i]
+    best_served = best.get("served_model", model)
+    usage_out = None
+    if saw_usage and usage_tot["prompt_tokens"] + usage_tot["completion_tokens"]:
+        usage_out = dict(usage_tot)
+        if est_any:
+            usage_out["_estimated"] = True
+    # H1 honesty: a run with FAILED samples is a degraded pick — the result
+    # is PARTIAL (exit 2 unless --allow-partial), and the coverage reason
+    # names exactly which samples failed and why.
+    fail_note = None
+    if errors:
+        fail_note = (f"{len(errors)}/{k} sample(s) failed: " + "; ".join(
+            f"sample {i + 1} [{c}]: {redact(d, api_key)}"
+            for i, c, d in sorted(errors)))
+        print(f"ambient: {len(errors)}/{k} sample(s) failed — selection ran "
+              f"over the {len(ordered)} that succeeded", file=sys.stderr)
+    partial = best["partial"] or bool(errors)
+    reason_bits = []
+    if best["partial"]:
+        reason_bits.append("selected sample was salvaged/truncated")
+    if fail_note:
+        reason_bits.append(fail_note)
+    reason = "; ".join(reason_bits) or None
+    if want_json:
+        emit_json(
+            kind, model=best_served, api_key=api_key, content=best["content"],
+            partial=partial, reason=reason, usage=usage_out,
+            allow_partial=getattr(args, "allow_partial", False),
+            extra={
+                "best_of": k,
+                "selected_index": best["index"],
+                "selection": {"method": method, "note": note},
+                "candidates": [
+                    {"index": s["index"], "content": s["content"],
+                     "partial": s["partial"], "cached": s["cached"],
+                     "served_model": s.get("served_model", model)}
+                    for s in ordered],
+                # SAME shape on every surface (Codex M2): a list of
+                # {index, category, diagnosis} + an additive count.
+                "failed_samples": [
+                    {"index": i, "category": c, "diagnosis": redact(d, api_key)}
+                    for i, c, d in sorted(errors)],
+                "failed_sample_count": len(errors),
+                # Codex H1: the per-SERVED-model token split — the ONLY
+                # honest basis for pricing a mixed-served run (a fallback
+                # sample bills at ITS model's price, not the selected one's).
+                **({"usage_by_served_model": {
+                        m: dict(u)
+                        for m, u in sorted(usage_by_served.items())}}
+                   if usage_by_served else {}),
+                **({"requested_model": model}
+                   if best_served != model else {}),
+            })
+        return
+    for s in ordered:
+        tag = (" (cached)" if s["cached"] else "") \
+            + (" [PARTIAL]" if s["partial"] else "") \
+            + (f" (served by {s['served_model']})"
+               if s.get("served_model", model) != model else "")
+        print(redact(f"--- best-of sample {s['index'] + 1}/{k}{tag} ---",
+                     api_key))
+        print(redact(s["content"], api_key) + "\n")
+    print(redact(f"=== best-of selection: sample {best['index'] + 1} "
+                 f"({method}: {note}) ===", api_key))
+    render_result(best["content"], partial,
+                  reason or "selected sample was salvaged/truncated",
+                  args, api_key, usage_out, best_served,
+                  usage_by_model=usage_by_served or None)
+
+
+def _answers_agreement(texts):
+    """(level, mean_ratio, note) — TEXTUAL-similarity agreement across
+    consensus answers. Deliberately humble: it measures how alike the words
+    are (deterministic, stdlib difflib), it does not verify semantics — the
+    note says so, and divergence is surfaced loudly."""
+    if len(texts) < 2:
+        return "n/a", 0.0, "fewer than two answers — nothing to compare"
+    clipped = [re.sub(r"\s+", " ", t.strip().lower())[:20_000] for t in texts]
+    ratios = [difflib.SequenceMatcher(None, clipped[i], clipped[j]).ratio()
+              for i in range(len(clipped)) for j in range(i + 1, len(clipped))]
+    mean = sum(ratios) / len(ratios)
+    pct = int(mean * 100)
+    if mean >= 0.8:
+        return "high", mean, (
+            f"answers are textually very similar ({pct}%) — the models "
+            "broadly agree (similarity of wording, not a semantic proof)")
+    if mean >= 0.5:
+        return "medium", mean, (
+            f"answers partially overlap (textual similarity {pct}%) — "
+            "compare the differing details before trusting either")
+    return "low", mean, (
+        f"answers DIVERGE (textual similarity {pct}%) — verify "
+        "independently before trusting any single one")
+
+
+def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc):
+    """7b: run the SAME ask on several EXPLICITLY-named models (--consensus —
+    the set is the user's choice, SACRED) concurrently behind ONE summed
+    up-front cost gate, then print every model's answer plus an agreement/
+    divergence note. Fail-fast semantics mirror audit --consensus: key/funds/
+    network abort the whole set; any other per-model failure is reported and
+    makes the result PARTIAL, never silently dropped."""
+    models = _parse_consensus_models(args, catalog, api_key)
+    prompt = f"{question}\n\n{doc}".strip() if doc else question
+    want_json = getattr(args, "json", False)
+    explicit_max = getattr(args, "max_tokens", None) is not None
+    expected_sum = bound_sum = 0.0
+    parts, profiles = [], {}
+    for m in models:
+        note_if_hidden(m, conf, source="--consensus")
+        p = model_profile(catalog, m)
+        profiles[m] = p
+        # consensus ask is single-shot only — a split lane would multiply the
+        # fan-out by the model count with no corroboration payoff. Honest
+        # refusal up front, before any spend.
+        if int(len(prompt) * density_factor(prompt)) > p.single_shot_chars:
+            usage_exit(
+                f"input too large for --consensus on '{m}' (consensus asks "
+                "are single-shot) — shrink the input, or drop --consensus "
+                "and let the normal ask lane split it")
+        budget = args.max_tokens if explicit_max else p.output_budget
+        exp, bnd, _asm = estimate_cost(catalog, m, len(prompt), 1, budget)
+        expected_sum += exp
+        bound_sum += bnd
+        parts.append(f"{m.split('/')[-1]} ~${exp:.2f}")
+    print(f"ambient: consensus ask estimated ~${expected_sum:.2f} "
+          f"({' + '.join(parts)})", file=sys.stderr)
+    # ONE summed gate for the whole model set — ceiling + fleet reservation
+    # + TTY confirmation, before the first call.
+    _gate_amount(expected_sum, args, conf, bound=bound_sum)
+    messages = ([{"role": "system", "content": args.system}]
+                if getattr(args, "system", None) else []) \
+        + [{"role": "user", "content": prompt}]
+    results = [None] * len(models)   # (content, usage, served) per model
+    failures = [None] * len(models)  # ChatError per model
+    gate = threading.Semaphore(_resolve_parallel(args))
+    cancel_event = threading.Event()
+
+    def _one(idx, m):
+        if cancel_event.is_set():
+            raise ChatError("cancelled", "consensus ask cancelled")
+        wa = argparse.Namespace(**vars(args))
+        if not explicit_max:
+            wa.max_tokens = None
+        # SACRED (Codex H4): the --consensus set IS the user's model choice —
+        # fallback must never substitute a member; a workerless model is
+        # reported as its own failure instead.
+        wa._no_fallback = True
+        apply_output_budget(wa, profiles[m], len(prompt))
+        with gate:
+            if cancel_event.is_set():
+                raise ChatError("cancelled", "consensus ask cancelled")
+            try:
+                content, usage, body = complete(api_key, api_url, m,
+                                                messages, wa)
+            except NetworkError:
+                cancel_event.set()
+                raise
+            except ChatError as err:
+                if err.category in ("key", "funds"):
+                    cancel_event.set()
+                raise
+        partial = (bool(body.get("salvaged_partial"))
+                   or body.get("finish_reason") == "length")
+        return content, usage, body.get("_served_model", m), partial
+
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(_resolve_parallel(args), len(models)))
+
+    def _abort():
+        cancel_event.set()
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)  # py3.9+
+        except TypeError:
+            pool.shutdown(wait=False)                       # py3.8
+
+    try:
+        futs = {pool.submit(_one, i, m): i for i, m in enumerate(models)}
+        for fut in concurrent.futures.as_completed(futs):
+            i = futs[fut]
+            try:
+                results[i] = fut.result()
+            except ChatError as err:
+                if err.category in ("key", "funds"):
+                    _abort()
+                    raise  # every sibling is doomed identically
+                failures[i] = err
+            except NetworkError:
+                _abort()
+                raise
+    except KeyboardInterrupt:
+        print("\nambient: cancelling consensus ask…", file=sys.stderr)
+        _abort()
+        raise
+    pool.shutdown(wait=True)
+    answered = [(m, r) for m, r in zip(models, results) if r is not None]
+    failed = [(m, e) for m, e in zip(models, failures) if e is not None]
+    level, mean, note = _answers_agreement([r[0] for _m, r in answered])
+    partial = bool(failed) or any(r[3] for _m, r in answered)
+    reason = (f"{len(failed)}/{len(models)} model(s) failed: "
+              + ", ".join(m for m, _e in failed)) if failed else None
+    if want_json:
+        answers = []
+        for m, r, e in zip(models, results, failures):
+            if r is not None:
+                answers.append({"model": m, "content": r[0],
+                                "partial": r[3], "served_model": r[2]})
+            else:
+                answers.append({"model": m, "error": {
+                    "category": e.category,
+                    "diagnosis": redact(e.diagnosis, api_key)}})
+        emit_json(
+            "ask", model=",".join(models), api_key=api_key,
+            partial=partial, reason=reason,
+            allow_partial=getattr(args, "allow_partial", False),
+            extra={"consensus": list(models), "answers": answers,
+                   "agreement": {"level": level,
+                                 "similarity": round(mean, 3),
+                                 "note": note}})
+        return
+    print(f"Consensus ask across {len(models)} models:\n")
+    for m, r in zip(models, results):
+        print(redact(f"=== {m} ===", api_key))
+        if r is None:
+            continue
+        content, usage, served, was_partial = r
+        if was_partial:
+            print(paint("⚠ PARTIAL (salvaged/truncated)", "1;33"))
+        print(redact(content, api_key) + "\n")
+        if usage:
+            print(f"[ambient {served} | in={usage.get('prompt_tokens')} "
+                  f"out={usage.get('completion_tokens')} tokens"
+                  f"{savings_note(served, usage, catalog, conf)}]",
+                  file=sys.stderr)
+    for m, e in failed:
+        print(redact(f"=== {m} ===\n(failed [{e.category}]: {e.diagnosis})\n",
+                     api_key))
+    if answered:
+        print(redact(f"Agreement: {level} — {note}", api_key))
+    else:
+        print("No usable answer from any model — this is NOT a clean result. "
+              "Retry or check `ambient models`.")
+        sys.exit(EXIT_PARTIAL)
+    if partial and not getattr(args, "allow_partial", False):
+        sys.exit(EXIT_PARTIAL)
 
 
 # --------------------------------------------------------------------------
@@ -5335,18 +5899,169 @@ def git_diff_inputs(staged, ref):
     return labeled
 
 
-def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
-                  conf, gate=None, cancel_event=None):
-    """Structured audit on ONE model → (findings, ok) (D8 consensus helper). ok
-    is False when the model errored, was unready, or returned unparseable/partial
-    output — so consensus can't present a FAILURE as 'no defects' (Codex Wave D
-    HIGH). Each model gets its OWN profile/budget. `gate`/`cancel_event` flow
-    through to run_map_reduce so the consensus lane's shared cap and fail-fast
-    reach every model's inner fan-out."""
-    if cancel_event is not None and cancel_event.is_set():
-        # Consensus is unwinding (fatal sibling / Ctrl-C): a queued model can
-        # race past cancel_futures into a pool worker — bill it NOTHING.
-        return [], False
+# --------------------------------------------------------------------------
+# `audit --install-hook` (v3 Phase 7d). The hook is a FIXED, compiled-in
+# shell script: it RUNS `ambient audit` on the staged/outgoing diff and greps
+# the verdict — it never contains, and can never contain, model output (the
+# SKILL trust boundary: model output is data, never code that runs).
+
+AMBIENT_HOOK_MARKER = "# ambient-code audit hook v1"
+
+
+def _render_hook(name):
+    """The fixed git-hook script for `name` (pre-commit|pre-push). Threshold
+    (documented in the script itself): BLOCK only on verdict "FIX FIRST"
+    (CRITICAL/HIGH findings); AMBIENT_HOOK_MODE=warn makes it report-only.
+    Everything else — audit unavailable, unconfigured, nothing staged,
+    network down — FAILS OPEN: a review hook must never brick commits."""
+    if name == "pre-commit":
+        audit_args = "--staged --json"
+        what = "staged diff"
+        bypass = "git commit --no-verify"
+    else:
+        audit_args = '--diff "@{u}...HEAD" --json'
+        what = "outgoing commits (upstream...HEAD)"
+        bypass = "git push --no-verify"
+    return f"""#!/bin/sh
+{AMBIENT_HOOK_MARKER} ({name})
+# Installed by: ambient audit --install-hook {name}
+# FIXED script - it only RUNS `ambient audit` on the {what}
+# and reads the verdict; it never contains or executes model output.
+#
+# Threshold: BLOCKS only on verdict "FIX FIRST" (CRITICAL/HIGH findings).
+#   AMBIENT_HOOK_MODE=warn      report findings but never block
+#   bypass once:                {bypass}
+#   uninstall:                  ambient audit --uninstall-hook {name}
+command -v ambient >/dev/null 2>&1 || {{
+    echo "ambient-hook: ambient not on PATH - skipping audit" >&2
+    exit 0
+}}
+out=$(ambient audit {audit_args} --yes 2>/dev/null)
+rc=$?
+if [ -z "$out" ]; then
+    echo "ambient-hook: audit produced no output (rc=$rc) - skipping (fail-open)" >&2
+    exit 0
+fi
+printf '%s\\n' "$out"
+if printf '%s' "$out" | grep -q '"verdict": "FIX FIRST"'; then
+    if [ "$AMBIENT_HOOK_MODE" = "warn" ]; then
+        echo "ambient-hook: verdict FIX FIRST - warn-only mode (AMBIENT_HOOK_MODE=warn), not blocking" >&2
+        exit 0
+    fi
+    echo "ambient-hook: verdict FIX FIRST - blocking. Bypass once: {bypass}; report-only: AMBIENT_HOOK_MODE=warn" >&2
+    exit 1
+fi
+exit 0
+"""
+
+
+def _git_hooks_dir(args):
+    """Absolute hooks dir of the CURRENT repo (worktree-aware via
+    `git rev-parse --git-path hooks`); clean usage error outside a repo."""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--git-path", "hooks"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        proc = None
+    if proc is None or proc.returncode != 0:
+        _fail_exit(args, "audit", "usage",
+                   "--install-hook/--uninstall-hook must run inside a git "
+                   "repository.", exit_code=EXIT_USAGE)
+    return os.path.abspath(proc.stdout.strip())
+
+
+def _hook_is_ours(existing, name):
+    """STRICT ownership check (Codex M3, tightened M1 round 2): a hook is
+    ambient's only when it is byte-identical to the current generated
+    template, OR carries the exact generated header — shebang + the marker
+    as the ENTIRE second line + the installed-by template line as the
+    ENTIRE third line. Every line must match EXACTLY (no startswith): a
+    foreign hook that merely SHARES the installed-by prefix (e.g. a fork
+    appending its own note) is foreign — it needs --force to replace and
+    is never auto-removed."""
+    if existing is None:
+        return False
+    if existing == _render_hook(name):
+        return True
+    lines = existing.splitlines()
+    return (len(lines) >= 3
+            and lines[0] == "#!/bin/sh"
+            and lines[1] == f"{AMBIENT_HOOK_MARKER} ({name})"
+            and lines[2] == f"# Installed by: ambient audit "
+                            f"--install-hook {name}")
+
+
+def cmd_audit_hook(args):
+    """Install/remove the ambient audit git hook. Pure hooks-file management:
+    needs no API key and makes no network call. Refuses to CLOBBER a hook it
+    did not install (strict template/header match — _hook_is_ours) unless
+    --force (which backs the original up first); uninstall removes ONLY an
+    ambient-installed hook."""
+    if getattr(args, "install_hook", None) and getattr(args, "uninstall_hook",
+                                                       None):
+        usage_exit("pass either --install-hook or --uninstall-hook, not both")
+    installing = bool(getattr(args, "install_hook", None))
+    name = args.install_hook if installing else args.uninstall_hook
+    hooks_dir = _git_hooks_dir(args)
+    path = os.path.join(hooks_dir, name)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            existing = fh.read()
+    except OSError:
+        existing = None
+    ours = _hook_is_ours(existing, name)
+    if not installing:
+        if existing is None:
+            print(f"ambient: no {name} hook installed — nothing to remove")
+            return
+        if not ours:
+            _fail_exit(args, "audit", "config",
+                       f"the existing {name} hook at {path} was NOT installed "
+                       "by ambient — refusing to remove it.")
+        os.unlink(path)
+        print(f"ambient: removed the ambient {name} hook ({path})")
+        return
+    if existing is not None and not ours:
+        if not getattr(args, "force", False):
+            _fail_exit(args, "audit", "config",
+                       f"a {name} hook already exists at {path} and was not "
+                       "installed by ambient — re-run with --force to replace "
+                       f"it (the original is saved to {name}.pre-ambient.bak).")
+        backup = path + ".pre-ambient.bak"
+        shutil.copy2(path, backup)
+        print(f"ambient: existing {name} hook backed up to {backup}",
+              file=sys.stderr)
+    script = _render_hook(name)
+    os.makedirs(hooks_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=hooks_dir, prefix=".tmp-hook-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    bypass = ("git commit --no-verify" if name == "pre-commit"
+              else "git push --no-verify")
+    audit_cmd = ("ambient audit --staged --json" if name == "pre-commit"
+                 else 'ambient audit --diff "@{u}...HEAD" --json')
+    print(f"ambient: installed the {name} hook → {path}\n"
+          f"  runs:        {audit_cmd}\n"
+          "  blocks on:   verdict FIX FIRST (CRITICAL/HIGH findings); "
+          "everything else passes\n"
+          "  warn-only:   AMBIENT_HOOK_MODE=warn (reports, never blocks)\n"
+          f"  bypass once: {bypass}\n"
+          f"  uninstall:   ambient audit --uninstall-hook {name}")
+
+
+def _audit_sample_prep(model, catalog, labeled, sys_prompt, args):
+    """Shared prep for ONE audit run: (a, sp, single, chunk, total) — the
+    args copy (budget + response_format resolved for THIS model), the final
+    system prompt, and the sizing numbers. Used by run_one_audit AND the
+    best-of miss-plan (H3) so precomputed cache keys match the live call's
+    BY CONSTRUCTION."""
     profile = model_profile(catalog, model)
     single, chunk = profile.single_shot_chars, profile.chunk_chars
     total = sum(len(t) for _, t in labeled)
@@ -5356,7 +6071,45 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
     a.response_format = rf
     sp = sys_prompt + (AUDIT_JSON_INSTRUCTION
                        if (rf is None or rf.get("type") == "json_object") else "")
+    return a, sp, single, chunk, total
+
+
+def _audit_single_key(model, sp, labeled, a):
+    """Salted content-address for ONE single-shot audit call — shared by
+    run_one_audit's cache lane and the best-of miss-plan (H3)."""
+    return _cache_key(model, sp, files_block(labeled), a.max_tokens,
+                      a.temperature, getattr(a, "response_format", None),
+                      salt=getattr(a, "_cache_salt", None))
+
+
+def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
+                  conf, gate=None, cancel_event=None):
+    """Structured audit on ONE model → (findings, ok) (D8 consensus helper). ok
+    is False when the model errored, was unready, or returned unparseable/partial
+    output — so consensus can't present a FAILURE as 'no defects' (Codex Wave D
+    HIGH). Each model gets its OWN profile/budget. `gate`/`cancel_event` flow
+    through to run_map_reduce so the consensus lane's shared cap and fail-fast
+    reach every model's inner fan-out. The single-shot path reads/writes the
+    same salted cache as the chunked fan-out (H3): a re-run — best-of salted
+    or not — re-bills only what the cache does not already hold."""
+    if cancel_event is not None and cancel_event.is_set():
+        # Consensus is unwinding (fatal sibling / Ctrl-C): a queued model can
+        # race past cancel_futures into a pool worker — bill it NOTHING.
+        return [], False
+    a, sp, single, chunk, total = _audit_sample_prep(
+        model, catalog, labeled, sys_prompt, args)
+    use_cache = not getattr(a, "no_cache", False)
+    cache_ttl = getattr(a, "cache_ttl", None) or CACHE_TTL_DEFAULT
     if total <= single:
+        key = _audit_single_key(model, sp, labeled, a)
+        if use_cache:
+            cached = _cache_get(key, cache_ttl)
+            if cached is not None:
+                obj = extract_json(cached)
+                if obj is not None and isinstance(obj.get("findings"), list):
+                    # only clean (ok) results are ever cached below, so a
+                    # hit is a full-coverage sample — billed NOTHING.
+                    return obj["findings"], True
         messages = [{"role": "system", "content": sp},
                     {"role": "user", "content": files_block(labeled)}]
         if cancel_event is not None and cancel_event.is_set():
@@ -5377,6 +6130,12 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
             ok = (not obj.get("_repaired")
                   and _b.get("finish_reason") != "length"
                   and not _b.get("salvaged_partial"))
+            # Cache only CLEAN same-model results (mirrors run_map_reduce):
+            # a partial/repaired/fallback-served answer must never resume a
+            # later run as full coverage.
+            if ok and use_cache \
+                    and _b.get("_served_model", model) == model:
+                _cache_put(key, content)
             return obj["findings"], ok
         except ChatError as err:
             if err.category in ("key", "funds"):
@@ -5450,9 +6209,11 @@ def _parse_consensus_models(args, catalog, api_key):
                              + (f" (did you mean: {close[0]}?)" if close else ""))
             cmsg = ("unknown consensus model(s): " + ", ".join(hints)
                     + " — nothing was run or billed.")
-            if _json_mode(args):
-                emit_json_error("consensus", "usage", cmsg, api_key)
-            sys.exit(f"ambient: {cmsg}")
+            # M2: a bad model id is a USAGE error — exit 64 on BOTH the
+            # --json and prose paths (was: envelope exit_code 1 + a bare
+            # sys.exit(string) → 1), matching every other usage refusal.
+            _fail_exit(args, "consensus", "usage", cmsg,
+                       exit_code=EXIT_USAGE, api_key=api_key)
     return models
 
 
@@ -5493,9 +6254,53 @@ def _consensus_estimate(catalog, models, labeled, total):
     return expected_sum, bound_sum, parts, per_model_chunks, assumed_any
 
 
+def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
+                          explicit_max_tokens):
+    """[(miss_calls, miss_input_chars)] per best-of sample — the salted
+    cache entries the live run will NOT find, so the cost gate can price
+    ONLY what will actually be billed (Codex H3: the cache must be resolved
+    BEFORE the gate, exactly like run_map_reduce's own resume lane). Each
+    sample's args/keys are built through the SAME helpers run_one_audit
+    uses (_audit_sample_prep/_audit_single_key/_map_note), so a predicted
+    hit here is a real hit there by construction."""
+    use_cache = not getattr(args, "no_cache", False)
+    ttl = getattr(args, "cache_ttl", None) or CACHE_TTL_DEFAULT
+    plans = []
+    for i in range(k):
+        sa = argparse.Namespace(**vars(args))
+        sa._cache_salt = f"best-of:{i}"     # mirror _one_sample exactly
+        if not explicit_max_tokens:
+            sa.max_tokens = None
+        a, sp, single, chunk, total = _audit_sample_prep(
+            model, catalog, labeled, sys_prompt, sa)
+        if total <= single:
+            key = _audit_single_key(model, sp, labeled, a)
+            if use_cache and _cache_get(key, ttl) is not None:
+                plans.append((0, 0))
+            else:
+                plans.append((1, total))
+            continue
+        packed = pack_chunks(labeled, min(chunk, single))
+        code_map = build_code_map(labeled, budget=code_map_budget(single))
+        note = _map_note(sp, code_map, len(packed))
+        miss_calls, miss_input = 0, 0
+        for j, ch in enumerate(packed):
+            key = _cache_key(model, note.replace("{i}", str(j + 1)), ch,
+                             a.max_tokens, a.temperature,
+                             getattr(a, "response_format", None),
+                             salt=getattr(a, "_cache_salt", None))
+            if use_cache and _cache_get(key, ttl) is not None:
+                continue
+            miss_calls += 1
+            # each billed chunk re-sends the repo map in its system prompt
+            miss_input += len(ch) + len(code_map)
+        plans.append((miss_calls, miss_input))
+    return plans
+
+
 def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
                      eff_total, profile, dens, args, api_key,
-                     consensus_models=None):
+                     consensus_models=None, best_of=None):
     """5b: the upfront `audit --repo` plan — file count, chars, chunking and
     the est. cost, BEFORE anything is sent or billed. Prose goes to stderr;
     under --format json ONE compact plan object precedes the standard audit
@@ -5510,19 +6315,26 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
         expected, bound, _parts, per_model_chunks, assumed = \
             _consensus_estimate(catalog, consensus_models, labeled, total)
         n_chunks = sum(per_model_chunks.values())
+    elif best_of:
+        # Under --best-of the plan prices the FULL K-sample work
+        # (_consensus_estimate over [model]*K); the live gate prices only
+        # its cache-missing share (H3) — equal cold, less on a resume.
+        expected, bound, _parts, chunks_by, assumed = \
+            _consensus_estimate(catalog, [model] * best_of, labeled, total)
+        n_chunks = sum(chunks_by.values())
     else:
         n_chunks, expected, bound, assumed = _audit_split_estimate(
             catalog, model, reduce_model, labeled, total, eff_total, profile,
             dens, args.max_tokens, structured)
     # Whether the deep cross-file pass will run: default ON for --repo,
-    # honoring --deep/--no-deep — but NEVER under --consensus, where
-    # multi-model corroboration replaces it (Codex M2). Stated in the plan
+    # honoring --deep/--no-deep — but NEVER under --consensus or --best-of,
+    # where corroboration replaces it (Codex M2). Stated in the plan
     # so the printed strategy is honest about the flags' effect.
     deep_flag = getattr(args, "deep", None)
     # Mirror the runtime guard (deep runs only when there is >1 chunk): a
     # single-shot / single-chunk repo reports deep:false so the machine plan
     # can't promise a cross-file pass that will never run.
-    deep = (not getattr(args, "consensus", None)
+    deep = (not getattr(args, "consensus", None) and not best_of
             and (deep_flag if deep_flag is not None else True)
             and n_chunks > 1)
     if args.format == "json":
@@ -5544,15 +6356,22 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
             # total map calls the gate prices).
             plan["consensus"] = list(consensus_models)
             plan["n_chunks_by_model"] = per_model_chunks
+        if best_of:
+            plan["best_of"] = best_of  # est covers all K samples (7a)
         print(redact(json.dumps(plan, separators=(",", ":")), api_key))
         return
     sk = meta["skipped"]
     skipped_bits = ", ".join(
         f"{sk[k]} {k}" for k in ("binary", "lockfile", "oversize", "vendored")
         if sk.get(k))
-    strategy = (f"{n_chunks} map call(s) across consensus "
-                f"{', '.join(consensus_models)}" if consensus_models
-                else f"{n_chunks} chunk(s) on {model}")
+    if consensus_models:
+        strategy = (f"{n_chunks} map call(s) across consensus "
+                    f"{', '.join(consensus_models)}")
+    elif best_of:
+        strategy = (f"{n_chunks} map call(s) across {best_of} best-of "
+                    f"samples on {model}")
+    else:
+        strategy = f"{n_chunks} chunk(s) on {model}"
     print(
         f"ambient: repo audit plan — {meta['files']} files, "
         f"{meta['chars']:,} chars "
@@ -5609,6 +6428,13 @@ def cmd_audit(args, api_key, api_url, conf):
             exit_code=EXIT_USAGE, api_key=api_key,
         )
     focus = f"\nAudit focus: {args.focus}" if args.focus else ""
+    # 7a: K independent samples of the SAME audit (validated + temperature-
+    # bumped before any spend). Mutually exclusive with --consensus: they are
+    # two different corroboration lanes.
+    best_of_k = _resolve_best_of(args)
+    if best_of_k and getattr(args, "consensus", None):
+        usage_exit("--best-of cannot be combined with --consensus — pick one "
+                   "corroboration lane")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
@@ -5648,7 +6474,8 @@ def cmd_audit(args, api_key, api_url, conf):
         # 5b: report file count / chars / est. cost BEFORE any spend.
         _print_repo_plan(repo_meta, catalog, model, reduce_model, labeled,
                          total, eff_total, profile, dens, args, api_key,
-                         consensus_models=consensus_models)
+                         consensus_models=consensus_models,
+                         best_of=best_of_k)
 
     if getattr(args, "dry_run", False):
         # D6: preview using the SAME sizing functions, then exit without a call.
@@ -5675,11 +6502,22 @@ def cmd_audit(args, api_key, api_url, conf):
         # split helper prices map/reduce lanes exactly like cost_gate_mr
         # will on the real run — incl. the deterministic structured merge
         # that makes NO synthesis call.
-        n_chunks, expected, bound, assumed = _audit_split_estimate(
-            catalog, model, reduce_model, labeled, total, eff_total,
-            profile, dens, args.max_tokens, structured_preview)
+        if best_of_k:
+            # The plan prices the FULL K-sample work; the live gate then
+            # prices only the cache-missing share of it (H3) — equal on a
+            # cold cache, strictly less on a resume, never more.
+            expected, bound, _parts, chunks_by, assumed = _consensus_estimate(
+                catalog, [model] * best_of_k, labeled, total)
+            n_chunks = sum(chunks_by.values())
+        else:
+            n_chunks, expected, bound, assumed = _audit_split_estimate(
+                catalog, model, reduce_model, labeled, total, eff_total,
+                profile, dens, args.max_tokens, structured_preview)
         print("ambient audit plan (dry run — nothing sent):")
         print(f"  model:        {model} ({'reasoning' if profile.is_reasoning else 'direct'})")
+        if best_of_k:
+            print(f"  best-of:      {best_of_k} independent samples "
+                  f"(all K priced below)")
         if not one_pass and reduce_model != model and not structured_preview:
             print(f"  models:       map={model}, reduce={reduce_model}")
         print(f"  input:        {total:,} chars across {len(labeled)} labeled item(s)")
@@ -5725,10 +6563,13 @@ def cmd_audit(args, api_key, api_url, conf):
         # resolved for the DEFAULT model above, and inheriting that number
         # would mis-budget every other model in the set. An explicit
         # --max-tokens from the user still applies to all of them.
-        worker_args = args
+        worker_args = argparse.Namespace(**vars(args))
         if not explicit_max_tokens:
-            worker_args = argparse.Namespace(**vars(args))
             worker_args.max_tokens = None
+        # SACRED (Codex H4): the --consensus set IS the user's model choice —
+        # --fallback/AMBIENT_FALLBACK must never substitute a member. A
+        # workerless model is reported as ITS OWN failure below.
+        worker_args._no_fallback = True
         # R1: ONE shared gate caps TOTAL concurrent network calls across every
         # model's inner fan-out at the resolved width — without it N models ×
         # N chunks each = width² simultaneous calls (be kind to miners).
@@ -5867,6 +6708,189 @@ def cmd_audit(args, api_key, api_url, conf):
             sys.exit(EXIT_PARTIAL)
         return
 
+    if best_of_k:
+        # 7a: K INDEPENDENT samples of the same audit on the SAME model,
+        # findings ranked by CORROBORATION (seen in more samples first) with
+        # the vote count reported. ONE up-front gate covers all K runs (the
+        # same shared estimate the dry-run plan printed); each sample runs
+        # through run_one_audit in its own salted cache lane so a re-run
+        # resumes per sample. Fail-fast mirrors the consensus lane.
+        if getattr(args, "repo", None) is not None \
+                or getattr(args, "deep", None) is not None:
+            # Same honesty note as --consensus: corroboration replaces the
+            # deep cross-file pass — say so instead of silently ignoring it.
+            print("ambient: note — the deep cross-file pass is skipped "
+                  "under --best-of (sample corroboration already "
+                  "cross-checks findings); --deep/--no-deep have no effect "
+                  "here", file=sys.stderr)
+        # H3: resolve the salted cache BEFORE the gate — a resumed best-of
+        # run must gate (and bill) ONLY the samples/chunks the cache does
+        # not already hold, mirroring run_map_reduce's own resume lane. On
+        # a cold cache this prices the same K-sample work the dry-run plan
+        # showed; on a warm one it prices strictly less — never more.
+        miss_plans = _best_of_audit_misses(
+            catalog, model, labeled, AUDIT_SYSTEM_PROMPT + focus, args,
+            best_of_k, explicit_max_tokens)
+        miss_calls_total = sum(c for c, _ in miss_plans)
+        cached_samples = sum(1 for c, _ in miss_plans if c == 0)
+        if miss_calls_total:
+            prof_bo = model_profile(catalog, model)
+            expected_sum = bound_sum = 0.0
+            for n_calls_m, in_chars_m in miss_plans:
+                if not n_calls_m:
+                    continue
+                exp_m, bnd_m, _asm = estimate_cost(
+                    catalog, model, in_chars_m, n_calls_m,
+                    prof_bo.output_budget)
+                expected_sum += exp_m
+                bound_sum += bnd_m
+            print(f"ambient: best-of {best_of_k} audit estimated "
+                  f"~${expected_sum:.2f} on {model} (temperature "
+                  f"{args.temperature})"
+                  + (f" — {cached_samples}/{best_of_k} sample(s) fully "
+                     "cached, not re-billed" if cached_samples else ""),
+                  file=sys.stderr)
+            _gate_amount(expected_sum, args, conf, bound=bound_sum)
+        else:
+            print(f"ambient: best-of {best_of_k} audit — every sample is "
+                  "cached (nothing to gate or re-bill)", file=sys.stderr)
+        gate = threading.Semaphore(_resolve_parallel(args))
+        cancel_event = threading.Event()
+        results = [None] * best_of_k
+        worker_errs = [None] * best_of_k
+
+        def _one_sample(i):
+            print(f"ambient: best-of — audit sample {i + 1}/{best_of_k}…",
+                  file=sys.stderr)
+            sa = argparse.Namespace(**vars(args))
+            sa._cache_salt = f"best-of:{i}"  # per-sample cache lane (resume)
+            if not explicit_max_tokens:
+                sa.max_tokens = None  # run_one_audit re-derives per profile
+            return run_one_audit(model, catalog, labeled,
+                                 AUDIT_SYSTEM_PROMPT + focus, sa, api_key,
+                                 api_url, conf, gate=gate,
+                                 cancel_event=cancel_event)
+
+        bpool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(_resolve_parallel(args), best_of_k))
+
+        def _abort_best_of():
+            cancel_event.set()
+            try:
+                bpool.shutdown(wait=False, cancel_futures=True)  # py3.9+
+            except TypeError:
+                bpool.shutdown(wait=False)                       # py3.8
+
+        try:
+            futs = {bpool.submit(_one_sample, i): i for i in range(best_of_k)}
+            for fut in concurrent.futures.as_completed(futs):
+                i = futs[fut]
+                try:
+                    results[i] = fut.result()
+                except ChatError as err:
+                    if err.category in ("key", "funds"):
+                        _abort_best_of()
+                        raise  # every sibling is doomed identically
+                    worker_errs[i] = err
+                except NetworkError:
+                    _abort_best_of()
+                    raise
+                except Exception as err:  # noqa: BLE001 — re-raised below
+                    worker_errs[i] = err
+        except KeyboardInterrupt:
+            print("\nambient: cancelling best-of…", file=sys.stderr)
+            _abort_best_of()
+            raise
+        bpool.shutdown(wait=True)
+        first_err = next((e for e in worker_errs if e is not None), None)
+        if first_err is not None:
+            raise first_err
+        agg = []
+        failed_n = 0
+        for i, (findings, ok_sample) in enumerate(results):
+            if not ok_sample:
+                failed_n += 1
+            for f in findings:
+                if not isinstance(f, dict):
+                    continue
+                fm = re.match(r"^(.*?):(\d+)$", str(f.get("file", "")))
+                if fm:
+                    f["file"], f["line"] = fm.group(1), int(fm.group(2))
+                path, line, title = _finding_sig(f)
+                slot = None
+                for s in agg:
+                    sp, sl, st = s["sig"]
+                    if sp == path and _titles_match(st, title) \
+                            and abs(sl - line) <= 3:
+                        slot = s
+                        break
+                if slot is None:
+                    agg.append({"sig": (path, line, title), "f": f,
+                                "votes": {i}})
+                    continue
+                slot["votes"].add(i)
+                if SEVERITY_ORDER.get(f.get("severity"), 9) < \
+                        SEVERITY_ORDER.get(slot["f"].get("severity"), 9):
+                    slot["f"] = f
+        ranked = sorted(
+            agg, key=lambda s: (-len(s["votes"]),
+                                SEVERITY_ORDER.get(s["f"].get("severity"), 9)))
+        partial = failed_n > 0
+        reason = (f"{failed_n}/{best_of_k} sample(s) returned no usable "
+                  "audit" if failed_n else None)
+        if args.format == "json":
+            out_findings = [
+                {**s["f"], "corroboration": {"count": len(s["votes"]),
+                                             "of": best_of_k}}
+                for s in ranked]
+            emit_json(
+                "audit", model=model, api_key=api_key,
+                findings=out_findings,
+                verdict=_verdict_from([s["f"] for s in ranked], partial),
+                partial=partial, reason=reason,
+                extra={
+                    "best_of": best_of_k,
+                    # SAME failed_samples shape as ask/code --best-of
+                    # (Codex M2): a list of {index, category, diagnosis},
+                    # plus the additive count the old int field carried.
+                    "failed_samples": [
+                        {"index": i, "category": "unusable",
+                         "diagnosis": "sample returned no usable audit "
+                                      "(failed, unparseable, or truncated)"}
+                        for i, (_f, ok_s) in enumerate(results)
+                        if not ok_s],
+                    "failed_sample_count": failed_n,
+                },
+                allow_partial=getattr(args, "allow_partial", False))
+            return
+        print(f"Best-of-{best_of_k} audit on {model} — corroborated "
+              "findings first:\n")
+        if failed_n:
+            print(f"⚠ {failed_n}/{best_of_k} sample(s) did NOT return a "
+                  "usable audit — coverage is INCOMPLETE, not a clean pass.\n",
+                  file=sys.stderr)
+        if not ranked:
+            if failed_n == best_of_k:
+                print("No usable audit from any sample (all failed) — this "
+                      "is NOT a clean result. Retry or check `ambient "
+                      "models`.")
+                sys.exit(EXIT_PARTIAL)
+            print("No defects found by the samples that responded.")
+        for s in ranked:
+            f = s["f"]
+            tag = f"[{len(s['votes'])}/{best_of_k} samples]"
+            print(redact(f"{tag} [{f.get('severity', '?')}] "
+                         f"{f.get('file', '?')}:{f.get('line', '?')} — "
+                         f"{f.get('title', '')}", api_key))
+            if f.get("scenario"):
+                print(redact(f"    {f['scenario']}", api_key))
+        print(redact(
+            f"Verdict: {_verdict_from([s['f'] for s in ranked], partial)}",
+            api_key))
+        if partial and not getattr(args, "allow_partial", False):
+            sys.exit(EXIT_PARTIAL)
+        return
+
     # A4: structured findings output (--json/--format report). Gate the request
     # on the model's real capability; append the shape when it lacks strict schema.
     structured = args.format in ("json", "report")
@@ -5962,6 +6986,18 @@ def cmd_code(args, api_key, api_url, conf):
                    'ambient code "write a rate limiter" -f context.py')
     warn_if_stdin_ignored("`code` does not read stdin — pass context with -f FILE")
     refuse_if_secrets([("task", task)], args.allow_secrets)
+    # 7a validated UP FRONT (Codex H2): an invalid --best-of must fail usage
+    # (64) BEFORE the catalog fetch and BEFORE any billed task/context
+    # distillation pass — zero spend on a doomed invocation. The 0→0.7
+    # diversity bump _resolve_best_of applies is for the GENERATION samples
+    # ONLY (Fable LOW): the billed task-brief/context distillation passes
+    # below keep the user's own temperature (extraction wants determinism,
+    # not diversity), so it is restored here and re-applied at the
+    # _best_of_chat call.
+    pre_best_of_temp = getattr(args, "temperature", None)
+    best_of_k = _resolve_best_of(args)
+    best_of_temp = getattr(args, "temperature", None)
+    args.temperature = pre_best_of_temp
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     catalog = safe_catalog(api_url, api_key)
@@ -6066,7 +7102,230 @@ def cmd_code(args, api_key, api_url, conf):
         },
         {"role": "user", "content": user_content},
     ]
+    # 7a: --best-of applies to the final GENERATION call only (any brief/
+    # context distillation above stays a single pass — sampling diversity
+    # buys nothing on extraction). Validated at the TOP of cmd_code (H2);
+    # the diversity temperature applies HERE only (Fable LOW).
+    if best_of_k:
+        args.temperature = best_of_temp
+        _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
+                      catalog, conf, kind="code")
+        return
     chat(api_key, api_url, model, messages, args, kind="code")
+
+
+# --------------------------------------------------------------------------
+# `ambient chat` — native REPL (v3 Phase 7c). A readline loop over the SAME
+# complete()/stream/redact/model_profile machinery as `ask`: rolling in-memory
+# history trimmed to the model window, streamed replies, a Phase-6 cost/
+# savings receipt after every turn, and per-turn cost gating + fleet
+# reservation. Nothing is persisted; the key is never printed (redact).
+
+CHAT_HELP = """commands:
+  /model <id>   switch model for the session (explicit — printed; `auto`
+                specs resolve via the live catalog like -m auto)
+  /model        show the current model
+  /clear        forget the conversation history
+  /help         this help
+  /exit         quit (Ctrl-D also quits; Ctrl-C only interrupts the
+                current turn)"""
+
+
+def _stdin_is_tty():
+    try:
+        return sys.stdin.isatty()
+    except Exception:  # noqa: BLE001 — a broken stdin is "not a TTY"
+        return False
+
+
+def _chat_input(prompt_str):
+    """One REPL line (isolated for testability; readline, when importable,
+    gives it line editing + in-session history for free)."""
+    return input(prompt_str)
+
+
+def _trim_chat_history(history, budget_chars):
+    """Return a NEW history list that fits `budget_chars`, dropping the
+    OLDEST turns first (user+assistant pairs, then singles). The most recent
+    exchange always survives — a REPL must never truncate what the user just
+    said in favor of stale turns."""
+    kept = list(history)
+
+    def size(msgs):
+        return sum(len(m.get("content", "")) for m in msgs)
+
+    while len(kept) > 2 and size(kept) > budget_chars:
+        kept = kept[2:]
+    while len(kept) > 1 and size(kept) > budget_chars:
+        kept = kept[1:]
+    return kept
+
+
+def cmd_chat(args, api_key, api_url, conf):
+    if not _stdin_is_tty():
+        _fail_exit(
+            args, "chat", "usage",
+            "ambient chat is an interactive REPL and needs a terminal — "
+            "for piped/scripted use, call `ambient ask` instead.",
+            exit_code=EXIT_USAGE, api_key=api_key)
+    try:
+        import readline  # noqa: F401 — stdlib line editing where available
+    except ImportError:
+        pass
+    catalog = safe_catalog(api_url, api_key)
+    model = route_model(args, conf, "chat", catalog)
+    explicit_max = getattr(args, "max_tokens", None) is not None
+    # SACRED (Codex H4): True after an explicit CONCRETE /model choice —
+    # those turns run with --fallback/AMBIENT_FALLBACK disabled so the
+    # picked model can never be silently swapped; an `auto` spec is
+    # explicit DELEGATION, so fallback stays available there.
+    model_pinned = False
+    history = []
+    print(f"ambient chat — {model} · /help for commands · /exit or Ctrl-D "
+          "to quit", file=sys.stderr)
+    while True:
+        try:
+            line = _chat_input("ambient> ")
+        except EOFError:
+            print("", file=sys.stderr)
+            break
+        except KeyboardInterrupt:
+            print("\n(^C — /exit or Ctrl-D quits)", file=sys.stderr)
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("/"):
+            cmd, _, rest = line.partition(" ")
+            if cmd in ("/exit", "/quit"):
+                break
+            if cmd == "/clear":
+                history = []
+                print("ambient: history cleared", file=sys.stderr)
+                continue
+            if cmd == "/help":
+                print(CHAT_HELP, file=sys.stderr)
+                continue
+            if cmd == "/model":
+                spec = rest.strip()
+                if not spec:
+                    print(f"ambient: current model: {model}", file=sys.stderr)
+                    continue
+                # SACRED: an explicit user switch. `auto` specs delegate via
+                # the same resolver as `-m auto` (the pick is printed there);
+                # a concrete id is taken as-is and printed — a bad id gets
+                # the normal [model] diagnosis on the next turn.
+                if is_auto_model(spec):
+                    try:
+                        model = resolve_auto_model(spec, catalog, conf, 0,
+                                                   args)
+                    except SystemExit:
+                        continue  # diagnosis already printed; REPL survives
+                    model_pinned = False  # delegation — fallback may apply
+                else:
+                    note_if_hidden(spec, conf, source="/model")
+                    model = spec
+                    model_pinned = True   # concrete choice — SACRED (H4)
+                    print(f"ambient: model → {model}", file=sys.stderr)
+                continue
+            print(f"ambient: unknown command {cmd} — /help", file=sys.stderr)
+            continue
+        # ---- one turn -----------------------------------------------------
+        profile = model_profile(catalog, model)
+        sys_len = len(getattr(args, "system", None) or "")
+        if sys_len + len(line) > profile.single_shot_chars:
+            # M1: even with ALL history dropped this turn cannot fit the
+            # model's window — refuse it cleanly BEFORE gating or billing
+            # (a floored budget would silently overflow context). The REPL
+            # survives; nothing was sent and history is unchanged.
+            print(
+                f"ambient: that message is too large for {model}'s context "
+                f"window ({sys_len + len(line):,} chars > "
+                f"{profile.single_shot_chars:,}) — nothing was sent. "
+                "Shorten it, or use `ambient ask -f FILE` for large inputs.",
+                file=sys.stderr)
+            continue
+        # Rolling window: keep the system prompt + the new line, drop the
+        # OLDEST history past the model's single-shot budget.
+        budget = max(2_000, profile.single_shot_chars - sys_len - len(line))
+        history = _trim_chat_history(history, budget)
+        # H2: _trim_chat_history floors the budget at 2000 chars and always
+        # keeps the most recent exchange, so the ASSEMBLED request (system
+        # + trimmed history + latest) can still exceed the window on a
+        # near-window line. Verify the REAL assembled size and drop more
+        # history oldest-first — down to none. system+latest alone always
+        # fits here (refused above), so a doomed over-window request is
+        # never gated or billed.
+        while history and sys_len + len(line) + sum(
+                len(m.get("content", "")) for m in history) \
+                > profile.single_shot_chars:
+            history = history[1:]
+        messages = ([{"role": "system", "content": args.system}]
+                    if getattr(args, "system", None) else []) \
+            + history + [{"role": "user", "content": line}]
+        turn_args = argparse.Namespace(**vars(args))
+        if not explicit_max:
+            turn_args.max_tokens = None  # re-derive for THIS turn's size
+        # SACRED (H4): a /model-pinned turn never falls back to another model.
+        turn_args._no_fallback = model_pinned
+        input_chars = sum(len(m.get("content", "")) for m in messages)
+        apply_output_budget(turn_args, profile, input_chars)
+        # Every turn is cost-gated + fleet-reserved like any other call
+        # (ceiling, aggregate fleet budget, >$0.50 TTY confirm) — quietly:
+        # no per-turn estimate line, but a refusal prints its diagnosis.
+        expected, bound, _asm = estimate_cost(
+            catalog, model, input_chars, 1, turn_args.max_tokens)
+        try:
+            _gate_amount(expected, turn_args, conf, bound=bound)
+        except SystemExit:
+            continue  # refused/declined turn — nothing sent, REPL survives
+        streamed = []
+
+        def on_delta(piece):
+            sys.stdout.write(redact(piece, api_key))
+            sys.stdout.flush()
+            streamed.append(piece)
+
+        try:
+            content, usage, body = complete(api_key, api_url, model,
+                                            messages, turn_args,
+                                            on_delta=on_delta)
+        except KeyboardInterrupt:
+            # Ctrl-C ends the TURN, not the REPL. The half-streamed reply is
+            # discarded (not appended to history) — an interrupted answer
+            # must not silently poison later turns.
+            print("\nambient: turn interrupted (^C) — reply discarded, "
+                  "history unchanged", file=sys.stderr)
+            continue
+        except (ChatError, NetworkError) as err:
+            if streamed:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            cat = getattr(err, "category", "network")
+            diag = getattr(err, "diagnosis", None) or str(err)
+            print(redact(f"ambient [{cat}]: {diag}", api_key),
+                  file=sys.stderr)
+            continue
+        clean_stream = bool(streamed) \
+            and "".join(streamed).strip() == content
+        if not clean_stream:
+            if streamed:
+                sys.stdout.write(
+                    "\n[ambient: stream restarted — full reply below]\n")
+            sys.stdout.write(redact(content, api_key))
+        if not content.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+        history = history + [{"role": "user", "content": line},
+                             {"role": "assistant", "content": content}]
+        if usage:
+            served = body.get("_served_model", model) \
+                if isinstance(body, dict) else model
+            # Phase-6 per-turn receipt: cost + vs-frontier saving.
+            print(f"[ambient {served} | in={usage.get('prompt_tokens')} "
+                  f"out={usage.get('completion_tokens')} tokens"
+                  f"{savings_note(served, usage, catalog, conf)}]",
+                  file=sys.stderr)
 
 
 BUILD_PLAN_SCHEMA = {
@@ -7606,6 +8865,15 @@ def add_common_flags(parser):
     )
 
 
+def _add_best_of_flag(parser):
+    parser.add_argument(
+        "--best-of", type=int, default=None, metavar="K", dest="best_of",
+        help=f"draw K independent samples (2-{BEST_OF_MAX}) at temperature>0 "
+             "and pick/corroborate the best — quality from cheap samples "
+             "(one up-front cost gate for all K)",
+    )
+
+
 def main():
     parser = _Parser(
         prog="ambient", description=__doc__,
@@ -7714,6 +8982,13 @@ def main():
         "--json", action="store_true",
         help="emit a stable JSON envelope instead of prose",
     )
+    p_ask.add_argument(
+        "--consensus", metavar="M1,M2",
+        help="ask the SAME question on several explicitly-named models and "
+             "report each answer plus an agreement/divergence note "
+             "(one summed cost gate up front)",
+    )
+    _add_best_of_flag(p_ask)
     add_common_flags(p_ask)
 
     p_audit = sub.add_parser(
@@ -7776,6 +9051,25 @@ def main():
         help="audit with several models and rank findings corroborated by 2+ "
              "first (usually only 2 models are READY at once)",
     )
+    p_audit.add_argument(
+        "--install-hook", metavar="HOOK", nargs="?", const="pre-commit",
+        choices=["pre-commit", "pre-push"], dest="install_hook",
+        help="install a FIXED git hook that runs `ambient audit` on the "
+             "staged/outgoing diff and blocks on verdict FIX FIRST "
+             "(default: pre-commit; needs no API key)",
+    )
+    p_audit.add_argument(
+        "--uninstall-hook", metavar="HOOK", nargs="?", const="pre-commit",
+        choices=["pre-commit", "pre-push"], dest="uninstall_hook",
+        help="remove the ambient-installed git hook (only ours — a foreign "
+             "hook is never touched)",
+    )
+    p_audit.add_argument(
+        "--force", action="store_true",
+        help="with --install-hook: replace an existing non-ambient hook "
+             "(the original is backed up to <hook>.pre-ambient.bak)",
+    )
+    _add_best_of_flag(p_audit)
     add_common_flags(p_audit)
 
     p_map = sub.add_parser(
@@ -7824,7 +9118,17 @@ and re-bill only the missing ones.""")
         "--json", action="store_true",
         help="emit a stable JSON envelope instead of prose",
     )
+    _add_best_of_flag(p_code)
     add_common_flags(p_code)
+
+    p_chat = sub.add_parser(
+        "chat",
+        help="interactive REPL on Ambient — streams each reply with a "
+             "per-turn cost/savings receipt; /model /clear /help /exit",
+    )
+    p_chat.add_argument("-s", "--system",
+                        help="system prompt for the whole session")
+    add_common_flags(p_chat)
 
     p_build = sub.add_parser(
         "build",
@@ -7966,6 +9270,12 @@ and re-bill only the missing ones.""")
         else:
             usage_exit("trust-url needs a URL (or --reset)")
         return
+    if args.command == "audit" and (getattr(args, "install_hook", None)
+                                    or getattr(args, "uninstall_hook", None)):
+        # Pure hooks-file management (7d): no key, no network — must work
+        # before any credentials exist.
+        cmd_audit_hook(args)
+        return
     if args.command == "models":
         # The catalog endpoint is unauthenticated — let a curious stranger see
         # the live network BEFORE creating an account (pre-signup funnel).
@@ -7982,6 +9292,7 @@ and re-bill only the missing ones.""")
         "ask": cmd_ask,
         "audit": cmd_audit,
         "map": cmd_map,
+        "chat": cmd_chat,
         "code": cmd_code,
         "build": cmd_build,
         "agent": cmd_agent,

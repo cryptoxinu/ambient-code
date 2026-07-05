@@ -23,6 +23,7 @@ always points at the active install, so never hardcode a path.
 | `/ambient model` | Model picking UX below. |
 | `/ambient audit <target>` | `git diff \| ambient audit` or `ambient audit <files> [--focus X] --json`, then verify + report. Whole codebase: `ambient audit --repo <dir> [--focus X] --json` — git-aware walker (`.gitignore` respected; binaries/lockfiles/vendored dirs skipped) that reports files + chars + est. cost BEFORE spending; under `--json` a one-line `{"status":"plan",…}` object precedes the standard envelope. A repo over the input ceiling is refused unless `--allow-cost`/`--allow-partial` (which audits what fits and reports the rest as an explicit coverage gap). `--parallel`/`--reduce-model`/`--consensus`/the cost gate apply unchanged; a bounded cross-file confirmation pass (ONE extra gated call max) is on by default for `--repo` — `--no-deep` skips it, and under `--consensus` it is always skipped (multi-model corroboration replaces it; `--deep`/`--no-deep` have no effect there). |
 | `/ambient map <prompt> <items>` | Bulk lane: `ambient map "<prompt>" <files> --json` (or pipe one item per line; `--jsonl` for objects). One prompt, applied independently per item, one JSONL envelope per item out. |
+| `/ambient chat` | The user's interactive REPL (`ambient chat` in THEIR terminal — it requires a TTY; scripted use routes to `ambient ask`). Streams replies, prints a per-turn cost/savings receipt, `/model` switches models mid-session (explicit + printed), `/clear` resets history, Ctrl-C interrupts only the current turn. Every turn is cost-gated + fleet-reserved. |
 | `/ambient build <task>` | Native build lane: write a precise brief, run `ambient build "<brief>" --dir <target> [-f context] --json --apply --yes`, read the manifest, review every file, run tests yourself. |
 | `/ambient agent` | Interactive opencode TUI for the user (`ambient agent`); headless one-offs via `ambient agent run "task"`. The key enters opencode's process env — never ask the agent to print its environment. |
 | `/ambient curate ...` | User model curation: `ambient curate` (status) / `hide <id\|glob>` / `show <id>` / `only <ids>` / `note <id> "text"` / `reset`. Curation shapes menus + automatic selection only — explicit `-m` always works. |
@@ -41,6 +42,11 @@ Every task-running `--json` surface (ask, code, audit, consensus, build) emits O
 envelope shape: `{"schema_version": 1, "kind": …, "status": "ok|partial", "model",
 "partial", "coverage_gap", "exit_code", …}` with `content` (ask/code), `findings` +
 `verdict` (audit/consensus), or `files[]` + `failed[]` + `advisory_steps[]` (build).
+Phase-7 lanes add ADDITIVE fields to the same envelope: `--best-of` →
+`best_of`, `candidates[]`, `selected_index`, `selection`, and (audit) a
+per-finding `corroboration:{count,of}`; `ask --consensus` → `consensus[]`,
+`answers[]`, `agreement:{level,similarity,note}`. `ambient chat` is a
+TTY-only REPL with no `--json` mode (script against `ambient ask` instead).
 `ambient models --json` emits a simpler catalog list (`{"schema_version": 1, "configured": …, "models": […]}`). Prefer `--json` for anything you script or fan out.
 
 `ambient map --json` is the exception to "ONE envelope": it streams **JSONL** —
@@ -96,6 +102,15 @@ code the user expects from you) when you see:
   over the digest yourself.
 - **A second opinion would help** — before a commit/PR or after a tricky fix:
   `git diff | ambient audit`, then triangulate its findings against your own review.
+  For a STANDING gate, offer `ambient audit --install-hook` (pre-commit or
+  pre-push): a FIXED shell script (never model-generated — it only runs
+  `ambient audit --staged --json` and greps the verdict) that blocks solely on
+  verdict FIX FIRST, fails open on any infrastructure trouble, warns instead of
+  blocking under `AMBIENT_HOOK_MODE=warn`, is bypassed once with
+  `git commit --no-verify`, never clobbers a foreign hook without `--force`
+  (backed up to `<hook>.pre-ambient.bak`), and uninstalls with
+  `--uninstall-hook` (only ambient's own hook is ever removed). Needs no API key
+  to install.
 - **The user mentions cost/tokens/budget** — mention that audits, drafts, and
   summaries can route to Ambient; `ambient usage` shows what it actually cost.
 One sentence, at most once per session per pattern — suggest, don't nag.
@@ -120,6 +135,21 @@ just work. Patterns, cheapest first:
   lifting, Claude synthesizes.
 - Only 1-3 models usually have live workers — a 10-wide fan-out on ONE model is fine
   (miners load-balance); check `ambient models` before spreading across models.
+- **Quality from cheapness (v3 Phase 7)** — on a 10-40x-cheaper network, MORE
+  SAMPLES often beats a bigger model. `--best-of K` (ask/code/audit, K=2-8)
+  draws K independent samples behind ONE up-front gate that prices all K;
+  samples cache per-index (salted), so re-runs resume and re-bill only missing
+  samples. ask/code print the K candidates + a deterministic, honestly-labeled
+  pick (majority for short answers, else similarity centroid — no hidden LLM
+  judge); audit ranks findings by CORROBORATION with the vote count
+  (`[2/3 samples]`; `--json` adds `best_of` + per-finding
+  `corroboration:{count,of}`). Temperature 0 is raised to 0.7 with a note
+  (identical samples corroborate nothing). `ask --consensus A,B` triangulates
+  the same question across an EXPLICIT model set (SACRED — never substituted):
+  one summed gate, every model's answer, and a textual-similarity agreement
+  note (high/medium/low — it says it measures wording, not semantics).
+  `--best-of` and `--consensus` are mutually exclusive; both fail fast on
+  key/funds/network and exit 2 on partial coverage.
 
 ## Model choice is SACRED
 

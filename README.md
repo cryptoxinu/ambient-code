@@ -83,11 +83,16 @@ ambient models           live model list (READY = serving now) · --all shows cu
 ambient use [id]         sticky default model picker (--chat/--code scopes)
 ambient curate …         choose which models the menus surface (hide/show/only/note)
 ambient ask "q"          one-shot answer · pipe docs: cat doc.txt | ambient ask "sum" -
+                         · --consensus A,B triangulates across models · --best-of K
 ambient audit [files]    adversarial code review · git diff | ambient audit · --consensus A,B
                          · --repo [DIR] audits a whole repository (git-aware walker)
+                         · --best-of K corroborates across K samples
+                         · --install-hook installs a pre-commit/pre-push audit gate
 ambient map "p" [files]  bulk lane: ONE prompt run independently over MANY items
                          (files, or one item per stdin line; --jsonl objects)
-ambient code "task"      single-file code generation (-f context.py)
+ambient chat             interactive REPL — streamed replies, per-turn cost receipt,
+                         /model /clear /help /exit
+ambient code "task"      single-file code generation (-f context.py) · --best-of K
 ambient build "task"     plan + generate a whole file-set (manifest-first, --apply writes)
 ambient agent            interactive agentic terminal on Ambient (opencode)
 ambient doctor           pinpoints key / funds / busy-model / network trouble
@@ -201,6 +206,70 @@ repo plan's `deep` field states what will actually happen.
 ```bash
 ambient audit --repo . --focus security --format report
 ambient audit --repo src/ --json --reduce-model z-ai/glm-5.2 > findings.json
+```
+
+**Quality from cheapness — `--best-of K`** (ask / code / audit). On a network
+this cheap, the smart move is often *more samples, not a bigger model*:
+`--best-of K` draws K **independent** samples (2-8) concurrently at
+temperature > 0 (an explicit `--temperature 0` is raised to 0.7 with a note —
+identical samples corroborate nothing) behind **one up-front cost gate that
+prices all K calls** before the first one. Each sample lives in its own
+salted cache lane, so an interrupted run resumes per sample and re-bills only
+the missing ones. For `ask`/`code` the K candidates are printed along with a
+deterministic, honestly-labeled selection — exact-majority vote for short
+answers, otherwise the pairwise-similarity centroid (no hidden LLM judge; the
+note states exactly which method picked what). For `audit`, findings are
+**ranked by corroboration** — a bug flagged by 2 of 3 samples ranks above a
+one-sample finding — with the vote count shown per finding (`[2/3 samples]`;
+under `--json` an additive `corroboration: {count, of}` per finding plus
+`best_of: K`). `--best-of` and `--consensus` are mutually exclusive (two
+different corroboration lanes), and under `--best-of` the repo deep pass is
+skipped for the same reason as under `--consensus`.
+
+```bash
+ambient ask "is this migration reversible?" --best-of 3
+ambient audit src/pay.py --best-of 3 --json     # corroboration-ranked findings
+```
+
+**Triangulate an answer — `ask --consensus A,B`.** The same question runs on
+several **explicitly-named** models (your set, never substituted)
+concurrently, behind one summed up-front gate. You get every model's answer,
+a per-model receipt, and an agreement note — a deterministic *textual*
+similarity measure (it says so; it is not a semantic proof): `high` /
+`medium` / `low`, with divergence surfaced loudly. Under `--json` the
+envelope adds `consensus`, per-model `answers`, and an `agreement` object. A
+funds/key/network failure aborts the whole set fail-fast; any other
+per-model failure is reported and makes the result PARTIAL (exit 2), never
+silently dropped.
+
+**Live conversation is `ambient chat`** — a native readline REPL on the same
+machinery as `ask`: replies stream as they generate, every turn ends with the
+cost/savings receipt, and every turn is cost-gated and fleet-reserved like
+any other call. Rolling in-memory history is trimmed oldest-first to the
+model's window (the system prompt and your latest message always survive).
+`/model ID` switches models mid-session (explicit and printed — `auto` specs
+resolve via the live catalog), `/clear` forgets the conversation, `/exit` or
+Ctrl-D quits, and Ctrl-C interrupts only the current turn. Chat requires a
+real terminal; piped/scripted use gets a clean pointer to `ambient ask`.
+
+**A standing audit gate is `ambient audit --install-hook [pre-commit|pre-push]`.**
+It writes a **fixed, human-readable shell script** (never model-generated —
+the script only *runs* `ambient audit --staged --json` / `--diff "@{u}...HEAD"
+--json` and greps the verdict) to `.git/hooks/`, executable, no API key
+needed to install. Threshold, documented in the script itself: it **blocks
+only on verdict `FIX FIRST`** (CRITICAL/HIGH findings); `NEEDS WORK` and
+clean passes never block, and everything unhealthy — ambient missing,
+unconfigured, empty diff, network down — fails **open** (a review hook must
+never brick commits). Overrides: `AMBIENT_HOOK_MODE=warn` reports without
+blocking; `git commit --no-verify` / `git push --no-verify` bypasses once.
+An existing hook that ambient didn't install is never clobbered without
+`--force` (which backs it up to `<hook>.pre-ambient.bak`), and
+`--uninstall-hook` removes only an ambient-installed hook.
+
+```bash
+ambient audit --install-hook              # pre-commit gate on the staged diff
+ambient audit --install-hook pre-push     # gate outgoing commits instead
+ambient audit --uninstall-hook            # removes only ambient's hook
 ```
 
 ## Agentic use (for scripts and orchestrators)
