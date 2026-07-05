@@ -52,6 +52,7 @@ is advisory, auto is explicit delegation, --fallback stays opt-in.
 
 import argparse
 import ast
+import atexit
 import collections
 import concurrent.futures
 import contextlib
@@ -985,6 +986,343 @@ def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     return expected, bound, assumed
 
 
+# --- Fleet spend budget (v3 Phase 4a) ----------------------------------------
+# AMBIENT_MAX_SPEND used to gate each invocation in ISOLATION, so the
+# documented 10-wide fan-out (SKILL.md) could spend up to 10x the ceiling.
+# These helpers make it a true AGGREGATE ceiling: every gated invocation
+# writes a reservation to ~/.config/ambient/reservations.jsonl under a
+# cross-process lock; siblings see the running total and refuse past the
+# ceiling. Stale reservations (dead pid; or past AMBIENT_RESERVATION_TTL when
+# liveness is unknowable — a provably-ALIVE holder is never TTL-pruned) are
+# pruned so a crashed process never wedges the fleet budget. The whole
+# mechanism is FAIL-OPEN: any failure of the machinery itself degrades to the
+# existing per-invocation gate with a one-line warning — it must never block
+# or crash a legitimate call. Opt out with AMBIENT_FLEET_BUDGET=off.
+
+# Default reservation lifetime. Deliberately generous (1h): on POSIX a
+# provably-ALIVE holder is never TTL-pruned (Codex H1), but on Windows pid
+# liveness is unknowable, so a single long job that never re-gates relies on
+# this TTL not expiring under it — accepted best-effort (see _load_reservations).
+RESERVATION_TTL_S = 3600.0    # default lifetime of a spend reservation
+_BUDGET_LOCK_WAIT_S = 5.0     # bounded wait for the reservations lock
+_LEDGER_LOCK_WAIT_S = 2.0     # bounded wait for the usage-ledger lock (4b)
+_FLEET_RES_IDS = []           # reservations THIS process holds (released at exit)
+_FLEET_ATEXIT_ARMED = False
+
+
+def _lock_owner_dead(lock_path):
+    """True ONLY when the lock file's recorded owner pid is PROVABLY dead.
+    Garbage/unreadable token or unknowable liveness (Windows,
+    PermissionError) → False: breaking a possibly-live owner's lock would
+    let two processes rewrite the store concurrently (Codex M2), so the
+    caller must fail open instead. Read again right before any unlink to
+    shrink the replace-race window."""
+    try:
+        with open(lock_path, encoding="utf-8") as fh:
+            pid = int(fh.read().strip() or "0")
+    except (OSError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    return _pid_alive(pid) is False
+
+
+@contextlib.contextmanager
+def _fs_lock(lock_path, wait_s):
+    """FAIL-OPEN cross-process exclusive lock — the concurrency primitive for
+    the fleet budget + usage ledger. Same cross-platform shape as
+    _config_lock (POSIX flock; Windows O_EXCL lock file) but it NEVER exits
+    or raises: after a bounded wait it yields False so the caller degrades
+    to per-invocation behavior instead of blocking a legitimate call (no
+    deadlock, ever). The no-fcntl path breaks a leftover lock ONLY when its
+    recorded owner is provably dead (Codex M2) — a live-but-slow owner is
+    never broken into, because every caller guards a read-modify-rewrite
+    critical section; on real Windows liveness is unknowable, so a crashed
+    process's lock degrades every later call to fail-open per-invocation
+    gating rather than risking a concurrent store rewrite."""
+    if fcntl is not None:
+        fd = None
+        try:
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        except OSError:
+            yield False
+            return
+        got, waited = False, 0.0
+        try:
+            while not got:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    got = True
+                except OSError:
+                    if waited >= wait_s:
+                        break
+                    time.sleep(0.05)
+                    waited += 0.05
+            yield got
+        finally:
+            if got:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return
+    fd, waited = None, 0.0
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, str(os.getpid()).encode())  # ownership token
+        except FileExistsError:
+            # M2: never break-and-enter on mtime age alone — only a
+            # PROVABLY-dead owner's lock is reclaimed (checked immediately
+            # before the unlink; the O_EXCL create stays the arbiter, so a
+            # racing breaker loses the create and re-evaluates the winner's
+            # ALIVE token instead of breaking again).
+            if _lock_owner_dead(lock_path):
+                try:
+                    os.unlink(lock_path)
+                    continue  # reclaimed a dead owner's lock — retry the create
+                except OSError:
+                    pass  # unlink keeps failing (e.g. unwritable dir): do NOT
+                    # spin — fall through to the wait/bail budget below.
+            if waited >= wait_s:
+                yield False
+                return
+            time.sleep(0.05)
+            waited += 0.05
+        except OSError:
+            yield False
+            return
+    try:
+        yield True
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
+
+def _fleet_enabled(conf):
+    """Fleet (aggregate) budget is ON by default; AMBIENT_FLEET_BUDGET=off
+    (or 0/false/no) restores the old per-invocation-only gate."""
+    raw = (os.environ.get("AMBIENT_FLEET_BUDGET")
+           or conf.get("AMBIENT_FLEET_BUDGET") or "on")
+    return str(raw).strip().lower() not in ("off", "0", "false", "no")
+
+
+def _reservation_ttl(conf):
+    """Seconds before an un-released reservation is presumed abandoned
+    (AMBIENT_RESERVATION_TTL, default 900) — the backstop that keeps a
+    crashed/undetectable process from wedging the fleet budget forever."""
+    raw = (os.environ.get("AMBIENT_RESERVATION_TTL")
+           or conf.get("AMBIENT_RESERVATION_TTL") or "")
+    try:
+        ttl = float(raw)
+        if ttl > 0:
+            return ttl
+    except (TypeError, ValueError):
+        pass
+    return RESERVATION_TTL_S
+
+
+def _pid_alive(pid):
+    """True/False when liveness is determinable, None when it isn't. POSIX
+    only: os.kill(pid, 0) probes without signaling there, but on Windows
+    signal 0 is NOT a probe (it terminates), so non-POSIX always returns
+    None and pruning degrades to TTL-only."""
+    if os.name != "posix":
+        return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # SOMETHING owns that pid, but not us — it may be the reserving
+        # ambient re-run under sudo, or a recycled pid owned by another
+        # user. Unknowable → None, so the TTL backstop still applies
+        # instead of the record being pinned alive forever (Codex H1).
+        return None
+    except OSError:
+        return None
+
+
+def _reservations_path():
+    return os.path.join(os.path.dirname(USAGE_PATH), "reservations.jsonl")
+
+
+def _load_reservations(path, ttl, now):
+    """Parse + prune the reservations store. Returns (records, saw_corrupt).
+    Pruning is LIVENESS-FIRST (Codex H1): a provably-ALIVE pid is KEPT no
+    matter how old its record is — a slow long call (map-reduce, high
+    --timeout, stalled TTY prompt) can still spend, so pruning it would let
+    a sibling breach the aggregate ceiling. A definitively-dead pid is
+    reclaimed immediately; the TTL is the backstop ONLY where liveness is
+    unknowable (Windows, PermissionError). Accepted best-effort on Windows:
+    a single job that outlives the TTL without re-gating may still be
+    pruned — the generous default (RESERVATION_TTL_S, 1h) makes that rare.
+    Corrupt lines are dropped (the next write resets the file); an
+    unreadable file raises OSError for the caller's fail-open path."""
+    records, saw_corrupt = [], False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        return [], False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            raw = json.loads(line)
+            pid = int(raw["pid"])
+            ts = float(raw["ts"])
+            amount = float(raw["amount"])
+            rid = str(raw["id"])
+        except (KeyError, TypeError, ValueError):
+            saw_corrupt = True
+            continue
+        if not (0 <= amount < float("inf")) or not (0 < ts < float("inf")):
+            saw_corrupt = True  # NaN / negative / absurd — treat as corrupt
+            continue
+        alive = _pid_alive(pid)
+        if alive is False:
+            continue  # definitively dead process — reclaim immediately
+        if alive is not True and now - ts > ttl:
+            continue  # unknowable liveness AND expired — presumed abandoned
+        records.append({"pid": pid, "ts": ts, "amount": amount, "id": rid})
+    return records, saw_corrupt
+
+
+def _write_reservations(path, records):
+    """Atomic rewrite (mkstemp + replace, 0600) — a crash mid-write must
+    never leave siblings a torn store."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".res-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for r in records:
+                fh.write(json.dumps(r) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _fleet_warn(reason):
+    print(
+        f"ambient: fleet budget check skipped ({reason}) — "
+        "falling back to the per-invocation spend gate",
+        file=sys.stderr,
+    )
+
+
+def _fleet_release_all():
+    """Drop every reservation this process holds — called on EVERY exit path
+    (atexit covers sys.exit/normal return; a hard kill is covered by the
+    dead-pid/TTL prune). Idempotent, best-effort, never raises. Codex M3:
+    ids are cleared ONLY after the rewrite that removes them lands — a
+    lock/write failure keeps them so a later release (or atexit) can retry,
+    with the dead-pid/TTL prune as the ultimate backstop."""
+    if not _FLEET_RES_IDS:
+        return
+    try:
+        conf_dir = os.path.dirname(USAGE_PATH)
+        path = _reservations_path()
+        with _fs_lock(os.path.join(conf_dir, ".reservations.lock"),
+                      _BUDGET_LOCK_WAIT_S) as locked:
+            if not locked:
+                return  # ids kept — retried later; prune is the backstop
+            ids = set(_FLEET_RES_IDS)
+            records, _ = _load_reservations(path, float("inf"), time.time())
+            keep = [r for r in records if r["id"] not in ids]
+            _write_reservations(path, keep)
+            # the atomic replace landed: every held id is verifiably gone
+            # (removed by this rewrite, or already pruned by a sibling)
+            _FLEET_RES_IDS[:] = []
+    except Exception:  # noqa: BLE001 — release must never mask the real exit
+        pass
+
+
+def _fleet_reserve(expected, ceiling, args, conf):
+    """The Phase 4a aggregate gate: under the cross-process lock, prune stale
+    reservations, refuse when live sibling reservations + this call would
+    blow the ceiling, else record this call's reservation (released on every
+    exit path). A re-gate by the SAME process (multi-gate job: map then
+    reduce) REFRESHES its existing reservation — fresh ts, amount = max of
+    the concurrent gates — instead of double-counting (Codex H1). Any
+    machinery failure fails OPEN to the per-invocation gate with a one-line
+    warning — but ONLY on the allow path: once the numbers say over-budget,
+    the refusal always fires (Codex H2)."""
+    global _FLEET_ATEXIT_ARMED
+    if not _fleet_enabled(conf) or expected <= 0:
+        return
+    allow = getattr(args, "allow_cost", False)
+    try:
+        conf_dir = os.path.dirname(USAGE_PATH)
+        _private_dir(conf_dir)
+        path = _reservations_path()
+        now = time.time()
+        ttl = _reservation_ttl(conf)
+        with _fs_lock(os.path.join(conf_dir, ".reservations.lock"),
+                      _BUDGET_LOCK_WAIT_S) as locked:
+            if not locked:
+                _fleet_warn("budget store is locked by another process")
+                return
+            try:
+                records, saw_corrupt = _load_reservations(path, ttl, now)
+            except OSError as err:
+                _fleet_warn(f"reservations store unreadable: {err}")
+                return
+            if saw_corrupt:
+                _fleet_warn("corrupt reservations entries dropped")
+            # split off reservations THIS process already holds: they are
+            # refreshed/merged below, never counted as sibling spend
+            own_ids = set(_FLEET_RES_IDS)
+            own = [r for r in records if r["id"] in own_ids]
+            siblings = [r for r in records if r["id"] not in own_ids]
+            active_total = sum(r["amount"] for r in siblings)
+            amount = max([expected] + [r["amount"] for r in own])
+            if active_total + amount > ceiling and not allow:
+                # H2: the DECISION comes first and always refuses.
+                # Persisting the prune is best-effort — its failure must
+                # never turn this refusal into an allow.
+                try:
+                    _write_reservations(path, records)  # persist the prune
+                except Exception:  # noqa: BLE001 — best-effort only
+                    pass
+                _fail_exit(
+                    args, _argv_command(), "cost",
+                    f"estimated ~${expected:.2f} plus ${active_total:.2f} "
+                    f"already reserved by {len(siblings)} running ambient "
+                    f"call(s) exceeds the ${ceiling:.2f} fleet spend "
+                    "ceiling — pass --allow-cost, raise AMBIENT_MAX_SPEND, "
+                    "or set AMBIENT_FLEET_BUDGET=off to proceed."
+                )
+            rid = own[0]["id"] if own else \
+                f"{os.getpid()}-{time.time_ns()}-{os.urandom(4).hex()}"
+            siblings.append({"pid": os.getpid(), "ts": now,
+                             "amount": amount, "id": rid})
+            _write_reservations(path, siblings)
+            _FLEET_RES_IDS[:] = [rid]  # the one record that now backs us
+        if not _FLEET_ATEXIT_ARMED:
+            atexit.register(_fleet_release_all)
+            _FLEET_ATEXIT_ARMED = True
+    except SystemExit:
+        raise  # the refusal above — a real gate decision, not machinery
+    except Exception as err:  # noqa: BLE001 — fail-open by contract
+        _fleet_warn(f"{err.__class__.__name__}: {err}")
+
+
 def cost_gate(catalog, model, input_chars, n_calls, args, conf):
     """Show a cost estimate before a large spend; enforce a ceiling; confirm on
     a TTY. Makes runaway spend impossible to trigger accidentally — including
@@ -1028,6 +1366,12 @@ def _gate_amount(expected, args, conf, bound=None):
             f"3x your ${ceiling:.2f} ceiling — pass --allow-cost, or raise "
             "AMBIENT_MAX_SPEND, to proceed."
         )
+    # Phase 4a: the same ceiling, enforced as an AGGREGATE across every
+    # concurrently-running ambient process (SKILL.md fleet contract) — a
+    # 10-wide fan-out shares ONE budget instead of multiplying it by 10.
+    # --allow-cost bypasses the fleet gate exactly like the checks above.
+    if not getattr(args, "allow_cost", False):
+        _fleet_reserve(expected, ceiling, args, conf)
     if (expected > 0.50 and sys.stdin.isatty()
             and not getattr(args, "yes", False)):
         # Prompt on STDERR, not stdout: `ambient audit --json > out.json` from an
@@ -1719,6 +2063,7 @@ def refuse_if_secrets(labeled_chunks, allow):
 
 
 USAGE_MAX_BYTES = 5_000_000  # cap the ledger; trim oldest lines past this
+USAGE_TRIM_KEEP_LINES = 20_000  # how many newest ledger lines a trim keeps
 
 
 def _retry_delay(base, headers=None):
@@ -1801,11 +2146,69 @@ def _cache_put(key, text):
 _USAGE_LOCK = threading.Lock()  # serialize the read-rewrite trim across chunk workers
 
 
+def _spool_usage_line(line):
+    """Codex M1: a metering line that can't take the ledger lock goes to a
+    per-pid SPOOL file instead of an UNLOCKED append the lock holder's
+    read-trim-write could truncate away. Only this process writes its own
+    spool (no lock needed); it is merged back under the lock on a later
+    successful acquire. Size-capped so a permanently-wedged lock (crashed
+    Windows owner) can't grow it without bound."""
+    spool = f"{USAGE_PATH}.spool.{os.getpid()}"
+    try:
+        if os.path.exists(spool) and os.path.getsize(spool) > USAGE_MAX_BYTES:
+            return  # cap reached — drop rather than grow unbounded
+        fd = os.open(spool, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError:
+        pass
+
+
+def _merge_usage_spools():
+    """Fold spooled metering lines back into the main ledger — caller MUST
+    hold the ledger lock. Our own spool is always safe (only we write it,
+    and log_usage is serialized in-process); a foreign spool is merged only
+    when its owner pid is PROVABLY dead — a live/unknowable owner may still
+    be appending to it (its own merge folds it in later)."""
+    d = os.path.dirname(USAGE_PATH)
+    prefix = os.path.basename(USAGE_PATH) + ".spool."
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        try:
+            pid = int(name[len(prefix):])
+        except ValueError:
+            continue
+        if pid != os.getpid() and _pid_alive(pid) is not False:
+            continue
+        spath = os.path.join(d, name)
+        try:
+            with open(spath, encoding="utf-8") as fh:
+                data = fh.read()
+            if data:
+                fd = os.open(USAGE_PATH,
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                    fh.write(data)
+            os.unlink(spath)
+        except OSError:
+            continue
+
+
 def log_usage(model, usage):
     """Best-effort local metering (Ambient has no balance endpoint). Caps the
-    file so it can't grow without bound over a long-lived install. The trim is a
-    read-modify-rewrite, so parallel chunk workers must not run it concurrently
-    or they tear the ledger — the only spend signal we have (D4)."""
+    file so it can't grow without bound over a long-lived install. The trim is
+    a read-modify-rewrite, so it must be exclusive across BOTH in-process
+    chunk workers (_USAGE_LOCK) and concurrent ambient PROCESSES (the
+    cross-platform _fs_lock, v3 Phase 4b) — two interleaved trims tear the
+    ledger, the only spend signal we have (D4). If the file lock can't be
+    taken, the line goes to a per-pid spool merged back under the lock later
+    (Codex M1) — never an unlocked append the lock holder's trim could
+    truncate away. Losing a trim costs nothing, losing metering does."""
     try:
         record = {
             "ts": int(time.time()),
@@ -1813,21 +2216,29 @@ def log_usage(model, usage):
             "in": usage.get("prompt_tokens", 0),
             "out": usage.get("completion_tokens", 0),
         }
-        _private_dir(os.path.dirname(USAGE_PATH))
-        with _USAGE_LOCK:
+        line = json.dumps(record) + "\n"
+        conf_dir = os.path.dirname(USAGE_PATH)
+        _private_dir(conf_dir)
+        with _USAGE_LOCK, \
+                _fs_lock(os.path.join(conf_dir, ".usage.lock"),
+                         _LEDGER_LOCK_WAIT_S) as locked:
+            if not locked:
+                _spool_usage_line(line)
+                return
+            _merge_usage_spools()  # before the trim, so merged lines trim too
             try:
                 if os.stat(USAGE_PATH).st_mode & 0o077:
                     os.chmod(USAGE_PATH, 0o600)  # heal a pre-hardening ledger
                 if os.path.getsize(USAGE_PATH) > USAGE_MAX_BYTES:
                     with open(USAGE_PATH, encoding="utf-8") as fh:
-                        kept = fh.readlines()[-20000:]  # keep the most recent
+                        kept = fh.readlines()[-USAGE_TRIM_KEEP_LINES:]
                     with open(USAGE_PATH, "w", encoding="utf-8") as fh:
                         fh.writelines(kept)
             except OSError:
                 pass
             fd = os.open(USAGE_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
+                fh.write(line)
     except OSError:
         pass
 

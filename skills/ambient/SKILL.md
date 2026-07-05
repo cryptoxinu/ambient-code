@@ -158,9 +158,21 @@ defaults to 3 concurrent calls — `--parallel N` (per run) or `AMBIENT_MAX_PARA
 models run at once. Spend is gated:
 estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`), jobs over
 $0.50 confirm on a TTY (`--yes` skips), `--allow-cost` overrides, and a worst-case
-guard blocks runs whose hard bound exceeds 3x the ceiling. Relay the printed
-estimate to the user on big jobs. `--max-tokens` is only an override; leave it unset
-for the tuned default.
+guard blocks runs whose hard bound exceeds 3x the ceiling. The ceiling is a **fleet
+aggregate** (v3 Phase 4): every gated ambient process records a spend reservation in
+`~/.config/ambient/reservations.jsonl`, so a 10-wide fan-out shares ONE `$5` budget
+instead of multiplying it by 10 — a call whose estimate plus the live siblings'
+reservations would blow the ceiling is refused with the fleet total named.
+Reservations release on exit and self-heal (dead-pid pruning on POSIX, where a
+provably-alive holder is never expired; entries whose owner's liveness is
+unknowable — Windows — expire after `AMBIENT_RESERVATION_TTL` seconds, default
+3600, so a very long Windows job that never re-gates may be pruned early:
+accepted best-effort), and the machinery is
+fail-open — if the store/lock ever misbehaves, the call proceeds under the classic
+per-invocation gate with a one-line warning. `AMBIENT_FLEET_BUDGET=off` (env or
+config, like `AMBIENT_MAX_SPEND`) restores per-invocation-only gating. Relay the
+printed estimate to the user on big jobs. `--max-tokens` is only an override; leave
+it unset for the tuned default.
 
 ## Error protocol (MANDATORY)
 

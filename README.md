@@ -104,7 +104,15 @@ fan-out width defaults to 3 concurrent calls — raise or lower it per run with
 `--parallel N` or persistently with `AMBIENT_MAX_PARALLEL` (clamped to 1-16); it
 also sets how many `--consensus` models run at once. Spend is
 gated: estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`),
-and jobs over $0.50 ask first (`--yes` skips, `--allow-cost` overrides).
+and jobs over $0.50 ask first (`--yes` skips, `--allow-cost` overrides). The
+ceiling is enforced **across every concurrently-running ambient process** — a
+10-wide fan-out shares one $5 budget, not $50: each gated call reserves its
+estimate in `~/.config/ambient/reservations.jsonl` (released on exit; stale
+entries from crashed processes are pruned by pid-liveness — a provably-alive
+holder is never expired — and, where liveness is unknowable (Windows), by
+`AMBIENT_RESERVATION_TTL`, default 3600s, so nothing ever wedges the budget).
+Set `AMBIENT_FLEET_BUDGET=off` to restore per-invocation-only gating; the
+mechanism itself is fail-open and never blocks a call on its own failure.
 
 **Advisory routing** (your explicit model choice is *never* silently swapped):
 `-m auto` delegates the pick — the cheapest READY model that fits the input,
