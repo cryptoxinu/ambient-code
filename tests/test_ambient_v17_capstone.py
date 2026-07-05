@@ -525,11 +525,15 @@ class TestH3ExactWorkerPricing(unittest.TestCase):
         total = sum(len(t) for _, t in labeled)
         want = spec.with_output_budget(prof, total).max_tokens
         for plan in plans:
-            self.assertEqual(len(plan), 3,
+            self.assertEqual(len(plan), 4,
                              "the miss-plan must carry the resolved "
-                             "per-sample max_tokens for the gate")
+                             "per-sample max_tokens AND the per-call "
+                             "sizes for the fallback-aware gate")
             self.assertEqual(plan[2], want)
             self.assertGreater(plan[2], prof.output_budget)
+            self.assertEqual(len(plan[3]), plan[0],
+                             "one REAL size per billed call")
+            self.assertEqual(sum(plan[3]), plan[1])
 
     def test_best_of_gate_prices_the_explicit_budget(self):
         catalog = h3_catalog()

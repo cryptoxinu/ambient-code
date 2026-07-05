@@ -1899,17 +1899,22 @@ def estimate_cost_fb(catalog, model, input_chars, n_calls, max_tokens,
 
 def estimate_cost_mr_fb(catalog, model, reduce_model, input_chars, n_chunks,
                         max_tokens, args, conf, extra_calls=0,
-                        synthesis=True):
+                        synthesis=True, per_call_chars=None):
     """estimate_cost_mr made FALLBACK-AWARE (same SUM-OF-MAXIMA contract as
     estimate_cost_fb): each LANE's calls may independently swap to that
     lane's own fallback candidate, so each lane adds its per-call
     max(0, alt − requested) uplift — map chunks at the full 1.0× per-call
     input, extra calls output-only (the base bills them no input), the
     synthesis re-read at its 0.3× share — and the alt is priced at ITS OWN
-    resolved output budget (_fb_alt_budget). Dominates every mixture of
-    requested-success and fallback across both lanes; byte-identical to
-    estimate_cost_mr when fallback is off / SACRED / no candidate is
-    pricier."""
+    resolved output budget (_fb_alt_budget). Each map/synthesis call's
+    candidate is picked from THAT call's REAL chunk size (`per_call_chars`
+    / args._fb_per_call_chars — final spend-safety HIGH: uneven chunks
+    would otherwise hide a big chunk's pricier large-context candidate
+    behind the input/n_chunks average; callers holding the packed chunk
+    list thread it, exactly like cmd_map's uneven items). Dominates every
+    mixture of requested-success and fallback across both lanes;
+    byte-identical to estimate_cost_mr when fallback is off / SACRED / no
+    candidate is pricier."""
     rmodel = reduce_model or model
     base = estimate_cost_mr(catalog, model, rmodel, input_chars, n_chunks,
                             max_tokens, extra_calls=extra_calls,
@@ -1917,45 +1922,85 @@ def estimate_cost_mr_fb(catalog, model, reduce_model, input_chars, n_chunks,
     spec = RequestSpec.from_args(args)
     if not _fallback_enabled(spec, conf):
         return base
+    if per_call_chars is None:  # uneven lanes may thread these on args
+        per_call_chars = getattr(args, "_fb_per_call_chars", None)
     per_call = input_chars / max(1, n_chunks)
+    sizes = (list(per_call_chars) if per_call_chars
+             else [per_call] * n_chunks)
 
-    def lane_uplift(lane_model, alt, n_lane_calls, in_factor):
-        """(d_exp, d_bnd, assumed) this lane's calls add — zeros when the
+    alts = {}  # (lane model, per-call chars) → (candidate, its own budget)
+
+    def lane_alt(lane_model, chars_i):
+        cell = alts.get((lane_model, chars_i))
+        if cell is None:
+            alt = _batch_fallback_alt(catalog, lane_model, args, conf,
+                                      chars_i)
+            cell = (alt, None if alt is None else _fb_alt_budget(
+                catalog, alt, max_tokens, spec._auto_budget))
+            alts[(lane_model, chars_i)] = cell
+        return cell
+
+    def call_uplift(lane_model, chars_i, in_factor):
+        """(d_exp, d_bnd, assumed) ONE lane call adds — zeros when its
         candidate is missing or cheaper-or-equal (parity)."""
-        if alt is None or n_lane_calls < 1:
+        alt, alt_mt = lane_alt(lane_model, chars_i)
+        if alt is None:
             return 0.0, 0.0, False
-        alt_mt = _fb_alt_budget(catalog, alt, max_tokens, spec._auto_budget)
         r_exp, r_bnd, _r_asm = _fb_call_cost(
-            catalog, lane_model, per_call, max_tokens, in_factor,
+            catalog, lane_model, chars_i, max_tokens, in_factor,
             cpt_model=model)  # base tokenizes ALL input at the map model
-        a_exp, a_bnd, a_asm = _fb_call_cost(catalog, alt, per_call, alt_mt,
+        a_exp, a_bnd, a_asm = _fb_call_cost(catalog, alt, chars_i, alt_mt,
                                             in_factor)
         de = max(0.0, a_exp - r_exp)
         db = max(0.0, a_bnd - r_bnd)
         if de <= 0.0 and db <= 0.0:
             return 0.0, 0.0, False
-        return de * n_lane_calls, db * n_lane_calls, a_asm
+        return de, db, a_asm
 
-    alt_m = _batch_fallback_alt(catalog, model, args, conf, per_call)
-    alt_r = None
-    lanes = [lane_uplift(model, alt_m, n_chunks, 1.0),
-             lane_uplift(model, alt_m, extra_calls, 0.0)]
+    def lane_uplift(lane_model, lane_sizes, in_factor):
+        """One lane's total uplift, grouped by size — a uniform lane is ONE
+        per-call figure times its count, float-identical to the pre-
+        per-chunk uniform math."""
+        counts = {}
+        for c in lane_sizes:
+            counts[c] = counts.get(c, 0) + 1
+        d_exp = d_bnd = 0.0
+        asm = False
+        for c, n in counts.items():
+            de, db, a = call_uplift(lane_model, c, in_factor)
+            d_exp += de * n
+            d_bnd += db * n
+            asm = asm or a
+        return d_exp, d_bnd, asm
+
+    # Extra calls are output-only in the base; their candidate is picked at
+    # the LARGEST chunk (conservative: the context-fit constraint that
+    # forces a pricier large-window candidate only tightens with size).
+    top = max(sizes, default=per_call)
+    lanes = [lane_uplift(model, sizes, 1.0),
+             lane_uplift(model, [top] * extra_calls, 0.0)]
     if synthesis:
-        alt_r = (alt_m if rmodel == model
-                 else _batch_fallback_alt(catalog, rmodel, args, conf,
-                                          per_call))
-        if alt_r == rmodel:
-            alt_r = None
-        lanes.append(lane_uplift(rmodel, alt_r, n_chunks, 0.3))
+        lanes.append(lane_uplift(rmodel, sizes, 0.3))
     d_exp = sum(lane[0] for lane in lanes)
     d_bnd = sum(lane[1] for lane in lanes)
     if d_exp <= 0.0 and d_bnd <= 0.0:
         return base  # no pricier candidate — byte-identical parity
     exp_fb, bnd_fb = base[0] + d_exp, base[1] + d_bnd
+
+    def sole_alt(lane_model):
+        """The lane's single distinct candidate, or None when its chunks
+        resolved DIFFERENT candidates — the per-call sum-of-maxima already
+        dominates every mixture then; no uniform all-alt total exists."""
+        cand = {alts.get((lane_model, c), (None, None))[0] for c in sizes}
+        cand.discard(None)
+        return cand.pop() if len(cand) == 1 else None
+
     # Floor at the exact all-alt lane-combination totals (the uniform
     # analogue of estimate_cost_fb's floor): the uplift sum equals the
     # worst combination analytically — never let float association leave
     # the reserve an ulp under it.
+    alt_m = sole_alt(model)
+    alt_r = sole_alt(rmodel) if synthesis else None
     map_models = [model] + ([alt_m] if alt_m else [])
     red_models = [rmodel] + ([alt_r] if synthesis and alt_r else [])
     for m in map_models:
@@ -2009,7 +2054,7 @@ def estimate_cost_mr(catalog, model, reduce_model, input_chars, n_chunks,
 
 
 def cost_gate_mr(catalog, model, reduce_model, input_chars, n_chunks, args,
-                 conf, extra_calls=0, synthesis=True):
+                 conf, extra_calls=0, synthesis=True, per_call_chars=None):
     """Cost gate for a map-reduce run whose REDUCE model may differ from the
     map model (--reduce-model / AMBIENT_MODEL_MAP, Phase 3c): map chunks are
     priced at the map model, synthesis calls at the reduce model. Same
@@ -2017,16 +2062,41 @@ def cost_gate_mr(catalog, model, reduce_model, input_chars, n_chunks, args,
     it when the models match, so existing estimates don't shift.
     synthesis=False (deterministic reducer, e.g. the structured-audit
     findings merge) prices ONLY the map lane — there is no synthesis LLM
-    call to bill (Codex M3)."""
+    call to bill (Codex M3). `per_call_chars` (final spend-safety HIGH) is
+    each MAP chunk's REAL billed size — callers holding the packed chunk
+    list thread it so a live --fallback swap is reserved at each chunk's
+    OWN candidate, exactly like cmd_map's uneven items. SAME-MODEL runs
+    still delegate to cost_gate for the byte-identical classic figure —
+    UNLESS fallback is live and the per-chunk fallback-aware estimate found
+    real swap exposure: the delegated path priced the swap on a UNIFORM
+    input/(n_chunks*2+extra) pseudo-call, so a big real chunk's pricier
+    large-context candidate (which the live map worker WILL swap to —
+    fan-out workers carry gate_fallback=False and never re-gate) was never
+    reserved. Off / SACRED / no-pricier-candidate keeps the delegated
+    figures AND stderr byte-for-byte."""
     rmodel = reduce_model or model
     if synthesis and rmodel == model:
-        cost_gate(catalog, model, input_chars,
-                  n_chunks * 2 + extra_calls, args, conf)
-        return
-    expected, bound, assumed = estimate_cost_mr_fb(
-        catalog, model, reduce_model, input_chars, n_chunks,
-        args.max_tokens, args, conf, extra_calls=extra_calls,
-        synthesis=synthesis)
+        fb_est = None
+        if _fallback_enabled(RequestSpec.from_args(args), conf):
+            fb_est = estimate_cost_mr_fb(
+                catalog, model, reduce_model, input_chars, n_chunks,
+                args.max_tokens, args, conf, extra_calls=extra_calls,
+                synthesis=synthesis, per_call_chars=per_call_chars)
+            if fb_est == estimate_cost_mr(
+                    catalog, model, rmodel, input_chars, n_chunks,
+                    args.max_tokens, extra_calls=extra_calls,
+                    synthesis=synthesis):
+                fb_est = None  # no per-chunk swap exposure — classic path
+        if fb_est is None:
+            cost_gate(catalog, model, input_chars,
+                      n_chunks * 2 + extra_calls, args, conf)
+            return
+        expected, bound, assumed = fb_est
+    else:
+        expected, bound, assumed = estimate_cost_mr_fb(
+            catalog, model, reduce_model, input_chars, n_chunks,
+            args.max_tokens, args, conf, extra_calls=extra_calls,
+            synthesis=synthesis, per_call_chars=per_call_chars)
     note = (" — assumed worst-case pricing (model unpriced)"
             if assumed else "")
     detail = (f"map={model}, deterministic merge — no synthesis call"
@@ -4937,8 +5007,11 @@ def cmd_ask(args, api_key, api_url, conf):
         chunk_eff = max(MIN_REASONING_CHUNK,
                         int(chunk / density_factor(doc)))
         packed = pack_chunks([("input", doc)], chunk_eff)
+        # Each REAL chunk's size — a live --fallback map worker swaps on its
+        # own chunk, so the gate must reserve that chunk's own candidate,
+        # never the uniform average (final spend-safety HIGH).
         cost_gate_mr(catalog, model, reduce_model, len(doc), len(packed),
-                     args, conf)
+                     args, conf, per_call_chars=[len(c) for c in packed])
         final, partial, reason = run_map_reduce(
             api_key, api_url, model,
             f"{base}\nQUESTION: {q}\nFrom the given chunk, extract everything "
@@ -6859,17 +6932,22 @@ def _audit_split_estimate(catalog, model, reduce_model, labeled, total,
         expected, bound, assumed = estimate_cost(
             catalog, model, total, 1, max_tokens)
         return 1, expected, bound, assumed
-    n_chunks = len(pack_chunks(
-        labeled, max(MIN_REASONING_CHUNK, int(min(chunk, single) / dens))))
+    packed = pack_chunks(
+        labeled, max(MIN_REASONING_CHUNK, int(min(chunk, single) / dens)))
+    n_chunks = len(packed)
     # The repo map is prepended to EVERY chunk's system prompt — that is
     # real billed input (map size x chunk count) the estimate must include
     # or the printed plan under-states the actual spend (Codex M1).
     map_chars = len(build_code_map(labeled, budget=code_map_budget(single)))
     if fb_args is not None:
+        # per-chunk REAL sizes (chunk + repo map), matching the live gate's
+        # threading — plan == gate stays true for the per-chunk fallback
+        # reserve too (final spend-safety HIGH).
         expected, bound, assumed = estimate_cost_mr_fb(
             catalog, model, reduce_model, total + map_chars * n_chunks,
             n_chunks, max_tokens, fb_args, fb_conf,
-            synthesis=not structured)
+            synthesis=not structured,
+            per_call_chars=[len(c) + map_chars for c in packed])
     else:
         expected, bound, assumed = estimate_cost_mr(
             catalog, model, reduce_model, total + map_chars * n_chunks,
@@ -6935,16 +7013,19 @@ def _consensus_estimate(catalog, models, labeled, total,
     for m in models:
         prof_m = model_profile(catalog, m)
         est_input = total
+        per_chars_m = None  # per-chunk REAL sizes for the fb lanes below
         if total <= prof_m.single_shot_chars:
             n_calls_m = 1
         else:
-            n_calls_m = max(1, len(pack_chunks(
-                labeled, min(prof_m.chunk_chars,
-                             prof_m.single_shot_chars))))
+            packed_m = pack_chunks(labeled, min(prof_m.chunk_chars,
+                                                prof_m.single_shot_chars))
+            n_calls_m = max(1, len(packed_m))
             # each chunk also carries this model's repo map (Codex M1)
-            est_input += n_calls_m * len(build_code_map(
+            map_len_m = len(build_code_map(
                 labeled,
                 budget=code_map_budget(prof_m.single_shot_chars)))
+            est_input += n_calls_m * map_len_m
+            per_chars_m = [len(c) + map_len_m for c in packed_m]
         # the exact budget run_one_audit resolves for this worker
         # (_audit_sample_prep passes the same input_chars figure)
         mt_m = RequestSpec(max_tokens=explicit_max_tokens).with_output_budget(
@@ -6952,8 +7033,12 @@ def _consensus_estimate(catalog, models, labeled, total,
             total if total <= prof_m.single_shot_chars
             else prof_m.chunk_chars).max_tokens
         if fb_args is not None:
+            # per-chunk sizes so each best-of map call's swap is reserved
+            # at its OWN candidate (final spend-safety HIGH; None =
+            # single-shot, where the one call IS the whole input).
             exp_m, bnd_m, assumed_m = estimate_cost_fb(
-                catalog, m, est_input, n_calls_m, mt_m, fb_args, fb_conf)
+                catalog, m, est_input, n_calls_m, mt_m, fb_args, fb_conf,
+                per_call_chars=per_chars_m)
         else:
             exp_m, bnd_m, assumed_m = estimate_cost(
                 catalog, m, est_input, n_calls_m, mt_m)
@@ -6967,17 +7052,20 @@ def _consensus_estimate(catalog, models, labeled, total,
 
 def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
                           explicit_max_tokens):
-    """[(miss_calls, miss_input_chars, sample_max_tokens)] per best-of
-    sample — the salted cache entries the live run will NOT find, so the
-    cost gate can price ONLY what will actually be billed (Codex H3: the
-    cache must be resolved BEFORE the gate, exactly like run_map_reduce's
-    own resume lane). Each sample's spec/keys are built through the SAME
-    helpers run_one_audit uses (_audit_sample_prep/_audit_single_key/
-    _map_note), so a predicted hit here is a real hit there by
-    construction. Capstone H3: sample_max_tokens is the RESOLVED budget the
-    live sample runs at (a.max_tokens) — the gate must price that exact
-    figure, not the profile default, or a larger explicit --max-tokens
-    under-prices the run and weakens the 3x worst-case guard."""
+    """[(miss_calls, miss_input_chars, sample_max_tokens, miss_call_chars)]
+    per best-of sample — the salted cache entries the live run will NOT
+    find, so the cost gate can price ONLY what will actually be billed
+    (Codex H3: the cache must be resolved BEFORE the gate, exactly like
+    run_map_reduce's own resume lane). Each sample's spec/keys are built
+    through the SAME helpers run_one_audit uses (_audit_sample_prep/
+    _audit_single_key/_map_note), so a predicted hit here is a real hit
+    there by construction. Capstone H3: sample_max_tokens is the RESOLVED
+    budget the live sample runs at (a.max_tokens) — the gate must price
+    that exact figure, not the profile default, or a larger explicit
+    --max-tokens under-prices the run and weakens the 3x worst-case guard.
+    miss_call_chars is each billed call's REAL size (chunk + repo map) so
+    the fallback-aware gate reserves each chunk's OWN candidate (final
+    spend-safety HIGH)."""
     spec = RequestSpec.from_args(args)
     use_cache = not spec.no_cache
     ttl = spec.cache_ttl or CACHE_TTL_DEFAULT
@@ -6992,14 +7080,14 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
         if total <= single:
             key = _audit_single_key(model, sp, labeled, a)
             if use_cache and _cache_get(key, ttl) is not None:
-                plans.append((0, 0, a.max_tokens))
+                plans.append((0, 0, a.max_tokens, []))
             else:
-                plans.append((1, total, a.max_tokens))
+                plans.append((1, total, a.max_tokens, [total]))
             continue
         packed = pack_chunks(labeled, min(chunk, single))
         code_map = build_code_map(labeled, budget=code_map_budget(single))
         note = _map_note(sp, code_map, len(packed))
-        miss_calls, miss_input = 0, 0
+        miss_calls, miss_input, miss_sizes = 0, 0, []
         for j, ch in enumerate(packed):
             key = _cache_key(model, note.replace("{i}", str(j + 1)), ch,
                              a.max_tokens, a.temperature,
@@ -7009,7 +7097,8 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
             miss_calls += 1
             # each billed chunk re-sends the repo map in its system prompt
             miss_input += len(ch) + len(code_map)
-        plans.append((miss_calls, miss_input, a.max_tokens))
+            miss_sizes.append(len(ch) + len(code_map))
+        plans.append((miss_calls, miss_input, a.max_tokens, miss_sizes))
     return plans
 
 
@@ -7465,11 +7554,11 @@ def cmd_audit(args, api_key, api_url, conf):
         miss_plans = _best_of_audit_misses(
             catalog, model, labeled, AUDIT_SYSTEM_PROMPT + focus, args,
             best_of_k, explicit_max_tokens)
-        miss_calls_total = sum(c for c, _, _ in miss_plans)
-        cached_samples = sum(1 for c, _, _ in miss_plans if c == 0)
+        miss_calls_total = sum(c for c, _, _, _ in miss_plans)
+        cached_samples = sum(1 for c, _, _, _ in miss_plans if c == 0)
         if miss_calls_total:
             expected_sum = bound_sum = 0.0
-            for n_calls_m, in_chars_m, mt_m in miss_plans:
+            for n_calls_m, in_chars_m, mt_m, sizes_m in miss_plans:
                 if not n_calls_m:
                     continue
                 # Capstone H3: price each sample at ITS resolved budget
@@ -7477,9 +7566,12 @@ def cmd_audit(args, api_key, api_url, conf):
                 # profile default, which under-priced a larger explicit
                 # --max-tokens and weakened the 3x worst-case guard.
                 # Fallback-aware (capstone re-audit HIGH): samples may
-                # --fallback to a pricier alt — reserve that up front.
+                # --fallback to a pricier alt — reserved at each billed
+                # chunk's REAL size and OWN candidate (final HIGH), never
+                # the sample's uniform average.
                 exp_m, bnd_m, _asm = estimate_cost_fb(
-                    catalog, model, in_chars_m, n_calls_m, mt_m, args, conf)
+                    catalog, model, in_chars_m, n_calls_m, mt_m, args, conf,
+                    per_call_chars=sizes_m or None)
                 expected_sum += exp_m
                 bound_sum += bnd_m
             print(f"ambient: best-of {best_of_k} audit estimated "
@@ -7703,9 +7795,13 @@ def cmd_audit(args, api_key, api_url, conf):
     # (Codex M1). A deterministic reducer (structured findings merge) makes
     # NO synthesis LLM call — price only the map lane (Codex M3).
     code_map = build_code_map(labeled, budget=code_map_budget(single))
+    # Each map call really bills its OWN chunk + the repo map — thread the
+    # per-chunk sizes so a live --fallback swap is reserved at each chunk's
+    # own candidate, never the uniform average (final spend-safety HIGH).
     cost_gate_mr(catalog, model, reduce_model,
                  total + len(code_map) * len(packed), len(packed), args,
-                 conf, synthesis=reducer is None)
+                 conf, synthesis=reducer is None,
+                 per_call_chars=[len(c) + len(code_map) for c in packed])
     final, partial, reason = run_map_reduce(
         api_key, api_url, model, sys_prompt,
         packed, args, AUDIT_SYNTH_PROMPT, single, reducer=reducer,
@@ -7780,7 +7876,8 @@ def cmd_code(args, api_key, api_url, conf):
                              max(MIN_REASONING_CHUNK,
                                  int(chunk / density_factor(task))))
         cost_gate_mr(catalog, model, reduce_model, len(task), len(packed),
-                     args, conf, extra_calls=1)
+                     args, conf, extra_calls=1,
+                     per_call_chars=[len(c) for c in packed])
         task, t_partial, t_reason = run_map_reduce(
             api_key, api_url, model,
             "From the given chunk of a long task brief, extract every "
@@ -7820,7 +7917,8 @@ def cmd_code(args, api_key, api_url, conf):
                                      int(chunk / density_factor(context))))
             # +1 call for the final generation pass after distillation.
             cost_gate_mr(catalog, model, reduce_model, len(context),
-                         len(packed), args, conf, extra_calls=1)
+                         len(packed), args, conf, extra_calls=1,
+                         per_call_chars=[len(c) for c in packed])
             context, partial, reason = run_map_reduce(
                 api_key, api_url, model,
                 f"TASK: {task}\nFrom the given chunk of context files, extract "
@@ -8386,7 +8484,8 @@ def cmd_build(args, api_key, api_url, conf):
               "distilling it first", file=sys.stderr)
         # `packed` was computed offline above (reused here — no recompute).
         cost_gate_mr(catalog, model, reduce_model, len(context), len(packed),
-                     args, conf, extra_calls=1)
+                     args, conf, extra_calls=1,
+                     per_call_chars=[len(c) for c in packed])
         context, c_partial, c_reason = run_map_reduce(
             api_key, api_url, model,
             f"TASK: {task}\nFrom the given chunk of context files, extract "
