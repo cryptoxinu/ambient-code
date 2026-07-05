@@ -4,10 +4,10 @@ Real measurements from `tools/live_probe.py` against the live Ambient API throug
 the `ambient` CLI (v1.1.0). ~7 min, ~20 real calls. Reproduce: `python3 tools/live_probe.py`.
 
 ## Readiness
-**3 of 16 models were READY** (miners serving right now):
+**3 of 16 models were serving at probe time** (READY):
 `ambient/large` (GLM-5.1-FP8), `moonshotai/kimi-k2.7-code`, `z-ai/glm-5.2`.
-The other 13 return 429 "no workers" until a miner picks them up — expected for a
-decentralized network. `--fallback` / `ambient models` handle this.
+The other 13 were not serving at that moment — normal for an on-demand network
+(they spin up as demand arrives). `--fallback` / `ambient models` handle this.
 
 ## Per-model audit behavior (3 repeats each, planted div-by-zero + KeyError)
 

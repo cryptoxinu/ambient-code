@@ -50,8 +50,8 @@ the id still works everywhere if typed.
 
 - **Tuning math: all models** — verified live (table above) and continuously in
   CI (catalog-driven invariants + fuzz).
-- **Live end-to-end behavior: only READY models can be exercised** (a
-  decentralized network serves what miners choose; the rest 429 until picked
-  up). As of 2026-07-03 that is Kimi-k2.7, ambient/large and z-ai/glm-5.2 —
+- **Live end-to-end behavior: only models serving at probe time can be
+  exercised live** (an on-demand network serves what's in demand; the rest
+  come up when called for). As of 2026-07-03 that is Kimi-k2.7, ambient/large and z-ai/glm-5.2 —
   measured in `docs/LIVE_PROBE_REPORT.md`. When a new model goes READY, run
   `tools/live_probe.py` to characterize it in ~7 minutes.

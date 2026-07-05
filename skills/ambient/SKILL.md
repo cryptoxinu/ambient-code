@@ -17,7 +17,7 @@ always points at the active install, so never hardcode a path.
 
 | Invocation | What to do |
 |---|---|
-| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else show a compact status (delegate mode, defaults, READY models from `ambient models` — describe non-READY models only as "not currently serving"; see **Plain-language status** below) and an AskUserQuestion action picker: toggle delegate mode / switch model / audit something / build something / spawn terminal. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
+| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else run `ambient models --json` once and show a compact panel: (1) the mental model, one line — "Claude plans, reviews, and integrates; Ambient does the heavy token work (bulk code writing, audits, digests) at ~10-40x lower cost"; (2) delegate-mode state + lane defaults; (3) the headline `Serving now: <models with ready==true && hidden==false>` plus one positive catalog line — "`+N more` catalog models spin up on demand (`ambient models --all` shows everything)". Never enumerate non-serving models in the default panel (see **Plain-language status**). Then an AskUserQuestion action picker: toggle delegate mode / switch model (**Model picking UX** below) / audit something / build something / spawn terminal. If NOTHING is serving this minute: say "All catalog models are between demand cycles right now — they spin up when called for; check `ambient models` in a few minutes", keep the non-model actions, and never present a model as serving when it isn't. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
 | `/ambient on` | `ambient mode on`, announce the delegate contract (below), follow it all session. |
 | `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). |
 | `/ambient model` | Model picking UX below. |
@@ -40,10 +40,15 @@ row). Don't make the user learn the commands.
 
 **Plain-language status (MANDATORY user-facing wording):** when showing model
 status to the user — the panel, the model list, or any narration — NEVER mention
-miners/mining/429/workers/HTTP codes or other network mechanics. Say a model is
-READY or "not currently serving right now" (e.g. "READY models: … — the others
-aren't serving right now"). If asked what Ambient is, the plain one-liner is: a
-decentralized network of open-source AI models behind one API, paid per token.
+miners/mining/429/workers/"cold"/HTTP codes or other network mechanics. The
+vocabulary is exactly this: a model is **"serving"** (READY), or it **"isn't
+serving right now — it spins up on demand"**. Ambient is an on-demand-scaling
+network: a model that isn't serving at this moment is NORMAL, not broken — never
+describe it as dead, down, or a failure. Lead with what IS serving; mention the
+rest of the catalog as depth ("+N more spin up on demand"), never as a list of
+outages. If asked what Ambient is, the plain one-liner is: a decentralized
+network that serves open-source AI models on demand behind one API, paid per
+token.
 
 ## Exit codes + machine output (parse these, not prose)
 
@@ -147,9 +152,10 @@ just work. Patterns, cheapest first:
 - **Claude-orchestrated fleets**: Claude subagents/workflows where each worker
   shells out to `ambient …` — Claude fans out, Ambient does the token-heavy
   lifting, Claude synthesizes.
-- Only 1-3 models are usually READY at any moment — a 10-wide fan-out on ONE model
-  is fine (the network load-balances); check `ambient models` before spreading
-  across models.
+- The network concentrates capacity on the models in demand — a 10-wide fan-out
+  on ONE model is fine (it load-balances). Availability shifts with demand, so
+  check `ambient models` right before a big fan-out or before spreading across
+  models.
 - **Quality from cheapness (v3 Phase 7)** — on a 10-40x-cheaper network, MORE
   SAMPLES often beats a bigger model. `--best-of K` (ask/code/audit, K=2-8)
   draws K independent samples behind ONE up-front gate that prices all K;
@@ -249,11 +255,16 @@ keeps the static constants.
 When ANY ambient command fails, do NOT guess and never tell the user "Ambient is
 down" by default. Errors are prefixed `ambient [category]:` — key / funds / model /
 rate / budget / context / service / network / stall / empty / setup. Relay that
-diagnosis. Exit 3 =
+diagnosis. Category `model` = normal on-demand scaling, NOT an outage: the model
+simply isn't serving at this moment — relay it calmly, offer the serving
+alternatives the CLI names (or a short retry), and never describe the network as
+broken. Real failures (key / funds / network / service) stay loud and actionable —
+relay them clearly, never soften them. Exit 3 =
 not configured (run first-run setup). Exit 2 = partial coverage — report the
 findings AND the gap. If the category is unclear, run `ambient doctor` and relay its
 DIAGNOSIS line: it distinguishes a revoked key from an out-of-funds account from a
-busy model from the user's own network from a real Ambient outage.
+model that isn't serving right now from the user's own network from a real
+Ambient outage.
 
 ## First-run setup (newcomer-friendly — assume zero Ambient knowledge)
 
@@ -275,13 +286,29 @@ busy model from the user's own network from a real Ambient outage.
 
 ## Model picking UX
 
-1. `ambient models` — live list; READY = available to use right now (availability
-   changes hourly); describe non-READY models to the user only as "not currently
-   serving" (never miners/429/workers — see **Plain-language status**). Defaults
-   marked `*chat`/`*code`; curation notes shown inline; curated-out models behind
-   `--all`.
-2. Present READY models first via AskUserQuestion with price + context + note.
-3. Persist with `ambient use <id>` (`--chat`/`--code` scopes; bare sets both).
+Two lanes, plainly: **chat/audit** (ask, audit, chat, map) and **code** (code,
+build, agent) — each has its own default model.
+
+1. Run `ambient models --json` once. Build the switch picker EXCLUSIVELY from
+   models with `ready == true && hidden == false`, labeled positively ("Serving
+   now — instant responses") with price + context + curation note per option.
+   Non-serving models never appear as picker options.
+2. Below the options, one confident line: "N more catalog models spin up on
+   demand — name one explicitly ('use ambient with qwen…') or `ambient models
+   --all` to browse everything."
+3. If the user explicitly names a non-serving model, honor it exactly (model
+   choice is SACRED) and relay the CLI's advisory in plain words: "it isn't
+   serving right now; X and Y are — want one of those, or keep your pick?"
+   Their pick always wins.
+4. Edge states, honestly: if ready-and-visible is empty but serving models
+   exist (curation hides them all), say so — "your curation hides every serving
+   model; `ambient curate show <id>` surfaces one, or pick explicitly". If
+   NOTHING is serving at all, say models spin up as demand arrives and offer a
+   short retry — never fabricate a serving option.
+5. After the model choice, ask the lane scope via AskUserQuestion:
+   **Chat & audits** (`ambient use <id> --chat` — questions, reviews, digests) /
+   **Code writing** (`--code` — code, build, agent) / **Both lanes** (bare —
+   suggest this as the default). Then persist.
    Resolution order everywhere: `-m` flag > env vars > saved default > built-in
    (`moonshotai/kimi-k2.7-code` both lanes — probe-measured best auditor; GLM-5.2
    stays selectable while its network capacity ramps up).

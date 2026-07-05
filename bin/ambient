@@ -22,8 +22,8 @@ Commands:
   build     [task]     Plan + generate a SET of files (manifest-first; writes
                        only with --apply, inside --dir; never executes)
   agent     [args…]    Interactive agentic terminal on Ambient (opencode TUI)
-  doctor               Diagnose: bad key vs out-of-funds vs busy model vs your
-                       network vs Ambient itself — names the actual culprit
+  doctor               Diagnose: bad key vs out-of-funds vs model availability
+                       vs your network vs Ambient itself — names the culprit
   usage     [--days]   Local token/cost summary + savings vs the frontier
                        reference (AMBIENT_REFERENCE_PRICE, default 3/15
                        $/Mtok — an approximation you can set yourself)
@@ -760,7 +760,7 @@ inference network (ambient.xyz): open-source models, paid per token.
 
 Get started
   ambient setup            store + verify your API key (one time)
-  ambient models           see which models are live right now
+  ambient models           see which models are serving right now
   ambient use              pick your sticky default model
 
 Do work
@@ -771,7 +771,7 @@ Do work
   ambient agent            interactive agentic terminal on Ambient (opencode)
 
 Keep it healthy
-  ambient doctor           pinpoint key / funds / busy-model / network trouble
+  ambient doctor           pinpoint key / funds / model-availability / network trouble
   ambient usage            local spend summary (--days N)
   ambient mode on|off      delegate mode for Claude Code sessions
 
@@ -785,11 +785,11 @@ def print_welcome_panel(models, where, probe_detail, conf, funds_issue=False):
     ready = len(ready_model_ids(models))
     ns = argparse.Namespace(model=None)
     chat_model = resolve_model(ns, conf, "chat")
-    net = (f"Network:   {len(models)} models, {ready} live right now "
-           "(miners come and go — `ambient models`)")
+    net = (f"Network:   {len(models)} models, {ready} serving right now "
+           "(capacity scales with demand — `ambient models`)")
     if not ready:
-        net += ("\n           none live this minute — your key still verified; "
-                "retry `ambient models` soon")
+        net += ("\n           models spin up as demand arrives — your key is "
+                "verified; check `ambient models` in a few minutes")
     print(f"Key verified — {probe_detail}.")
     print(f"Stored in: {where}")
     print(net)
@@ -809,7 +809,7 @@ def print_welcome_panel(models, where, probe_detail, conf, funds_issue=False):
     ambient build "make a ..." --dir out  plan + generate a set of files (never executes)
 
   Manage:
-    ambient models         what's live (READY) right now
+    ambient models         what's serving (READY) right now
     ambient use            pick your sticky default model
     ambient usage          local spend estimate
     ambient doctor         one-command diagnosis when anything fails
@@ -2215,8 +2215,9 @@ def resolve_auto_model(spec, catalog, conf, input_chars=0, args=None,
             _bail(f"{label} {spec}: every READY model is hidden by your curation "
                   f"(READY: {', '.join(ready)}) — surface one with "
                   "`ambient curate show <id>` or pick it explicitly with -m.")
-        _bail(f"{label} {spec}: no model has live workers right now — try again "
-              "shortly, or check: ambient models")
+        _bail(f"{label} {spec}: no model is serving at this moment — the "
+              "network scales up with demand; try again shortly, or check: "
+              "ambient models")
     if variant == "largest":
         ranked = sorted(
             candidates,
@@ -2260,7 +2261,8 @@ def preflight_hint(model, catalog, conf, input_chars=0):
         return None  # unknown id: complete() gives the real [model] diagnosis
     problems = []
     if not meta.get("is_ready"):
-        problems.append(f"'{model}' has no live workers right now")
+        problems.append(f"'{model}' isn't serving right now "
+                        "(Ambient scales models with demand)")
     if input_chars:
         ctx_chars = _as_pos_int(meta.get("context_length"), 0) * CHARS_PER_TOKEN
         if ctx_chars and input_chars > ctx_chars:
@@ -2603,11 +2605,13 @@ def classify_error(status, body, api_key):
         )
     if status == 429 and "no workers" in lower:
         return "model", (
-            "No miners are serving that model right now (HTTP 429). Your key and "
-            "account are fine — pick a READY model (ambient models) or retry later."
+            "That model isn't serving right now — Ambient spins models up and "
+            "down with demand. Your key and account are fine — pick a model "
+            "that's serving (ambient models) or retry shortly."
         )
     if status == 429:
-        return "rate", f"Rate limited (HTTP 429: {msg}). Wait a moment and retry."
+        return "rate", (f"The network asked us to slow down ({msg}) — "
+                        "wait a moment and retry.")
     if status == 400:
         ctx_words = ("context", "context_length", "maximum context", "too long",
                      "reduce the length")
@@ -2647,8 +2651,8 @@ def auth_probe(api_url, api_key, models):
     if category == "model":
         # "No workers" is only ever returned after auth succeeds.
         return True, category, (
-            "authentication passed (probe model has no live workers, which is "
-            "only reported post-auth)"
+            "authentication passed (verified even while the probe model isn't "
+            "serving — that response only comes after a valid key)"
         )
     if category in ("rate", "service"):
         # Indeterminate: a gateway limiter or outage can fire before auth is
@@ -3127,7 +3131,8 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                 close_beat()
                 raise StallError(
                     f"no new content for {NOPROGRESS_S}s despite an open stream "
-                    f"({size:,} chars so far) — worker appears wedged",
+                    f"({size:,} chars so far) — the stream stopped making "
+                    "progress",
                     "".join(content), "".join(reasoning),
                 )
             if now - last_beat >= HEARTBEAT_S:
@@ -3363,7 +3368,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # wall); salvage immediately.
             if not err.hard_wall and not state.stall_retried:
                 print(
-                    f"ambient: {err} — retrying once on a fresh worker "
+                    f"ambient: {err} — retrying once on a fresh connection "
                     "(same model)",
                     file=sys.stderr,
                 )
@@ -3400,8 +3405,8 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                                          "usage": usage, "_served_model": model}
             raise ChatError(
                 "stall",
-                f"'{model}' produced almost no output before stalling ({err}). "
-                "The serving workers look unhealthy — retry shortly or check: "
+                f"'{model}' produced almost no output before stalling ({err}) "
+                "— retry shortly, or pick another serving model: "
                 "ambient models",
             )
         if status != 200:
@@ -3468,8 +3473,8 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                         delta = (f" (${alt_p[1]:.2f}/M out vs ${cur_p[1]:.2f}/M)"
                                  if cur_p and alt_p else "")
                         print(
-                            f"ambient: '{model}' has no workers — falling back "
-                            f"to '{alt}'{delta} (--fallback)",
+                            f"ambient: '{model}' isn't serving right now — "
+                            f"using '{alt}'{delta} as you allowed (--fallback)",
                             file=sys.stderr,
                         )
                         if spec._auto_budget:
@@ -3526,7 +3531,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                             attempt_no=state.attempt_no + 1)
                         continue
                 if ready:
-                    diagnosis += f" READY now: {', '.join(ready)}"
+                    diagnosis += f" Serving now: {', '.join(ready)}"
             err_obj = ChatError(category, diagnosis)
             # body may be a valid non-object JSON (str/list/number) on an
             # error response — guard before .get so it never AttributeErrors
@@ -4726,10 +4731,23 @@ def cmd_models(args, api_key, api_url, conf):
         print(json.dumps({"schema_version": 1, "configured": configured,
                           "models": out}, indent=2))
         return
-    for m in visible:
-        print(format_model_line(m, chat_default, code_default,
-                                note=notes.get(m["id"]),
-                                hidden=m["id"] in hidden_ids))
+    serving = [m for m in visible if m.get("is_ready")]
+    on_demand = [m for m in visible if not m.get("is_ready")]
+    if serving:
+        print(f"Serving now ({len(serving)}) — ready for instant use:")
+        for m in serving:
+            print(format_model_line(m, chat_default, code_default,
+                                    note=notes.get(m["id"]),
+                                    hidden=m["id"] in hidden_ids))
+    if on_demand:
+        if serving:
+            print()
+        print(f"Available on demand ({len(on_demand)}) — "
+              "spin up as demand arrives:")
+        for m in on_demand:
+            print(format_model_line(m, chat_default, code_default,
+                                    note=notes.get(m["id"]),
+                                    hidden=m["id"] in hidden_ids))
     print(
         f"\nDefaults: chat/audit={chat_default}  code={code_default}"
         "   (change with: ambient use)   badges: reason vision tools json",
@@ -4767,7 +4785,8 @@ def cmd_use(args, api_key, api_url, conf):
         if not pick_from:
             pick_from = models
         n_hidden = len(models) - len(pick_from)
-        print("Pick a default model (READY = live on the network right now):\n")
+        print("Pick a default model (READY = serving right now; "
+              "others spin up on demand):\n")
         for i, m in enumerate(pick_from, 1):
             print(f"  {i:2}. {format_model_line(m, chat_default, code_default, note=notes.get(m['id']))}")
         if n_hidden:
@@ -4788,7 +4807,7 @@ def cmd_use(args, api_key, api_url, conf):
         chosen = chosen.strip().lower()
         print(
             f"note: '{chosen}' is a delegation, not a model — every call "
-            "picks a live model from the catalog and prints its choice.",
+            "picks a serving model from the catalog and prints its choice.",
             file=sys.stderr,
         )
     elif chosen not in known_ids:
@@ -4813,8 +4832,9 @@ def cmd_use(args, api_key, api_url, conf):
     picked = next((m for m in models if m["id"] == chosen), None)
     if picked and not picked.get("is_ready"):
         print(
-            f"note: '{chosen}' has no live workers right now (429 until miners pick "
-            "it up) — saving anyway.",
+            f"note: '{chosen}' isn't serving at this moment — saving anyway; "
+            "Ambient brings models up as demand arrives (`ambient models` "
+            "shows what's serving now).",
             file=sys.stderr,
         )
     if notes.get(chosen):
@@ -4855,7 +4875,8 @@ def cmd_curate(args):
             if any(ch in e for ch in "*?[") or e in known:
                 continue
             print(f"warning: '{e}' is not in today's catalog — saved anyway "
-                  "(the catalog changes as miners come and go)", file=sys.stderr)
+                  "(the catalog changes as models scale up and down)",
+                  file=sys.stderr)
 
     def _print_status():
         conf2 = read_config_file()
@@ -8937,8 +8958,8 @@ def cmd_mode(args):
 
 
 SETUP_PREAMBLE = f"""Ambient setup — one-time key configuration
-Ambient (ambient.xyz) is a decentralized network of miners serving open-source
-models behind one OpenAI-compatible API; you pay per token.
+Ambient (ambient.xyz) is a decentralized network serving open-source models
+on demand behind one OpenAI-compatible API; you pay per token.
 
 Don't have a key yet?
   1. Sign in or create an account:  {KEY_CONSOLE_URL}
@@ -9178,7 +9199,8 @@ def cmd_doctor(args):
         sys.exit(1)
     models = body.get("data", [])
     ready = ready_model_ids(models)
-    report("network", True, f"api reachable; {len(models)} models, {len(ready)} live")
+    report("network", True,
+           f"api reachable; {len(models)} models, {len(ready)} serving")
 
     if not api_key:
         print("\nDIAGNOSIS: no API key configured. Run: ambient setup")
@@ -9207,7 +9229,7 @@ def cmd_doctor(args):
         hidden_tag = (" (hidden by curation — still works)"
                       if is_hidden(m, allow_c, hide_c, show_c) else "")
         report(f"{kind}_model", known,
-               f"{m} — {'READY' if live else 'no live workers right now' if known else 'NOT IN CATALOG — pick again: ambient use'}{hidden_tag}")
+               f"{m} — {'READY' if live else 'not serving at this moment (scales up on demand)' if known else 'NOT IN CATALOG — pick again: ambient use'}{hidden_tag}")
     if allow_c or hide_c:
         cat_ids = [x.get("id") for x in models
                    if isinstance(x, dict) and x.get("id")]
@@ -9265,7 +9287,8 @@ def cmd_doctor(args):
 
     if ok:
         print("\nDIAGNOSIS: healthy. Key valid, account billable, API reachable."
-              + ("" if ready else " (No models have live workers this minute — retry soon.)"))
+              + ("" if ready else " (No models are serving this minute — the "
+                 "network scales with demand; retry soon.)"))
     else:
         print(f"\nDIAGNOSIS [{category}]: {detail}")
         sys.exit(1)
@@ -9700,8 +9723,8 @@ def add_common_flags(parser):
     parser.add_argument("--raw", action="store_true", help="print full JSON response")
     parser.add_argument(
         "--fallback", action="store_true",
-        help="auto-retry on the first READY model if the chosen one has no workers "
-             "(or set AMBIENT_FALLBACK=on)",
+        help="auto-retry on the first READY model if the chosen one isn't "
+             "serving right now (or set AMBIENT_FALLBACK=on)",
     )
     parser.add_argument(
         "--allow-partial", action="store_true",
@@ -9949,7 +9972,7 @@ def _configure_audit(sub):
     p.add_argument(
         "--consensus", metavar="M1,M2",
         help="audit with several models and rank findings corroborated by 2+ "
-             "first (usually only 2 models are READY at once)",
+             "first (`ambient models` shows what's serving)",
     )
     p.add_argument(
         "--install-hook", metavar="HOOK", nargs="?", const="pre-commit",

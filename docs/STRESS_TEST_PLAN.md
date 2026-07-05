@@ -13,7 +13,7 @@ bash tools/stress_test.sh
 # offline surface + robustness only (no spend, no key needed)
 AMB_NO_LIVE=1 bash tools/stress_test.sh
 
-# every-model × every-command matrix (READY models do real work; cold models
+# every-model × every-command matrix (READY models do real work; non-serving models
 # must fail with the clean [model] diagnosis; plus command cycles the battery
 # doesn't reach: use/mode/curate/cache/link/trust-url, git lanes, plan-only)
 bash tools/model_matrix.sh
@@ -56,7 +56,7 @@ exit code against the envelope's own `exit_code`.
 
 - **Every catalog model** (17 at last refresh): READY models must complete an
   ask, find a planted bug via `audit --json`, and return a working codegen
-  envelope; cold models must fail with the classified `[model]` diagnosis —
+  envelope; non-serving models must fail with the classified `[model]` diagnosis —
   never a hang, traceback, or `[internal]`.
 - **Command cycles:** `use` (persist, unique-substring resolution, ambiguous
   refusal), `mode on/status/off`, `curate only/note/reset`, `cache
@@ -86,7 +86,7 @@ exit code against the envelope's own `exit_code`.
 **model_matrix.sh: 40 passed, 0 failed.** All 16 listed catalog models behaved
 correctly (3 READY — ambient/large, kimi-k2.7-code, glm-5.2 — each completed an
 ask, found a planted bug via `audit --json`, and returned a working codegen
-envelope; all 13 cold models failed with the clean `[model]` diagnosis). Every
+envelope; all 13 non-serving models failed with the clean `[model]` diagnosis). Every
 command cycle passed, including ambiguous-substring refusal on `use`,
 `--diff <bad-ref>` honesty, plan-only write-nothing, and consensus corroboration.
 

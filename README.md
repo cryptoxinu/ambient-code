@@ -5,8 +5,8 @@
 
 Give Claude Code a second brain — at a fraction of the price. This plugin connects
 Claude to [Ambient](https://ambient.xyz), the decentralized AI inference network
-where independent miners serve open-source models (Kimi, GLM, GPT-OSS, Qwen,
-Gemma…) behind one OpenAI-compatible API, paid per token — typically **10-40x
+which serves open-source models (Kimi, GLM, GPT-OSS, Qwen, Gemma…) on demand
+behind one OpenAI-compatible API, paid per token — typically **10-40x
 cheaper** than frontier models.
 
 **You stay in control the whole time**: you pick the model, you decide when Ambient
@@ -24,8 +24,8 @@ is used, and Claude reviews everything Ambient produces before it lands.
 The first time you use it, the CLI onboards you: it asks for an Ambient API key,
 shows exactly how to get one (sign in at <https://app.ambient.xyz> → API Keys),
 verifies the key with a real authenticated call, tells you *why* if it fails
-(mistyped/revoked key vs out-of-funds vs busy model vs network — with an Ambient
-support pointer), and finishes with a command showcase. Key entry happens in
+(mistyped/revoked key vs out-of-funds vs model availability vs network — with an
+Ambient support pointer), and finishes with a command showcase. Key entry happens in
 **your** terminal with hidden input — the key never passes through the chat.
 
 ## The three moves
@@ -66,14 +66,19 @@ and reasons over it at full quality.
 
 ## Models
 
-Availability fluctuates as miners come and go — usually 2-3 models are READY at any
-moment; a cold model returns 429 until someone serves it (`ambient models` shows
-what's live). The default for every lane is **`moonshotai/kimi-k2.7-code`** (the
+Ambient scales models up and down with demand — `ambient models` shows what's
+serving (READY) right now. A model that isn't serving at the moment is normal,
+not broken: it spins up when demand arrives, and the CLI names serving
+alternatives whenever you pick one that isn't serving yet. The default for every lane is **`moonshotai/kimi-k2.7-code`** (the
 live probe measured it fastest and most accurate at catching planted bugs — see
 `docs/LIVE_PROBE_REPORT.md`). GLM-5.2 is fully selectable
 (`ambient use z-ai/glm-5.2`) and improving as the network's capacity ramps up. You
 can curate which models your menus show: `ambient curate only <ids>` /
 `hide <glob>` / `note <id> "label"` — explicit `-m` always works regardless.
+
+**How the lanes work:** two sticky defaults, one per lane — **chat/audit**
+(`ask`, `audit`, `chat`, `map`) and **code** (`code`, `build`, `agent`).
+`ambient use <id>` sets both; `--chat` / `--code` scopes just one.
 
 ## Command reference
 
@@ -95,7 +100,7 @@ ambient chat             interactive REPL — streamed replies, per-turn cost re
 ambient code "task"      single-file code generation (-f context.py) · --best-of K
 ambient build "task"     plan + generate a whole file-set (manifest-first, --apply writes)
 ambient agent            interactive agentic terminal on Ambient (opencode)
-ambient doctor           pinpoints key / funds / busy-model / network trouble
+ambient doctor           pinpoints key / funds / model-availability / network trouble
 ambient usage            local spend summary (--days N)
 ambient mode on|off      delegate mode for Claude Code sessions
 ambient link             put a stable `ambient` launcher on your PATH
@@ -160,9 +165,9 @@ clamped to a sane 1.0–8.0 range so a corrupt ledger can't skew budgets. Set
 `-m auto` delegates the pick — the cheapest READY model that fits the input,
 resolved against the live catalog on every call and printed to stderr
 (`auto:cheapest` / `auto:largest` variants; `ambient use auto` makes it the
-sticky default). If your *concrete* model is cold or the input outgrows its
-window, a one-line stderr hint names READY alternatives with prices — purely
-informational, nothing changes. `--reduce-model ID` runs the map-reduce
+sticky default). If your *concrete* model isn't currently serving or the input
+outgrows its window, a one-line stderr hint names READY alternatives with
+prices — purely informational, nothing changes. `--reduce-model ID` runs the map-reduce
 *synthesis* step on a different model (cheap map, strong reduce), and
 `AMBIENT_MODEL_MAP` (env or config, alongside `AMBIENT_MAX_PARALLEL` /
 `AMBIENT_MAX_SPEND`) routes phases persistently, e.g.
@@ -313,7 +318,7 @@ Errors are pre-diagnosed, so you're never left guessing whether "Ambient is down
 |---|---|---|
 | `ambient [key]` | Key revoked/expired/mistyped | `ambient setup --force` with a fresh key |
 | `ambient [funds]` | Account out of credit/quota | Top up at app.ambient.xyz |
-| `ambient [model]` | No miners serving that model right now | `ambient models`, pick a READY one |
+| `ambient [model]` | That model isn't serving right now (normal — capacity follows demand) | `ambient models`, pick one that's serving |
 | `ambient [rate]` | Rate limited | Wait and retry |
 | `ambient [service]` | Ambient-side problem | Retry shortly — not your fault |
 | `ambient [network]` | Can't reach the API at all | Check your own internet first |
@@ -329,7 +334,7 @@ prints a one-line DIAGNOSIS.
   atomically, permissions self-healed); never in argv, never printed, redacted from
   every output path, verified with a real authenticated request before saving.
 - Model output is treated as untrusted AND sanitized — ANSI/OSC terminal escapes
-  are stripped so a malicious miner can't forge verdicts or fire clipboard writes.
+  are stripped so a malicious node can't forge verdicts or fire clipboard writes.
 - A built-in tripwire refuses to send credential-looking content or
   credential-named files (`.env`, `.netrc`, `id_rsa`, `*.pem`, `credentials.json`,
   …) — locations only, never values; `--allow-secrets` for false positives.

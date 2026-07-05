@@ -221,7 +221,7 @@ class TestSacredExplicitModel(unittest.TestCase):
         # the EXACT user model reached complete() — cold, hint printed, but
         # never swapped and never blocked.
         self.assertEqual(seen, ["cold/cheapest"])
-        self.assertIn("no live workers", err.getvalue())
+        self.assertIn("isn't serving right now", err.getvalue())
 
     def test_preflight_hint_prints_alternatives_but_returns_nothing(self):
         err = io.StringIO()
@@ -231,7 +231,7 @@ class TestSacredExplicitModel(unittest.TestCase):
         self.assertIsNone(out)  # information only — nothing to act on
         text = err.getvalue()
         self.assertIn("cold/cheapest", text)
-        self.assertIn("no live workers", text)
+        self.assertIn("isn't serving right now", text)
         self.assertIn("cheap/ready", text)   # READY alternatives named…
         self.assertIn("$0.80", text)         # …with their price
 
