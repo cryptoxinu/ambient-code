@@ -162,9 +162,11 @@ REASONING_EXPANSION = 1.5              # reasoning chars produced per input char
 # --- Telemetry-EWMA routing (v3 Phase 8a) ------------------------------------
 # The tool gets SMARTER WITH USE: every real usage object the API returns is
 # already metered in the local ledger; observed_cpt() turns that history into
-# a per-model observed chars-per-token EWMA that model_profile/estimate_cost
-# prefer over the static CHARS_PER_TOKEN guess. With NO usable history the
-# math is byte-identical to the constant. AMBIENT_TELEMETRY=off opts out.
+# a per-model observed chars-per-token EWMA. model_profile SIZING uses it
+# directly (_effective_cpt); the COST/SPEND-GATE math uses a conservative clamp
+# (_cost_cpt = min(observed, default)) so telemetry can only TIGHTEN the gate,
+# never under-price. With NO usable history the math is byte-identical to the
+# static CHARS_PER_TOKEN constant. AMBIENT_TELEMETRY=off opts out.
 TELEMETRY_CPT_MIN = 1.0                # sane clamp — a corrupt ledger can't
 TELEMETRY_CPT_MAX = 8.0                # skew budgets past believable ratios
 TELEMETRY_EWMA_ALPHA = 0.3             # recent-weighted: newest sample = 30%
@@ -1090,8 +1092,8 @@ def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     figure that over-refused big legitimate jobs); `expected` uses a realistic
     per-call output. Unpriced model / missing catalog → worst-case ASSUMED
     prices with assumed=True, so the ceiling still applies. Input tokens use
-    the model's OBSERVED chars-per-token when usage history exists (Phase 8a
-    telemetry), else the static CHARS_PER_TOKEN."""
+    the CONSERVATIVE cost cpt (_cost_cpt = min(observed, static) — Phase 8a
+    telemetry may only tighten the gate, never under-price)."""
     price = model_pricing(catalog, model)
     assumed = price is None
     if assumed:
