@@ -2,6 +2,44 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 2.1.0 — 2026-07-05
+
+Additive feature + hardening release (no breaking changes). Everything below is
+new since 2.0.0; the CLI stays a single stdlib-only file.
+
+- **`ambient map`** — bulk lane: one prompt run independently over many items
+  (files, or one item per stdin line; `--jsonl` objects), one JSON envelope per
+  item, ONE up-front batch cost gate, content-addressed cache resume. The
+  cheapest way to fan out.
+- **Advisory routing** — `-m auto[:cheapest|:largest]` (prints the resolved
+  pick), a pre-flight readiness/fit/price hint, `--reduce-model` (cheap map /
+  strong reduce), `AMBIENT_MODEL_MAP` per-phase defaults, ranked fallback. Model
+  choice stays SACRED — advisory + explicit only, never a silent swap.
+- **Fleet spend ceiling** — `AMBIENT_MAX_SPEND` is now enforced as an AGGREGATE
+  ceiling across every concurrently-running ambient process (reservation files +
+  a fail-open cross-process lock); `AMBIENT_FLEET_BUDGET=off` opts out.
+- **Repo intelligence** — `audit --repo [DIR]` audits a whole repository
+  (git-aware walker, plan + cost shown before spending), a multi-language code
+  map, and a bounded cross-file confirmation pass.
+- **Savings receipts** — every run ends with its actual cost vs a frontier
+  reference (`AMBIENT_REFERENCE_PRICE`), and `ambient usage` gains a savings
+  column — engineered to never over-state a saving.
+- **Quality from cheapness** — `--best-of K` (corroboration-ranked sampling),
+  `ask --consensus A,B` (multi-model triangulation), a native `ambient chat`
+  REPL, and `audit --install-hook` (a fixed pre-commit/pre-push audit gate).
+- **Smarter + cleaner internals** — a declarative command registry,
+  telemetry-EWMA self-calibrating token math (`AMBIENT_TELEMETRY=off` opts out),
+  and a frozen `RequestSpec`/`Session` engine carrier (attempt-loop instead of
+  recursion) — all behavior-preserving.
+- **Whole-system spend gating** — every lane (single `ask`/`code`/`audit`, map,
+  consensus, best-of, repo, and opt-in fallback) now reserves against the
+  ceiling up front, so nothing escapes the budget.
+- **Powerhouse UX** — the `/ambient` model picker surfaces only models serving
+  right now; on-demand scaling is framed as normal (never "cold/429/no workers")
+  while real failures still surface loudly; clearer Claude-vs-Ambient scoping;
+  and the `ambient agent` lane now discloses at launch that its spend is billed
+  by Ambient directly (outside local metering).
+
 ## 2.0.0 — 2026-07-03
 
 Production/marketplace release. Breaking: exit codes and --json envelopes changed.
