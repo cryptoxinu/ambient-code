@@ -62,6 +62,7 @@ import atexit
 import collections
 import concurrent.futures
 import contextlib
+import dataclasses
 import difflib
 import fnmatch
 import hashlib
@@ -78,6 +79,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import weakref
 import time
 import urllib.error
 import urllib.parse
@@ -2837,279 +2839,404 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
     }
 
 
+# Per-Session catalog memo kept OUTSIDE the frozen value object so a Session
+# stays fully immutable (no interior-mutable field). Keyed weakly by Session
+# identity (eq=False → identity hash), so entries vanish when the Session is
+# collected. Reads/writes for a given Session are serialized by its own
+# _catalog_lock; distinct Sessions touch distinct keys (GIL-atomic dict ops).
+_SESSION_CATALOG = weakref.WeakKeyDictionary()
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class Session:
+    """Transport context for the engine (Phase 8b-1): ONE frozen object in
+    place of the (api_key, api_url, conf) triple threaded loose through every
+    engine call. `transport` is an injectable stream_completion-compatible
+    callable — None means "resolve the module-level stream_completion at call
+    time" so existing test monkeypatching keeps working. `catalog()` memoizes
+    ONE safe_catalog fetch per Session (write-once cache cell; the instance
+    itself is immutable — no field is ever reassigned)."""
+
+    api_url: str
+    api_key: str
+    conf: dict = dataclasses.field(default_factory=dict)
+    transport: object = None  # callable(api_url, api_key, payload, timeout,
+    #                           on_delta=None) -> (status, body)
+    _catalog_lock: object = dataclasses.field(
+        default_factory=threading.Lock, repr=False, compare=False)
+
+    def catalog(self):
+        """Model catalog, fetched AT MOST once per Session (degrades to []
+        exactly like safe_catalog — a degraded [] is memoized too, so a
+        Session never turns one logical fetch into a retry storm). The memo
+        lives in the module-level _SESSION_CATALOG (keyed by this Session) so
+        the Session itself never mutates a field."""
+        with self._catalog_lock:
+            if self not in _SESSION_CATALOG:
+                _SESSION_CATALOG[self] = safe_catalog(
+                    self.api_url, self.api_key)
+            return _SESSION_CATALOG[self]
+
+
+def _session_or(session, api_key, api_url, conf=None):
+    """Normalize the loose (api_key, api_url[, conf]) triple to ONE Session.
+    Engine functions accept either form (Phase 8b-1 compatibility): callers
+    that already hold a Session pass it through; legacy positional callers
+    get an equivalent Session built on the spot."""
+    if session is not None:
+        return session
+    return Session(api_url=api_url, api_key=api_key, conf=conf or {})
+
+
+@dataclasses.dataclass(frozen=True)
+class AttemptState:
+    """ONE attempt of complete()'s retry/fallback ladder (Phase 8b-1).
+    Immutable: every guard (stall retry, budget shrink, model fallback,
+    budget escalation) computes the NEXT attempt via dataclasses.replace —
+    never by mutating shared state. The four flags are INDEPENDENT and only
+    ever flip False→True, so the ladder is bounded by construction."""
+
+    model: str
+    messages: list
+    args: object  # per-attempt argparse.Namespace (fresh copy per variant)
+    stall_retried: bool = False
+    budget_retried: bool = False
+    fallback_retried: bool = False
+    budget_shrunk: bool = False
+    attempt_no: int = 0
+
+
+# Hard ceiling on the attempt loop: the initial attempt + one retry per
+# independent guard flag — exactly the maximum depth the old recursive
+# `return complete(...)` ladder could reach (each frame set one more flag,
+# flags never reset), so the loop can NEVER run longer than the recursion.
+MAX_COMPLETE_ATTEMPTS = 5
+
+
 def complete(api_key, api_url, model, messages, args, _stall_retried=False,
              _budget_retried=False, _fallback_retried=False,
-             _budget_shrunk=False, on_delta=None):
+             _budget_shrunk=False, on_delta=None, session=None):
     """One completion. Returns (content, usage, body). Raises ChatError with a
     classified diagnosis, or NetworkError. Thread-safe (used by chunk fan-out).
     Degrades gracefully WITHOUT changing the user's chosen model: budget
     escalation -> labeled best-effort reasoning draft -> diagnosed error
     (callers may then split the work across the SAME model). The stall-retry,
     budget-escalation, and (opt-in) fallback guards are INDEPENDENT so one
-    firing never disables another."""
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": args.max_tokens,
-        "temperature": args.temperature,
-    }
-    rf = getattr(args, "response_format", None)  # A4: structured output when set
-    if rf:
-        payload["response_format"] = rf
-    kw = dict(_stall_retried=_stall_retried, _budget_retried=_budget_retried,
-              _fallback_retried=_fallback_retried, _budget_shrunk=_budget_shrunk)
-    try:
-        # Stream to stdout only on the FIRST attempt — a stall-retry/escalation
-        # restart would double-print the tail (D1).
-        status, body = stream_completion(
-            api_url, api_key, payload, args.timeout,
-            on_delta=(on_delta if not _stall_retried else None))
-    except StallError as err:
-        # A DATA-FLOW silence may be a flaky worker → retry once fresh. A HARD-WALL
-        # hit means the generation is simply too long to finish → do NOT restart
-        # from scratch (it would re-bill and re-hit the wall); salvage immediately.
-        if not err.hard_wall and not _stall_retried:
-            print(
-                f"ambient: {err} — retrying once on a fresh worker (same model)",
-                file=sys.stderr,
+    firing never disables another. Phase 8b-1: the retry/fallback ladder is an
+    explicit bounded loop over an immutable AttemptState (formerly recursive
+    `return complete(...)` frames) — each guard computes the NEXT attempt via
+    dataclasses.replace; observable behavior is identical."""
+    session = _session_or(session, api_key, api_url)
+    api_key, api_url = session.api_key, session.api_url
+    state = AttemptState(
+        model=model, messages=messages, args=args,
+        stall_retried=_stall_retried, budget_retried=_budget_retried,
+        fallback_retried=_fallback_retried, budget_shrunk=_budget_shrunk)
+    for _ in range(MAX_COMPLETE_ATTEMPTS):
+        model, messages, args = state.model, state.messages, state.args
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": args.max_tokens,
+            "temperature": args.temperature,
+        }
+        rf = getattr(args, "response_format", None)  # A4: structured output
+        if rf:
+            payload["response_format"] = rf
+        # None transport = resolve the module global at CALL time (tests
+        # monkeypatch `stream_completion`; an injected Session transport wins).
+        send = (session.transport if session.transport is not None
+                else stream_completion)
+        try:
+            # Stream to stdout only on the FIRST attempt — a stall-retry/
+            # escalation restart would double-print the tail (D1).
+            status, body = send(
+                api_url, api_key, payload, args.timeout,
+                on_delta=(on_delta if state.attempt_no == 0
+                          and not state.stall_retried else None))
+        except StallError as err:
+            # A DATA-FLOW silence may be a flaky worker → retry once fresh. A
+            # HARD-WALL hit means the generation is simply too long to finish
+            # → do NOT restart from scratch (it would re-bill and re-hit the
+            # wall); salvage immediately.
+            if not err.hard_wall and not state.stall_retried:
+                print(
+                    f"ambient: {err} — retrying once on a fresh worker "
+                    "(same model)",
+                    file=sys.stderr,
+                )
+                state = dataclasses.replace(
+                    state, stall_retried=True,
+                    attempt_no=state.attempt_no + 1)
+                continue
+            if len(err.partial) > 400:
+                why = "hit the time wall" if err.hard_wall else "stalled"
+                print(
+                    f"ambient: generation {why} — salvaging the partial output "
+                    "already generated (marked incomplete)",
+                    file=sys.stderr,
+                )
+                salvaged = (
+                    "[AMBIENT NOTE: the stream ended mid-generation; this output "
+                    "is PARTIAL — the tail is missing.]\n\n" + err.partial
+                )
+                # The partial output was PAID FOR: meter it as an estimated
+                # record instead of returning empty usage — spend must never
+                # under-count (Codex H2). Same char-based estimate as the
+                # missing-usage path below; reasoning counts as output.
+                in_tok = int(sum(len(m.get("content", "")) for m in messages)
+                             / CHARS_PER_TOKEN)
+                out_tok = int((len(err.partial) + len(err.reasoning or ""))
+                              / CHARS_PER_TOKEN)
+                usage = {"prompt_tokens": in_tok, "completion_tokens": out_tok,
+                         "_estimated": True}
+                log_usage(model, usage)
+                # `model` here is THIS attempt's model — after a --fallback
+                # switch that IS the serving model, so the receipt prices
+                # correctly.
+                return salvaged, usage, {"salvaged_partial": True,
+                                         "usage": usage, "_served_model": model}
+            raise ChatError(
+                "stall",
+                f"'{model}' produced almost no output before stalling ({err}). "
+                "The serving workers look unhealthy — retry shortly or check: "
+                "ambient models",
             )
-            return complete(
-                api_key, api_url, model, messages, args,
-                **{**kw, "_stall_retried": True},
-            )
-        if len(err.partial) > 400:
-            why = "hit the time wall" if err.hard_wall else "stalled"
-            print(
-                f"ambient: generation {why} — salvaging the partial output already "
-                "generated (marked incomplete)",
-                file=sys.stderr,
-            )
-            salvaged = (
-                "[AMBIENT NOTE: the stream ended mid-generation; this output "
-                "is PARTIAL — the tail is missing.]\n\n" + err.partial
-            )
-            # The partial output was PAID FOR: meter it as an estimated
-            # record instead of returning empty usage — spend must never
-            # under-count (Codex H2). Same char-based estimate as the
-            # missing-usage path below; reasoning counts as output.
+        if status != 200:
+            category, diagnosis = classify_error(status, body, api_key)
+            if category == "budget" and not state.budget_shrunk \
+                    and args.max_tokens > MIN_OUTPUT_TOKENS:
+                # The server rejected our output budget outright (offline-
+                # profile guess above the model's real cap). Splitting the
+                # INPUT can't fix that — every chunk would resend the same
+                # doomed max_tokens — so self-heal by halving the budget once
+                # (resilience sweep LOW).
+                smaller = argparse.Namespace(**vars(args))
+                smaller.max_tokens = max(MIN_OUTPUT_TOKENS,
+                                         args.max_tokens // 2)
+                print(
+                    f"ambient: server rejected the {args.max_tokens}-token "
+                    f"output budget — retrying once at {smaller.max_tokens}",
+                    file=sys.stderr,
+                )
+                state = dataclasses.replace(
+                    state, args=smaller, budget_shrunk=True,
+                    attempt_no=state.attempt_no + 1)
+                continue
+            if category == "model":
+                # Enriching the diagnosis / choosing a fallback must never
+                # itself abort the call (esp. inside a map-reduce worker
+                # thread) if the models endpoint is also unhealthy — degrade
+                # gracefully.
+                try:
+                    catalog = fetch_models(api_url, api_key)
+                except (NetworkError, SystemExit):
+                    catalog = []
+                ready = ready_model_ids(catalog)
+                fb_conf = read_config_file()
+                # SACRED override (Codex H4): callers running a model the user
+                # EXPLICITLY chose (a --consensus set member, a chat /model
+                # pick) set _no_fallback — the swap is disabled outright, even
+                # when --fallback/AMBIENT_FALLBACK is on. The model IS the
+                # choice; it fails as itself instead of silently becoming
+                # another model.
+                fallback_on = not getattr(args, "_no_fallback", False) and (
+                    getattr(args, "fallback", False) or (
+                        (os.environ.get("AMBIENT_FALLBACK")
+                         or fb_conf.get("AMBIENT_FALLBACK", "")).lower()
+                        in ("1", "on", "true")
+                    )
+                )
+                if fallback_on and not state.fallback_retried:
+                    # The chunk was already sized for `model`; only fall back
+                    # to a model whose context can hold the input we're about
+                    # to resend PLUS its own output budget + overhead, so the
+                    # switch can't overflow context or induce a marathon
+                    # (Codex round-3 HIGH).
+                    input_tok = int(sum(len(m.get("content", ""))
+                                        for m in messages) / CHARS_PER_TOKEN)
+                    alt = pick_fallback_model(catalog, model,
+                                              min_context=input_tok,
+                                              conf=fb_conf)
+                    alt_profile = model_profile(catalog, alt) if alt else None
+                    if alt_profile:
+                        alt_budget = (alt_profile.output_budget
+                                      if getattr(args, "_auto_budget", False)
+                                      else min(args.max_tokens,
+                                               alt_profile.max_output_length))
+                        if input_tok + alt_budget + 2500 \
+                                > alt_profile.context_length:
+                            alt = None  # can't hold input+output — don't switch
+                    if alt and alt_profile:
+                        cur_p = model_pricing(catalog, model)
+                        alt_p = model_pricing(catalog, alt)
+                        delta = (f" (${alt_p[1]:.2f}/M out vs ${cur_p[1]:.2f}/M)"
+                                 if cur_p and alt_p else "")
+                        print(
+                            f"ambient: '{model}' has no workers — falling back "
+                            f"to '{alt}'{delta} (--fallback)",
+                            file=sys.stderr,
+                        )
+                        alt_args = argparse.Namespace(**vars(args))
+                        if getattr(args, "_auto_budget", False):
+                            alt_args.max_tokens = alt_profile.output_budget
+                        else:
+                            alt_args.max_tokens = min(
+                                alt_args.max_tokens,
+                                alt_profile.max_output_length)
+                        alt_args.escalation_ceiling = \
+                            alt_profile.escalation_ceiling
+                        # Re-gate structured output for the fallback model —
+                        # sending a strict json_schema to a model that lacks
+                        # it 400s (Codex MED).
+                        if getattr(alt_args, "response_format", None):
+                            afeats = alt_profile.features or []
+                            if "structured_outputs" in afeats:
+                                pass  # keep the strict schema
+                            elif "json_mode" in afeats:
+                                alt_args.response_format = {
+                                    "type": "json_object"}
+                            else:
+                                alt_args.response_format = None
+                        state = dataclasses.replace(
+                            state, model=alt, args=alt_args,
+                            fallback_retried=True,
+                            attempt_no=state.attempt_no + 1)
+                        continue
+                if ready:
+                    diagnosis += f" READY now: {', '.join(ready)}"
+            err_obj = ChatError(category, diagnosis)
+            # body may be a valid non-object JSON (str/list/number) on an
+            # error response — guard before .get so it never AttributeErrors
+            # to [internal].
+            if isinstance(body, dict) and body.get("_retry_after"):
+                err_obj.retry_after = body["_retry_after"]
+            raise err_obj
+        if "content" in body and "choices" not in body:
+            # Streamed result (normal path).
+            content = body.get("content")
+            reasoning_text = (body.get("reasoning") or "").strip()
+            finish = body.get("finish_reason")
+        else:
+            # Classic JSON body (endpoint ignored streaming).
+            try:
+                choice = body["choices"][0]
+                message = choice["message"]
+            except (KeyError, IndexError, TypeError):
+                raise ChatError(
+                    "unknown",
+                    "unexpected response shape: "
+                    f"{redact(json.dumps(body)[:800], api_key)}",
+                )
+            content = message.get("content")
+            reasoning_text = (
+                message.get("reasoning_content") or message.get("reasoning")
+                or ""
+            ).strip()
+            finish = choice.get("finish_reason")
+            # Surface finish_reason at the top level so every caller's
+            # truncation check works on both the streamed and classic body
+            # shapes.
+            body.setdefault("finish_reason", finish)
+        usage = body.get("usage") or {}
+        if not usage and isinstance(content, str):
+            # Ambient's stream does not reliably send a usage object (probe
+            # finding), so local metering was blind for most calls. Estimate
+            # tokens from char counts (reasoning counts as output) — marked
+            # _estimated. Far better for `ambient usage` than silently
+            # recording nothing.
             in_tok = int(sum(len(m.get("content", "")) for m in messages)
                          / CHARS_PER_TOKEN)
-            out_tok = int((len(err.partial) + len(err.reasoning or ""))
+            out_tok = int((len(content) + len(reasoning_text))
                           / CHARS_PER_TOKEN)
             usage = {"prompt_tokens": in_tok, "completion_tokens": out_tok,
                      "_estimated": True}
-            log_usage(model, usage)
-            # `model` here is THIS frame's model — inside a --fallback frame
-            # that IS the serving model, so the receipt prices correctly.
-            return salvaged, usage, {"salvaged_partial": True,
-                                     "usage": usage, "_served_model": model}
-        raise ChatError(
-            "stall",
-            f"'{model}' produced almost no output before stalling ({err}). The "
-            "serving workers look unhealthy — retry shortly or check: ambient models",
-        )
-    if status != 200:
-        category, diagnosis = classify_error(status, body, api_key)
-        if category == "budget" and not _budget_shrunk \
-                and args.max_tokens > MIN_OUTPUT_TOKENS:
-            # The server rejected our output budget outright (offline-profile
-            # guess above the model's real cap). Splitting the INPUT can't fix
-            # that — every chunk would resend the same doomed max_tokens — so
-            # self-heal by halving the budget once (resilience sweep LOW).
-            smaller = argparse.Namespace(**vars(args))
-            smaller.max_tokens = max(MIN_OUTPUT_TOKENS, args.max_tokens // 2)
-            print(
-                f"ambient: server rejected the {args.max_tokens}-token output "
-                f"budget — retrying once at {smaller.max_tokens}",
-                file=sys.stderr,
-            )
-            return complete(
-                api_key, api_url, model, messages, smaller,
-                **{**kw, "_budget_shrunk": True},
-            )
-        if category == "model":
-            # Enriching the diagnosis / choosing a fallback must never itself
-            # abort the call (esp. inside a map-reduce worker thread) if the
-            # models endpoint is also unhealthy — degrade gracefully.
-            try:
-                catalog = fetch_models(api_url, api_key)
-            except (NetworkError, SystemExit):
-                catalog = []
-            ready = ready_model_ids(catalog)
-            fb_conf = read_config_file()
-            # SACRED override (Codex H4): callers running a model the user
-            # EXPLICITLY chose (a --consensus set member, a chat /model pick)
-            # set _no_fallback — the swap is disabled outright, even when
-            # --fallback/AMBIENT_FALLBACK is on. The model IS the choice;
-            # it fails as itself instead of silently becoming another model.
-            fallback_on = not getattr(args, "_no_fallback", False) and (
-                getattr(args, "fallback", False) or (
-                    (os.environ.get("AMBIENT_FALLBACK")
-                     or fb_conf.get("AMBIENT_FALLBACK", "")).lower()
-                    in ("1", "on", "true")
+            # Reflect the estimate in the body too — ask/code --json read
+            # body["usage"] and must never say null while the ledger has an
+            # estimated record (Codex M3).
+            if isinstance(body, dict):
+                body["usage"] = usage
+        if usage:
+            # Real usage carries the observed input char count for the Phase
+            # 8a telemetry EWMA (estimated usage is ignored inside log_usage).
+            log_usage(model, usage,
+                      input_chars=sum(len(m.get("content", ""))
+                                      for m in messages))
+        if not isinstance(content, str) or not content.strip():
+            # All budget spent on reasoning, nothing emitted: escalate ONCE,
+            # bounded. The ceiling is the MODEL's real max output (from its
+            # profile), not a flat 65536 — and we now start from a well-sized
+            # budget, so bump gently.
+            ceiling = getattr(args, "escalation_ceiling",
+                              MAX_AUTO_BUDGET_TOKENS)
+            if not state.budget_retried and args.max_tokens < ceiling:
+                new_budget = min(max(args.max_tokens * 2,
+                                     args.max_tokens + 16384),
+                                 ceiling)
+                print(
+                    f"ambient: model spent all {args.max_tokens} tokens "
+                    f"reasoning with no final answer — retrying once with a "
+                    f"{new_budget}-token budget (input is re-billed)",
+                    file=sys.stderr,
                 )
-            )
-            if fallback_on and not _fallback_retried:
-                # The chunk was already sized for `model`; only fall back to a
-                # model whose context can hold the input we're about to resend
-                # PLUS its own output budget + overhead, so the switch can't
-                # overflow context or induce a marathon (Codex round-3 HIGH).
-                input_tok = int(sum(len(m.get("content", ""))
-                                    for m in messages) / CHARS_PER_TOKEN)
-                alt = pick_fallback_model(catalog, model, min_context=input_tok,
-                                          conf=fb_conf)
-                alt_profile = model_profile(catalog, alt) if alt else None
-                if alt_profile:
-                    alt_budget = (alt_profile.output_budget
-                                  if getattr(args, "_auto_budget", False)
-                                  else min(args.max_tokens,
-                                           alt_profile.max_output_length))
-                    if input_tok + alt_budget + 2500 > alt_profile.context_length:
-                        alt = None  # can't hold input+output — don't switch
-                if alt and alt_profile:
-                    cur_p = model_pricing(catalog, model)
-                    alt_p = model_pricing(catalog, alt)
-                    delta = (f" (${alt_p[1]:.2f}/M out vs ${cur_p[1]:.2f}/M)"
-                             if cur_p and alt_p else "")
-                    print(
-                        f"ambient: '{model}' has no workers — falling back to "
-                        f"'{alt}'{delta} (--fallback)",
-                        file=sys.stderr,
-                    )
-                    alt_args = argparse.Namespace(**vars(args))
-                    if getattr(args, "_auto_budget", False):
-                        alt_args.max_tokens = alt_profile.output_budget
-                    else:
-                        alt_args.max_tokens = min(alt_args.max_tokens,
-                                                  alt_profile.max_output_length)
-                    alt_args.escalation_ceiling = alt_profile.escalation_ceiling
-                    # Re-gate structured output for the fallback model — sending a
-                    # strict json_schema to a model that lacks it 400s (Codex MED).
-                    if getattr(alt_args, "response_format", None):
-                        afeats = alt_profile.features or []
-                        if "structured_outputs" in afeats:
-                            pass  # keep the strict schema
-                        elif "json_mode" in afeats:
-                            alt_args.response_format = {"type": "json_object"}
-                        else:
-                            alt_args.response_format = None
-                    return complete(
-                        api_key, api_url, alt, messages, alt_args,
-                        **{**kw, "_fallback_retried": True},
-                    )
-            if ready:
-                diagnosis += f" READY now: {', '.join(ready)}"
-        err_obj = ChatError(category, diagnosis)
-        # body may be a valid non-object JSON (str/list/number) on an error
-        # response — guard before .get so it never AttributeErrors to [internal].
-        if isinstance(body, dict) and body.get("_retry_after"):
-            err_obj.retry_after = body["_retry_after"]
-        raise err_obj
-    if "content" in body and "choices" not in body:
-        # Streamed result (normal path).
-        content = body.get("content")
-        reasoning_text = (body.get("reasoning") or "").strip()
-        finish = body.get("finish_reason")
-    else:
-        # Classic JSON body (endpoint ignored streaming).
-        try:
-            choice = body["choices"][0]
-            message = choice["message"]
-        except (KeyError, IndexError, TypeError):
+                bigger = argparse.Namespace(**vars(args))
+                bigger.max_tokens = new_budget
+                state = dataclasses.replace(
+                    state, args=bigger, budget_retried=True,
+                    attempt_no=state.attempt_no + 1)
+                continue
+            reasoning = reasoning_text
+            input_chars = sum(len(m.get("content", "")) for m in messages)
+            if len(reasoning) > 200 and input_chars < 20_000:
+                # Small input, so splitting can't help: the thinking exists
+                # even though the answer doesn't — a labeled draft beats an
+                # empty hand.
+                print(
+                    "ambient: no final answer — returning the model's "
+                    "reasoning as a labeled best-effort draft",
+                    file=sys.stderr,
+                )
+                draft = (
+                    "[AMBIENT NOTE: the model emitted reasoning but no final "
+                    "answer. This is a best-effort draft assembled from that "
+                    "reasoning — treat with extra skepticism.]\n\n" + reasoning
+                )
+                return draft, usage, {"salvaged_partial": True,
+                                      "usage": usage, "_served_model": model}
             raise ChatError(
-                "unknown",
-                "unexpected response shape: "
-                f"{redact(json.dumps(body)[:800], api_key)}",
+                "empty",
+                f"'{model}' produced no final content even after budget "
+                f"escalation (finish_reason={finish}).",
             )
-        content = message.get("content")
-        reasoning_text = (
-            message.get("reasoning_content") or message.get("reasoning") or ""
-        ).strip()
-        finish = choice.get("finish_reason")
-        # Surface finish_reason at the top level so every caller's truncation
-        # check works on both the streamed and classic body shapes.
-        body.setdefault("finish_reason", finish)
-    usage = body.get("usage") or {}
-    if not usage and isinstance(content, str):
-        # Ambient's stream does not reliably send a usage object (probe finding),
-        # so local metering was blind for most calls. Estimate tokens from char
-        # counts (reasoning counts as output) — marked _estimated. Far better for
-        # `ambient usage` than silently recording nothing.
-        in_tok = int(sum(len(m.get("content", "")) for m in messages)
-                     / CHARS_PER_TOKEN)
-        out_tok = int((len(content) + len(reasoning_text)) / CHARS_PER_TOKEN)
-        usage = {"prompt_tokens": in_tok, "completion_tokens": out_tok,
-                 "_estimated": True}
-        # Reflect the estimate in the body too — ask/code --json read
-        # body["usage"] and must never say null while the ledger has an
-        # estimated record (Codex M3).
+        if finish == "length":
+            print(
+                f"ambient: output hit the {args.max_tokens}-token cap and may "
+                "be truncated — rerun with a larger --max-tokens if it ends "
+                "abruptly",
+                file=sys.stderr,
+            )
+        # Record which model ACTUALLY served this result: an opt-in --fallback
+        # switch happens in a later attempt, and a --json consumer must not be
+        # told the content came from the model that had no workers (Codex
+        # final MED).
         if isinstance(body, dict):
-            body["usage"] = usage
-    if usage:
-        # Real usage carries the observed input char count for the Phase 8a
-        # telemetry EWMA (estimated usage is ignored inside log_usage).
-        log_usage(model, usage,
-                  input_chars=sum(len(m.get("content", ""))
-                                  for m in messages))
-    if not isinstance(content, str) or not content.strip():
-        # All budget spent on reasoning, nothing emitted: escalate ONCE, bounded.
-        # The ceiling is the MODEL's real max output (from its profile), not a
-        # flat 65536 — and we now start from a well-sized budget, so bump gently.
-        ceiling = getattr(args, "escalation_ceiling", MAX_AUTO_BUDGET_TOKENS)
-        if not _budget_retried and args.max_tokens < ceiling:
-            new_budget = min(max(args.max_tokens * 2, args.max_tokens + 16384),
-                             ceiling)
-            print(
-                f"ambient: model spent all {args.max_tokens} tokens reasoning with "
-                f"no final answer — retrying once with a {new_budget}-token budget "
-                "(input is re-billed)",
-                file=sys.stderr,
-            )
-            bigger = argparse.Namespace(**vars(args))
-            bigger.max_tokens = new_budget
-            return complete(
-                api_key, api_url, model, messages, bigger,
-                **{**kw, "_budget_retried": True},
-            )
-        reasoning = reasoning_text
-        input_chars = sum(len(m.get("content", "")) for m in messages)
-        if len(reasoning) > 200 and input_chars < 20_000:
-            # Small input, so splitting can't help: the thinking exists even
-            # though the answer doesn't — a labeled draft beats an empty hand.
-            print(
-                "ambient: no final answer — returning the model's reasoning as "
-                "a labeled best-effort draft",
-                file=sys.stderr,
-            )
-            draft = (
-                "[AMBIENT NOTE: the model emitted reasoning but no final answer. "
-                "This is a best-effort draft assembled from that reasoning — "
-                "treat with extra skepticism.]\n\n" + reasoning
-            )
-            return draft, usage, {"salvaged_partial": True,
-                                  "usage": usage, "_served_model": model}
-        raise ChatError(
-            "empty",
-            f"'{model}' produced no final content even after budget escalation "
-            f"(finish_reason={finish}).",
-        )
-    if finish == "length":
-        print(
-            f"ambient: output hit the {args.max_tokens}-token cap and may be "
-            "truncated — rerun with a larger --max-tokens if it ends abruptly",
-            file=sys.stderr,
-        )
-    # Record which model ACTUALLY served this result: an opt-in --fallback
-    # switch happens in a recursive frame, and a --json consumer must not be
-    # told the content came from the model that had no workers (Codex final MED).
-    if isinstance(body, dict):
-        body.setdefault("_served_model", model)
-    return content.strip(), usage, body
+            body.setdefault("_served_model", model)
+        return content.strip(), usage, body
+    # Unreachable by construction: every `continue` above flips one guard
+    # flag False→True and every guard requires its flag to be False, so the
+    # ladder can take at most 4 retries after the initial attempt. The bound
+    # exists so a future edit can never turn the loop into an unbounded spin.
+    raise ChatError(
+        "internal",
+        f"completion retry ladder exceeded {MAX_COMPLETE_ATTEMPTS} attempts",
+    )
 
 
-def chat(api_key, api_url, model, messages, args, kind="ask"):
+def chat(api_key, api_url, model, messages, args, kind="ask", session=None):
     """Single-shot completion printed to stdout (CLI convenience wrapper).
     Live-streams to an interactive terminal (D1)."""
+    session = _session_or(session, api_key, api_url)
+    api_key, api_url = session.api_key, session.api_url
     want_json = getattr(args, "json", False)
     live_stream = sys.stdout.isatty() and not args.raw and not want_json
     streamed_parts = []
@@ -3122,7 +3249,7 @@ def chat(api_key, api_url, model, messages, args, kind="ask"):
     try:
         content, usage, body = complete(
             api_key, api_url, model, messages, args,
-            on_delta=(on_delta if live_stream else None))
+            on_delta=(on_delta if live_stream else None), session=session)
     except ChatError as err:
         if streamed_parts:
             sys.stdout.write("\n")
@@ -3624,7 +3751,7 @@ def _map_note(map_system, code_map, n_chunks):
 def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                    synth_system, reduce_budget, reducer=None, code_map="",
                    gate=None, cancel_event=None, reduce_model=None,
-                   catalog=None):
+                   catalog=None, session=None):
     """Fan chunk calls out in parallel, then reduce with BUDGET-AWARE synthesis.
     Returns (final_text, partial, reason). Never discards paid-for work: failed
     or truncated chunks are counted as coverage gaps and surfaced; a synthesis
@@ -3645,6 +3772,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     reduce-specific args copy (max_tokens/response_format re-derived) — a
     smaller-window reduce model must never receive merge prompts or token
     budgets sized for the map model."""
+    session = _session_or(session, api_key, api_url)
+    api_key, api_url = session.api_key, session.api_url
     total = sum(map(len, chunks))
     width = min(_resolve_parallel(args), len(chunks))
     synth_model = reduce_model or model
@@ -3715,7 +3844,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                             "cancelled",
                             "fan-out cancelled while waiting for a slot")
                     text, _usage, body = complete(
-                        api_key, api_url, model, messages, args)
+                        api_key, api_url, model, messages, args,
+                        session=session)
                 # A length-truncated chunk is INCOMPLETE coverage — flag it and
                 # never cache it as a full result (Codex Wave D HIGH).
                 partial = (bool(body.get("salvaged_partial"))
@@ -3802,7 +3932,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
         ]
         try:
             text, _u, resp_body = complete(api_key, api_url, synth_model,
-                                           messages, synth_args)
+                                           messages, synth_args,
+                                           session=session)
             # The SYNTHESIS tier can truncate too: a length-cut or salvaged
             # merge is NOT a clean synthesis. Flag it exactly like a truncated
             # map chunk so the final verdict can never masquerade as complete.
@@ -4403,7 +4534,8 @@ def cmd_ask(args, api_key, api_url, conf):
     refuse_if_secrets(scan, getattr(args, "allow_secrets", False))
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
-    catalog = safe_catalog(api_url, api_key)
+    session = Session(api_url=api_url, api_key=api_key, conf=conf)
+    catalog = session.catalog()  # memoized: ONE fetch for the whole command
     # 7a/7b are distinct corroboration lanes — combining them would fan out
     # K×N calls for no defined semantics. Validated before any spend.
     best_of_k = _resolve_best_of(args)
@@ -4411,7 +4543,8 @@ def cmd_ask(args, api_key, api_url, conf):
         if best_of_k:
             usage_exit("--consensus and --best-of cannot be combined — "
                        "pick one corroboration lane")
-        _ask_consensus(args, api_key, api_url, conf, catalog, question, doc)
+        _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
+                       session=session)
         return
     input_size = len(question) + (len(doc) if doc else 0)
     # Phase 3 advisory routing: expands an explicit `-m auto` (printed) or
@@ -4443,6 +4576,7 @@ def cmd_ask(args, api_key, api_url, conf):
             f"You are merging partial answers to: {q}\nCombine into one final, "
             "coherent, non-repetitive answer; resolve conflicts explicitly.",
             single, reduce_model=reduce_model, catalog=catalog,
+            session=session,
         )
         if want_json:  # keep --json machine-readable even on the map-reduce path
             emit_json("ask", model=model, api_key=api_key, content=final,
@@ -4477,7 +4611,7 @@ def cmd_ask(args, api_key, api_url, conf):
         # 7a: K independent samples + deterministic selection (its own gate,
         # streaming is per-sample-concurrent so the live-stream lane is off).
         _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
-                      catalog, conf, kind="ask")
+                      catalog, conf, kind="ask", session=session)
         return
     # D1: live-stream the answer to stdout on an interactive terminal (not --raw,
     # not --json). Reasoning shows as heartbeats first, then the answer streams.
@@ -4492,7 +4626,7 @@ def cmd_ask(args, api_key, api_url, conf):
     try:
         content, usage, body = complete(
             api_key, api_url, model, messages, args,
-            on_delta=(on_delta if live_stream else None))
+            on_delta=(on_delta if live_stream else None), session=session)
     except ChatError as err:
         if streamed_parts:
             sys.stdout.write("\n")
@@ -4615,11 +4749,13 @@ def select_best_sample(texts):
 
 
 def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
-                  kind):
+                  kind, session=None):
     """7a for ask/code: draw K INDEPENDENT single-shot samples of `messages`
     (shared gate + cancel_event fan-out, per-sample salted cache so re-runs
     resume), then emit the K candidates plus a deterministic selection. ONE
     up-front cost gate covers every cache-missing sample BEFORE any call."""
+    session = _session_or(session, api_key, api_url, conf)
+    api_key, api_url = session.api_key, session.api_url
     want_json = getattr(args, "json", False)
     system_text = "".join(m.get("content", "") for m in messages
                           if m.get("role") == "system")
@@ -4679,7 +4815,7 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
                     # not mutate a sibling sample's budget mid-flight.
                     out, usage, body = complete(
                         api_key, api_url, model, messages,
-                        argparse.Namespace(**vars(args)))
+                        argparse.Namespace(**vars(args)), session=session)
                 except NetworkError:
                     cancel_event.set()  # fatal for every sibling — stop billing
                     raise
@@ -4851,13 +4987,16 @@ def _answers_agreement(texts):
         "independently before trusting any single one")
 
 
-def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc):
+def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
+                   session=None):
     """7b: run the SAME ask on several EXPLICITLY-named models (--consensus —
     the set is the user's choice, SACRED) concurrently behind ONE summed
     up-front cost gate, then print every model's answer plus an agreement/
     divergence note. Fail-fast semantics mirror audit --consensus: key/funds/
     network abort the whole set; any other per-model failure is reported and
     makes the result PARTIAL, never silently dropped."""
+    session = _session_or(session, api_key, api_url, conf)
+    api_key, api_url = session.api_key, session.api_url
     models = _parse_consensus_models(args, catalog, api_key)
     prompt = f"{question}\n\n{doc}".strip() if doc else question
     want_json = getattr(args, "json", False)
@@ -4910,7 +5049,7 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc):
                 raise ChatError("cancelled", "consensus ask cancelled")
             try:
                 content, usage, body = complete(api_key, api_url, m,
-                                                messages, wa)
+                                                messages, wa, session=session)
             except NetworkError:
                 cancel_event.set()
                 raise
@@ -5156,7 +5295,8 @@ def cmd_map(args, api_key, api_url, conf):
         getattr(args, "allow_secrets", False))
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
-    catalog = safe_catalog(api_url, api_key)
+    session = Session(api_url=api_url, api_key=api_key, conf=conf)
+    catalog = session.catalog()  # memoized: ONE fetch for the whole command
     # `map`'s unit of fit is the LARGEST single item (each item is its own
     # single-shot call). AMBIENT_MODEL_MAP's dedicated "map" phase lets the
     # user route the whole bulk lane to a cheap model without touching chat.
@@ -5267,7 +5407,8 @@ def cmd_map(args, api_key, api_url, conf):
                             "map cancelled while waiting for a slot")
                     try:
                         out, _u, body = complete(
-                            api_key, api_url, model, messages, item_args)
+                            api_key, api_url, model, messages, item_args,
+                            session=session)
                     except NetworkError:
                         # Fatal for every sibling — flip cancel BEFORE this
                         # gate slot is released, so a waiting retry worker
@@ -5883,7 +6024,7 @@ def cross_file_suspects(final_text, paths, cap=6):
 
 
 def run_cross_file_pass(final, labeled, model, profile, args, api_key,
-                        api_url, catalog, conf, structured):
+                        api_url, catalog, conf, structured, session=None):
     """AT MOST ONE bounded cross-file confirmation call (5c): pass-1 findings
     + the suspect files' content (clipped to half a chunk) go to the SAME
     model in a single gated complete(); its findings are merged in. Failure
@@ -5891,6 +6032,8 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
     pass may only ADD information, never lose paid-for work. Pass-1 coverage
     flags (_unparsed/_repaired chunks) are PRESERVED through the merge so a
     partial audit can never launder itself clean."""
+    session = _session_or(session, api_key, api_url, conf)
+    api_key, api_url = session.api_key, session.api_url
     known = []
     for label, _text in labeled:
         p = label.split(" [")[0]
@@ -5955,7 +6098,7 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
                 {"role": "user", "content": user}]
     try:
         text, _usage, _body = complete(api_key, api_url, model, messages,
-                                       deep_args)
+                                       deep_args, session=session)
     except (ChatError, NetworkError) as err:
         print(f"ambient: cross-file pass failed "
               f"({getattr(err, 'diagnosis', None) or err}) — pass-1 "
@@ -6197,7 +6340,7 @@ def _audit_single_key(model, sp, labeled, a):
 
 
 def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
-                  conf, gate=None, cancel_event=None):
+                  conf, gate=None, cancel_event=None, session=None):
     """Structured audit on ONE model → (findings, ok) (D8 consensus helper). ok
     is False when the model errored, was unready, or returned unparseable/partial
     output — so consensus can't present a FAILURE as 'no defects' (Codex Wave D
@@ -6206,6 +6349,8 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
     reach every model's inner fan-out. The single-shot path reads/writes the
     same salted cache as the chunked fan-out (H3): a re-run — best-of salted
     or not — re-bills only what the cache does not already hold."""
+    session = _session_or(session, api_key, api_url, conf)
+    api_key, api_url = session.api_key, session.api_url
     if cancel_event is not None and cancel_event.is_set():
         # Consensus is unwinding (fatal sibling / Ctrl-C): a queued model can
         # race past cancel_futures into a pool worker — bill it NOTHING.
@@ -6235,7 +6380,8 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
             with (gate if gate is not None else contextlib.nullcontext()):
                 if cancel_event is not None and cancel_event.is_set():
                     return [], False  # cancelled while waiting for a gate slot
-                content, _u, _b = complete(api_key, api_url, model, messages, a)
+                content, _u, _b = complete(api_key, api_url, model, messages,
+                                           a, session=session)
             obj = extract_json(content)
             if obj is None or not isinstance(obj.get("findings"), list):
                 return [], False  # unparseable ≠ clean
@@ -6266,7 +6412,7 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
             api_key, api_url, model, sp, packed, a, AUDIT_SYNTH_PROMPT, single,
             reducer=findings_reducer,
             code_map=build_code_map(labeled, budget=code_map_budget(single)),
-            gate=gate, cancel_event=cancel_event)
+            gate=gate, cancel_event=cancel_event, session=session)
     except ChatError as err:
         if err.category in ("key", "funds"):
             raise
@@ -6551,7 +6697,8 @@ def cmd_audit(args, api_key, api_url, conf):
                    "corroboration lane")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
-    catalog = safe_catalog(api_url, api_key)
+    session = Session(api_url=api_url, api_key=api_key, conf=conf)
+    catalog = session.catalog()  # memoized: ONE fetch for the whole command
     total = sum(len(text) for _, text in labeled)
     # Token-dense input (CJK etc.) holds more tokens per char than the 3.2
     # assumption — inflate the effective size so sizing decisions stay safe.
@@ -6704,7 +6851,8 @@ def cmd_audit(args, api_key, api_url, conf):
             return run_one_audit(m, catalog, labeled,
                                  AUDIT_SYSTEM_PROMPT + focus,
                                  worker_args, api_key, api_url, conf,
-                                 gate=gate, cancel_event=cancel_event)
+                                 gate=gate, cancel_event=cancel_event,
+                                 session=session)
 
         cpool = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(_resolve_parallel(args), len(models)))
@@ -6883,7 +7031,7 @@ def cmd_audit(args, api_key, api_url, conf):
             return run_one_audit(model, catalog, labeled,
                                  AUDIT_SYSTEM_PROMPT + focus, sa, api_key,
                                  api_url, conf, gate=gate,
-                                 cancel_event=cancel_event)
+                                 cancel_event=cancel_event, session=session)
 
         bpool = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(_resolve_parallel(args), best_of_k))
@@ -7042,7 +7190,8 @@ def cmd_audit(args, api_key, api_url, conf):
             {"role": "user", "content": files_block(labeled)},
         ]
         try:
-            content, _usage, body = complete(api_key, api_url, model, messages, args)
+            content, _usage, body = complete(api_key, api_url, model, messages,
+                                             args, session=session)
             emit_single(content, body)
             return
         except ChatError as err:
@@ -7072,7 +7221,7 @@ def cmd_audit(args, api_key, api_url, conf):
         api_key, api_url, model, sys_prompt,
         packed, args, AUDIT_SYNTH_PROMPT, single, reducer=reducer,
         code_map=code_map,
-        reduce_model=reduce_model, catalog=catalog,
+        reduce_model=reduce_model, catalog=catalog, session=session,
     )
     # 5c: bounded cross-file confirmation — opt-out via --no-deep; ON by
     # default only for --repo (a chunked whole-repo pass is exactly where
@@ -7083,7 +7232,7 @@ def cmd_audit(args, api_key, api_url, conf):
     if deep and len(packed) > 1:
         final = run_cross_file_pass(final, labeled, model, profile, args,
                                     api_key, api_url, catalog, conf,
-                                    structured)
+                                    structured, session=session)
     if structured:
         eff = render_findings(final, args.format, api_key, partial, reason,
                               model=model)
@@ -7114,7 +7263,8 @@ def cmd_code(args, api_key, api_url, conf):
     args.temperature = pre_best_of_temp
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
-    catalog = safe_catalog(api_url, api_key)
+    session = Session(api_url=api_url, api_key=api_key, conf=conf)
+    catalog = session.catalog()  # memoized: ONE fetch for the whole command
     ctx_len = 0  # cheap size probe (stat only) for routing + budget sizing
     for p in (args.context or []):
         try:
@@ -7150,6 +7300,7 @@ def cmd_code(args, api_key, api_url, conf):
             "Merge these extracts into one concise, complete task brief, "
             "preserving verbatim requirements and constraints.",
             single, reduce_model=reduce_model, catalog=catalog,
+            session=session,
         )
         if t_partial and not getattr(args, "allow_partial", False):
             _fail_exit(
@@ -7190,6 +7341,7 @@ def cmd_code(args, api_key, api_url, conf):
                 f"TASK: {task}\nMerge these context extracts into one concise, "
                 "non-redundant context brief preserving verbatim signatures/types.",
                 single, reduce_model=reduce_model, catalog=catalog,
+                session=session,
             )
             if partial and not getattr(args, "allow_partial", False):
                 _fail_exit(
@@ -7223,9 +7375,10 @@ def cmd_code(args, api_key, api_url, conf):
     if best_of_k:
         args.temperature = best_of_temp
         _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
-                      catalog, conf, kind="code")
+                      catalog, conf, kind="code", session=session)
         return
-    chat(api_key, api_url, model, messages, args, kind="code")
+    chat(api_key, api_url, model, messages, args, kind="code",
+         session=session)
 
 
 # --------------------------------------------------------------------------
@@ -7286,7 +7439,8 @@ def cmd_chat(args, api_key, api_url, conf):
         import readline  # noqa: F401 — stdlib line editing where available
     except ImportError:
         pass
-    catalog = safe_catalog(api_url, api_key)
+    session = Session(api_url=api_url, api_key=api_key, conf=conf)
+    catalog = session.catalog()  # memoized: ONE fetch for the whole command
     model = route_model(args, conf, "chat", catalog)
     explicit_max = getattr(args, "max_tokens", None) is not None
     # SACRED (Codex H4): True after an explicit CONCRETE /model choice —
@@ -7403,7 +7557,8 @@ def cmd_chat(args, api_key, api_url, conf):
         try:
             content, usage, body = complete(api_key, api_url, model,
                                             messages, turn_args,
-                                            on_delta=on_delta)
+                                            on_delta=on_delta,
+                                            session=session)
         except KeyboardInterrupt:
             # Ctrl-C ends the TURN, not the REPL. The half-streamed reply is
             # discarded (not appended to history) — an interrupted answer
@@ -7653,7 +7808,8 @@ def cmd_build(args, api_key, api_url, conf):
                        "(explicit consent to write files)")
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
-    catalog = safe_catalog(api_url, api_key)
+    session = Session(api_url=api_url, api_key=api_key, conf=conf)
+    catalog = session.catalog()  # memoized: ONE fetch for the whole command
     ctx_probe = 0  # cheap size probe (stat only) for routing
     for p in (args.context or []):
         try:
@@ -7744,6 +7900,7 @@ def cmd_build(args, api_key, api_url, conf):
             f"TASK: {task}\nMerge these context extracts into one concise "
             "brief preserving verbatim signatures/types.",
             single, reduce_model=reduce_model, catalog=catalog,
+            session=session,
         )
         if c_partial and not getattr(args, "allow_partial", False):
             _fail_exit(args, "build", "partial",
@@ -7785,7 +7942,7 @@ def cmd_build(args, api_key, api_url, conf):
                 content, _u, _b = complete(
                     api_key, api_url, model,
                     [{"role": "system", "content": BUILD_PLAN_PROMPT + extra},
-                     {"role": "user", "content": user}], pa)
+                     {"role": "user", "content": user}], pa, session=session)
             except ChatError as err:
                 _fail(args, "build",
                       ChatError(err.category,
@@ -7936,7 +8093,7 @@ def cmd_build(args, api_key, api_url, conf):
             content, _u, body = complete(
                 api_key, api_url, model,
                 [{"role": "system", "content": BUILD_GEN_PROMPT + gen_extra},
-                 {"role": "user", "content": user}], ga)
+                 {"role": "user", "content": user}], ga, session=session)
         except ChatError as err:
             if len(batch) > 1:
                 mid = len(batch) // 2

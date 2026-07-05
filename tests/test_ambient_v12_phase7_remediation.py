@@ -486,7 +486,7 @@ class ConsensusSacredTests(unittest.TestCase):
         seen = []
 
         def stub(model, catalog, labeled, sys_prompt, args, api_key,
-                 api_url, conf, gate=None, cancel_event=None):
+                 api_url, conf, gate=None, cancel_event=None, session=None):
             seen.append((model, getattr(args, "_no_fallback", False)))
             return [], True
 
@@ -579,7 +579,7 @@ class FailedSamplesShapeTests(unittest.TestCase):
 
     def test_audit_best_of_failed_samples_is_a_list_of_objects(self):
         def stub(model, catalog, labeled, sys_prompt, args, api_key,
-                 api_url, conf, gate=None, cancel_event=None):
+                 api_url, conf, gate=None, cancel_event=None, session=None):
             idx = int(args._cache_salt.rsplit(":", 1)[1])
             if idx == 1:
                 return [], False

@@ -455,7 +455,7 @@ class TestAuditRepo(unittest.TestCase):
         root = make_repo({"a.py": "x = 1\n"})
         calls = []
 
-        def fake_complete(api_key, api_url, model, messages, args):
+        def fake_complete(api_key, api_url, model, messages, args, **kw):
             calls.append(messages)
             return ('{"findings": [], "verdict": "SHIP"}', {},
                     {"finish_reason": "stop"})
@@ -508,7 +508,7 @@ class TestDeepCrossFilePass(unittest.TestCase):
         completes = []
         gates = []
 
-        def fake_complete(api_key, api_url, model, messages, args):
+        def fake_complete(api_key, api_url, model, messages, args, **kw):
             completes.append(messages)
             return (json.dumps({"findings": [
                 {"file": "src/b.py", "line": 1, "severity": "CRITICAL",
@@ -591,7 +591,7 @@ class TestDeepCrossFilePass(unittest.TestCase):
         root = self._repo()
         completes = []
 
-        def fake_complete(api_key, api_url, model, messages, args):
+        def fake_complete(api_key, api_url, model, messages, args, **kw):
             completes.append(messages)
             return ('{"findings": [], "verdict": "SHIP"}', {},
                     {"finish_reason": "stop"})
@@ -617,7 +617,7 @@ class TestDeepCrossFilePass(unittest.TestCase):
         catalog = repo_catalog()
         root = self._repo()
 
-        def fake_complete(api_key, api_url, model, messages, args):
+        def fake_complete(api_key, api_url, model, messages, args, **kw):
             return ("total garbage, not json", {}, {"finish_reason": "stop"})
 
         args = audit_args(repo=root, format="json")
@@ -643,7 +643,7 @@ class TestDeepCrossFilePass(unittest.TestCase):
                              "_unparsed_chunks": 1, "_repaired_chunks": 0}),
                  False, "")
 
-        def fake_complete(api_key, api_url, model, messages, args):
+        def fake_complete(api_key, api_url, model, messages, args, **kw):
             return ('{"findings": [], "verdict": "SHIP"}', {},
                     {"finish_reason": "stop"})
 

@@ -273,7 +273,7 @@ class BestOfAuditTests(unittest.TestCase):
         per_sample = {0: [dict(shared)], 1: [dict(unique)], 2: [dict(shared2)]}
 
         def stub(model, catalog, labeled, sys_prompt, args, api_key, api_url,
-                 conf, gate=None, cancel_event=None):
+                 conf, gate=None, cancel_event=None, session=None):
             idx = int(args._cache_salt.rsplit(":", 1)[1])
             return per_sample[idx], True
 
@@ -291,7 +291,7 @@ class BestOfAuditTests(unittest.TestCase):
         salts = []
 
         def stub(model, catalog, labeled, sys_prompt, args, api_key, api_url,
-                 conf, gate=None, cancel_event=None):
+                 conf, gate=None, cancel_event=None, session=None):
             salts.append(args._cache_salt)
             return [], True
 
