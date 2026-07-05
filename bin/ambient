@@ -22,7 +22,9 @@ Commands:
   agent     [args…]    Interactive agentic terminal on Ambient (opencode TUI)
   doctor               Diagnose: bad key vs out-of-funds vs busy model vs your
                        network vs Ambient itself — names the actual culprit
-  usage     [--days]   Local token/cost summary
+  usage     [--days]   Local token/cost summary + savings vs the frontier
+                       reference (AMBIENT_REFERENCE_PRICE, default 3/15
+                       $/Mtok — an approximation you can set yourself)
   mode      [on|off]   Delegate mode toggle (no arg = status). When ON, Claude
                        routes code writing through Ambient for the session
   link                 Put a stable `ambient` launcher on your PATH
@@ -931,8 +933,14 @@ def fetch_models(api_url, api_key):
     data = body.get("data")
     if not isinstance(data, list):
         return []
-    return [m for m in data
-            if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+    models = [m for m in data
+              if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+    if models:
+        # Memoize for post-run pricing (savings receipt / log_usage) — never
+        # overwrite a good memo with a degraded empty catalog.
+        global _PRICING_CATALOG
+        _PRICING_CATALOG = models
+    return models
 
 
 def _as_pos_int(v, default):
@@ -1007,6 +1015,138 @@ def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     expected_out = min(max_tokens, ANSWER_TOKENS_RESERVE)
     expected = (input_cost + n_calls * expected_out * price[1]) / 1e6
     return expected, bound, assumed
+
+
+# --- Savings receipts (v3 Phase 6) --------------------------------------------
+# The 10-40x-cheaper value proposition was invisible: no run ever showed a
+# dollar figure or a vs-frontier comparison. These helpers price a finished
+# run from the catalog and compare it against a FRONTIER REFERENCE price
+# (AMBIENT_REFERENCE_PRICE, env > config), defaulting to a representative
+# frontier list price. Honesty contract — savings are NEVER over-stated:
+# unpriced models use worst-case ASSUMED cost and claim no saving at all,
+# saved-% is floored, estimated token counts are labeled, and a model at or
+# above the reference says "costlier".
+
+# Default frontier reference, $/Mtok (input, output). This is an
+# APPROXIMATION — a representative frontier list price (e.g. Claude Sonnet's
+# $3/$15 list rate) — set AMBIENT_REFERENCE_PRICE to your own baseline
+# ("in/out" pair like "3/15", or a single blended $/Mtok).
+REFERENCE_PRICE_DEFAULT = (3.0, 15.0)
+_REF_CACHE = None       # resolved reference price, memoized per process
+_PRICING_CATALOG = []   # last successfully fetched catalog (pricing memo)
+
+
+def parse_reference_price(raw):
+    """AMBIENT_REFERENCE_PRICE value → (input, output) $/Mtok, else None.
+    Accepts an "in/out" pair ("3/15") or one blended figure ("10" → 10/10).
+    Zero/negative/NaN/inf/garbage → None (caller falls back to the default —
+    a junk reference must never fabricate a comparison)."""
+    if not isinstance(raw, str):
+        return None
+    parts = [p.strip() for p in raw.strip().split("/")]
+    if not 1 <= len(parts) <= 2 or not all(parts):
+        return None
+    try:
+        vals = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if not all(0 < v < float("inf") for v in vals):  # also rejects NaN
+        return None
+    return (vals[0], vals[0]) if len(vals) == 1 else (vals[0], vals[1])
+
+
+def resolve_reference_price(conf=None):
+    """The frontier reference in force: env > config > documented default.
+    With conf=None the config file is read once and the result memoized (the
+    receipt + every log_usage record resolve this; it cannot change mid-run)."""
+    global _REF_CACHE
+    if conf is not None:
+        return (parse_reference_price(os.environ.get("AMBIENT_REFERENCE_PRICE"))
+                or parse_reference_price(conf.get("AMBIENT_REFERENCE_PRICE"))
+                or REFERENCE_PRICE_DEFAULT)
+    if _REF_CACHE is None:
+        _REF_CACHE = resolve_reference_price(read_config_file())
+    return _REF_CACHE
+
+
+def usage_cost(model, usage, catalog=None):
+    """(dollars, assumed) for a FINISHED run's token counts. Unpriced model /
+    degraded catalog → worst-case ASSUMED prices with assumed=True, so the
+    figure can over-state cost but never under-state it (and the caller must
+    not claim a saving from it)."""
+    price = model_pricing(
+        _PRICING_CATALOG if catalog is None else catalog, model)
+    assumed = price is None
+    if assumed:
+        price = (ASSUMED_MAX_INPUT_PRICE, ASSUMED_MAX_OUTPUT_PRICE)
+    tin = _as_pos_int(usage.get("prompt_tokens"), 0)
+    tout = _as_pos_int(usage.get("completion_tokens"), 0)
+    return (tin * price[0] + tout * price[1]) / 1e6, assumed
+
+
+def reference_cost(usage, ref):
+    """The same tokens priced at the frontier reference (input, output)."""
+    tin = _as_pos_int(usage.get("prompt_tokens"), 0)
+    tout = _as_pos_int(usage.get("completion_tokens"), 0)
+    return (tin * ref[0] + tout * ref[1]) / 1e6
+
+
+def _fmt_usd(x):
+    """$ figure with sensible precision for sub-cent run costs."""
+    if x >= 0.9995:
+        return f"${x:.2f}"
+    if x >= 0.01:
+        return f"${x:.3f}"
+    return f"${x:.4f}"
+
+
+def _round_money(x):
+    """Display rounding for `ambient usage` figures: 4dp normally, but a
+    REAL nonzero figure must never flatten to 0 (Codex H3 — sub-microdollar
+    spend rounded to $0 fabricated a ~100% saving). Tiny values keep 6
+    significant digits instead."""
+    if x and abs(x) < 0.0001:
+        return float(f"{x:.6g}")
+    return round(x, 4)
+
+
+def _usd_amt(x):
+    """Text form of a usage dollar figure: 4dp, switching to significant
+    digits when 4dp would display a real nonzero spend as 0.0000."""
+    if x and abs(x) < 0.00005:
+        return f"{x:.3g}"
+    return f"{x:.4f}"
+
+
+def savings_note(model, usage, catalog=None, conf=None):
+    """Receipt suffix: ' ≈ $0.013 (vs ~$0.42 frontier — saved 97%)'.
+    Honesty rules (never over-state): assumed pricing shows the worst-case
+    cost and OMITS any savings claim; saved-% is floored; at-or-above the
+    reference reads 'costlier'; estimated token counts carry '(est.)';
+    zero tokens → no claim. Never raises — the receipt is decoration."""
+    try:
+        tin = _as_pos_int(usage.get("prompt_tokens"), 0)
+        tout = _as_pos_int(usage.get("completion_tokens"), 0)
+        if tin + tout == 0:
+            return ""
+        cost, assumed = usage_cost(model, usage, catalog)
+        est = " (est.)" if usage.get("_estimated") else ""
+        if assumed:
+            return f" ≈ {_fmt_usd(cost)} (assumed pricing){est}"
+        fcost = reference_cost(usage, resolve_reference_price(conf))
+        if fcost <= 0:
+            return f" ≈ {_fmt_usd(cost)}{est}"
+        saved = fcost - cost
+        if saved <= 0:
+            return (f" ≈ {_fmt_usd(cost)} (vs ~{_fmt_usd(fcost)} frontier — "
+                    f"costlier, no saving){est}")
+        pct = int(saved / fcost * 100)  # floored: 93.7% claims 93%
+        if pct < 1:
+            return f" ≈ {_fmt_usd(cost)} (vs ~{_fmt_usd(fcost)} frontier){est}"
+        return (f" ≈ {_fmt_usd(cost)} (vs ~{_fmt_usd(fcost)} frontier — "
+                f"saved {pct}%){est}")
+    except Exception:  # pragma: no cover — a receipt must never kill a result
+        return ""
 
 
 # --- Fleet spend budget (v3 Phase 4a) ----------------------------------------
@@ -2260,6 +2400,24 @@ def log_usage(model, usage):
             "in": usage.get("prompt_tokens", 0),
             "out": usage.get("completion_tokens", 0),
         }
+        # Phase 6 (additive; old records without these fields still parse):
+        # price the run NOW and pin the frontier reference in force, so
+        # `ambient usage` computes historical savings against what was true
+        # at call time even if the default/env changes later. Estimated
+        # token counts (salvage path) are marked so they stay honest.
+        try:
+            if usage.get("_estimated"):
+                record["est"] = True
+            cost, assumed = usage_cost(model, usage)
+            if not assumed:  # an ASSUMED worst-case figure is not a real cost
+                # FULL precision — round(…,6) flattened sub-microdollar calls
+                # to $0, and thousands of them aggregated as free (a
+                # fabricated ~100% saving). Round only at display (Codex H3).
+                record["cost"] = cost
+            ref = resolve_reference_price()
+            record["ref"] = [ref[0], ref[1]]
+        except Exception:  # enrichment must never cost us the base record
+            pass
         line = json.dumps(record) + "\n"
         conf_dir = os.path.dirname(USAGE_PATH)
         _private_dir(conf_dir)
@@ -2563,7 +2721,21 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 "[AMBIENT NOTE: the stream ended mid-generation; this output "
                 "is PARTIAL — the tail is missing.]\n\n" + err.partial
             )
-            return salvaged, {}, {"salvaged_partial": True}
+            # The partial output was PAID FOR: meter it as an estimated
+            # record instead of returning empty usage — spend must never
+            # under-count (Codex H2). Same char-based estimate as the
+            # missing-usage path below; reasoning counts as output.
+            in_tok = int(sum(len(m.get("content", "")) for m in messages)
+                         / CHARS_PER_TOKEN)
+            out_tok = int((len(err.partial) + len(err.reasoning or ""))
+                          / CHARS_PER_TOKEN)
+            usage = {"prompt_tokens": in_tok, "completion_tokens": out_tok,
+                     "_estimated": True}
+            log_usage(model, usage)
+            # `model` here is THIS frame's model — inside a --fallback frame
+            # that IS the serving model, so the receipt prices correctly.
+            return salvaged, usage, {"salvaged_partial": True,
+                                     "usage": usage, "_served_model": model}
         raise ChatError(
             "stall",
             f"'{model}' produced almost no output before stalling ({err}). The "
@@ -2694,6 +2866,11 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
         out_tok = int((len(content) + len(reasoning_text)) / CHARS_PER_TOKEN)
         usage = {"prompt_tokens": in_tok, "completion_tokens": out_tok,
                  "_estimated": True}
+        # Reflect the estimate in the body too — ask/code --json read
+        # body["usage"] and must never say null while the ledger has an
+        # estimated record (Codex M3).
+        if isinstance(body, dict):
+            body["usage"] = usage
     if usage:
         log_usage(model, usage)
     if not isinstance(content, str) or not content.strip():
@@ -2731,7 +2908,8 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 "This is a best-effort draft assembled from that reasoning — "
                 "treat with extra skepticism.]\n\n" + reasoning
             )
-            return draft, usage, {"salvaged_partial": True}
+            return draft, usage, {"salvaged_partial": True,
+                                  "usage": usage, "_served_model": model}
         raise ChatError(
             "empty",
             f"'{model}' produced no final content even after budget escalation "
@@ -2792,7 +2970,11 @@ def chat(api_key, api_url, model, messages, args, kind="ask"):
     render_result(
         content,
         bool(body.get("salvaged_partial")) or body.get("finish_reason") == "length",
-        "output was salvaged/truncated", args, api_key, usage, model,
+        "output was salvaged/truncated", args, api_key, usage,
+        # Price the receipt at the model that actually SERVED — an opt-in
+        # --fallback switch to a pricier model must not over-state the
+        # saving by pricing the requested model (Codex H1).
+        body.get("_served_model", model),
         already_streamed=clean_stream,
     )
 
@@ -3545,9 +3727,14 @@ def render_result(text, partial, reason, args, api_key, usage=None, model=None,
     else:
         print(redact(text, api_key))
     if usage and model:
+        # Phase 6: the receipt now shows what the run COST and what the same
+        # tokens would have cost at the frontier reference price — the tool's
+        # whole value proposition, previously invisible. savings_note() owns
+        # the honesty rules (assumed pricing → no savings claim; est. label).
         print(
             f"\n[ambient {model} | in={usage.get('prompt_tokens')} "
-            f"out={usage.get('completion_tokens')} tokens]",
+            f"out={usage.get('completion_tokens')} tokens"
+            f"{savings_note(model, usage)}]",
             file=sys.stderr,
         )
 
@@ -4130,7 +4317,10 @@ def cmd_ask(args, api_key, api_url, conf):
     render_result(
         content,
         bool(body.get("salvaged_partial")) or body.get("finish_reason") == "length",
-        "output was salvaged/truncated", args, api_key, usage, model,
+        "output was salvaged/truncated", args, api_key, usage,
+        # SERVED model, not requested — a pricier --fallback switch must not
+        # over-state the receipt's saving (Codex H1).
+        body.get("_served_model", model),
         already_streamed=clean_stream,
     )
 
@@ -6984,49 +7174,156 @@ def cmd_usage(args):
     try:
         api_url = resolve_api_url(conf)
         for m in fetch_models(api_url, "unused"):
-            p = m.get("pricing") or {}
-            try:
-                pricing[m["id"]] = (float(p.get("input", 0)), float(p.get("output", 0)))
-            except (TypeError, ValueError):
-                pass
+            # model_pricing semantics: zero/absent pricing is UNPRICED, not
+            # free — a $0 "cost" here would fabricate a near-100% saving.
+            p = model_pricing([m], m.get("id"))
+            if p:
+                pricing[m["id"]] = p
     except (NetworkError, SystemExit):
-        pass  # offline: token counts still print, cost column shows n/a
+        pass  # offline: stored per-record costs still work; rest shows n/a
+    default_ref = resolve_reference_price(conf)
     totals = {}
+    approx_ref = 0  # records that predate stored reference pricing
     for r in recent:
         model = str(r.get("model", "?"))
-        t = totals.setdefault(model, {"calls": 0, "in": 0, "out": 0})
+        t = totals.setdefault(model, {"calls": 0, "in": 0, "out": 0,
+                                      "cost": 0.0, "unpriced": 0,
+                                      "frontier": 0.0, "est": 0})
         t["calls"] += 1
+        if r.get("est"):
+            t["est"] += 1  # estimated token counts must not read as exact (M1)
         # Corrupt-but-parseable records must be skipped like unparseable ones,
         # not TypeError into [internal] (Codex final LOW).
-        t["in"] += _as_pos_int(r.get("in"), 0)
-        t["out"] += _as_pos_int(r.get("out"), 0)
-    grand = 0.0
-    priced_all = True
-    rows = []
-    for model, t in sorted(totals.items()):
-        if model in pricing:
-            cost = (t["in"] * pricing[model][0] + t["out"] * pricing[model][1]) / 1e6
-            grand += cost
-            rows.append({**t, "model": model, "est_cost": round(cost, 4)})
+        tin = _as_pos_int(r.get("in"), 0)
+        tout = _as_pos_int(r.get("out"), 0)
+        t["in"] += tin
+        t["out"] += tout
+        # Actual cost: the cost STORED at call time is exact; records that
+        # predate it (or lost it) fall back to today's catalog price.
+        c = r.get("cost")
+        # A stored cost > 0 is exact. A stored cost of exactly 0 with real
+        # tokens is NOT trusted (a legacy sub-micro round-to-0 record would
+        # else read as a fabricated ~100% saving) — recompute from the catalog
+        # price (which yields the true tiny cost, or a real $0 for a free model).
+        if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
+            t["cost"] += float(c)
+        elif model in pricing:
+            t["cost"] += (tin * pricing[model][0]
+                          + tout * pricing[model][1]) / 1e6
         else:
+            t["unpriced"] += 1
+        # Frontier-equivalent: the reference STORED with the record wins —
+        # historical savings stay accurate if the default changes later.
+        ref = r.get("ref")
+        if (isinstance(ref, list) and len(ref) == 2
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and 0 < v < float("inf") for v in ref)):
+            rin, rout = float(ref[0]), float(ref[1])
+        else:
+            rin, rout = default_ref
+            approx_ref += 1
+        t["frontier"] += (tin * rin + tout * rout) / 1e6
+    grand = 0.0           # ALL known spend, incl. partially-priced models
+    grand_frontier = 0.0  # summed ONLY over rows whose cost is fully known
+    priced_cost = 0.0     # known cost of FULLY-priced rows (savings math)
+    est_records = sum(t["est"] for t in totals.values())
+    priced_all = True
+    rows = []      # display rows (rounded ONLY here, for output)
+    raw_rows = []  # aligned RAW figures — text/% math never uses rounded values
+    for model, t in sorted(totals.items()):
+        base = {"calls": t["calls"], "in": t["in"], "out": t["out"],
+                "model": model, "est_records": t["est"]}
+        # KNOWN spend ALWAYS counts — dropping the priced portion of a
+        # partially-unpriced model under-reported real spend (Codex MED).
+        grand += t["cost"]
+        if t["unpriced"]:
+            # Cost not FULLY known → no savings math for this model: a
+            # frontier comparison against an unknown cost would fabricate a
+            # saving. The known cost is reported as a LOWER BOUND, flagged.
             priced_all = False
-            rows.append({**t, "model": model, "est_cost": None})
+            known = _round_money(t["cost"]) if t["cost"] > 0 else None
+            rows.append({**base, "est_cost": known, "cost_partial": True,
+                         "frontier_cost": None, "saved": None,
+                         "saved_pct": None})
+            raw_rows.append(("partial", t["cost"]) if t["cost"] > 0 else None)
+            continue
+        # Aggregate and derive the saved-% from RAW totals — rounding first
+        # let sub-microdollar spend read as $0/~100% saved (Codex H3).
+        priced_cost += t["cost"]
+        grand_frontier += t["frontier"]
+        raw_saved = t["frontier"] - t["cost"]
+        pct = (int(raw_saved / t["frontier"] * 100)  # floored
+               if t["frontier"] > 0 and raw_saved > 0 else None)
+        rows.append({**base, "est_cost": _round_money(t["cost"]),
+                     "cost_partial": False,
+                     "frontier_cost": _round_money(t["frontier"]),
+                     "saved": _round_money(raw_saved),
+                     "saved_pct": pct})
+        raw_rows.append((t["cost"], t["frontier"], raw_saved, pct))
+    # Savings compare frontier vs the FULLY-priced subset only — partial
+    # models are in `grand` (spend honesty) but never in the saving.
+    grand_saved = grand_frontier - priced_cost
+    unmetered_note = ("`ambient agent` spend is billed by Ambient but not "
+                      "visible to local metering — these totals cover only "
+                      "ambient CLI calls")
     if getattr(args, "json", False):
         print(json.dumps({
+            "schema_version": 1,  # contract field (Codex M2, additive)
             "days": args.days,
             "models": rows,
-            "total_est_cost": round(grand, 4),
+            "total_est_cost": _round_money(grand),
             "all_priced": priced_all,
+            # Phase 6 additive fields (schema unchanged otherwise):
+            "reference_price": [default_ref[0], default_ref[1]],
+            "frontier_cost": _round_money(grand_frontier),
+            "saved": _round_money(grand_saved),
+            "approx_ref_records": approx_ref,
+            "est_records": est_records,  # Codex M1: estimated ≠ exact
+            "unmetered_lanes": ["agent"],
+            "note": unmetered_note,
         }, indent=2))
         return
     print(f"Ambient usage, last {args.days} days:")
-    for r in rows:
-        cost_s = f"${r['est_cost']:.4f}" if r["est_cost"] is not None else "n/a"
+    for r, raw in zip(rows, raw_rows):
+        if raw is None:
+            tail = "est n/a"
+        elif raw[0] == "partial":
+            # Known cost is a lower bound; no frontier/saving is claimed.
+            tail = (f"est ${_usd_amt(raw[1])}+ "
+                    "(partial — some records unpriced)")
+        else:
+            cost, fcost, saved, pct = raw  # RAW math — round only in print
+            tail = (f"est ${_usd_amt(cost)}  "
+                    f"vs frontier ~${_usd_amt(fcost)}")
+            if pct is not None:
+                tail += f"  saved ${_usd_amt(saved)} ({pct}%)"
+            elif saved < 0:
+                tail += f"  costlier +${_usd_amt(-saved)}"
+        if r["est_records"]:
+            tail += f"  [{r['est_records']} est.]"
         print(
             f"  {r['model']:42} {r['calls']:4} calls  in={r['in']:>9,}  "
-            f"out={r['out']:>9,}  est {cost_s}"
+            f"out={r['out']:>9,}  {tail}"
         )
-    print(f"Total estimated: ${grand:.4f}" + ("" if priced_all else " (+ unpriced models)"))
+    total_line = f"Total estimated: ${_usd_amt(grand)}"
+    if grand_frontier > 0 and grand_saved > 0:
+        pct = int(grand_saved / grand_frontier * 100)
+        total_line += (f" (frontier-equivalent ~${_usd_amt(grand_frontier)} — "
+                       f"saved ${_usd_amt(grand_saved)}, {pct}%)")
+    elif grand_frontier > 0 and grand_saved < 0:
+        total_line += (f" (frontier-equivalent ~${_usd_amt(grand_frontier)} — "
+                       f"costlier by ${_usd_amt(-grand_saved)})")
+    if not priced_all:
+        total_line += " (+ unpriced models)"
+    print(total_line)
+    if est_records:
+        print(f"note: {est_records} estimated record(s) — token counts "
+              "approximated locally (stream sent no usage object), not exact.")
+    if approx_ref:
+        print(f"note: {approx_ref} record(s) predate stored reference "
+              "pricing — their frontier figures use the current "
+              "AMBIENT_REFERENCE_PRICE (approx).")
+    print(f"note: {unmetered_note}.")
 
 
 def _this_script():
@@ -7372,7 +7669,11 @@ def main():
     p_trust.add_argument("--reset", action="store_true",
                          help="clear the trusted endpoint (back to api.ambient.xyz)")
 
-    p_usage = sub.add_parser("usage", help="local token/cost summary")
+    p_usage = sub.add_parser(
+        "usage",
+        help="local token/cost summary + savings vs the frontier reference "
+             "(AMBIENT_REFERENCE_PRICE; agent-lane spend is disclosed as "
+             "unmetered)")
     p_usage.add_argument("--days", type=int, default=30,
                          help="look-back window in days (default 30)")
     p_usage.add_argument("--json", action="store_true", help="machine-readable summary")

@@ -116,6 +116,31 @@ holder is never expired — and, where liveness is unknowable (Windows), by
 Set `AMBIENT_FLEET_BUDGET=off` to restore per-invocation-only gating; the
 mechanism itself is fail-open and never blocks a call on its own failure.
 
+**Savings receipts** — every run now ends with what it actually cost and what
+the same tokens would have cost at a frontier price:
+
+```
+[ambient moonshotai/kimi-k2.7-code | in=48210 out=1834 tokens ≈ $0.013 (vs ~$0.42 frontier — saved 97%)]
+```
+
+The frontier comparison uses `AMBIENT_REFERENCE_PRICE` (env or config):
+either an `in/out` $/Mtok pair like `3/15` or a single blended figure like
+`10`. The default is `3/15` — a *representative frontier list price*
+(approximation; set it to whatever baseline you actually compare against).
+The receipt never over-states savings: if a model's pricing is missing from
+the catalog the cost is shown at assumed worst-case rates with **no** savings
+claim, estimated token counts are labeled `(est.)`, the saved-% is rounded
+down, and a model pricier than the reference reads "costlier", not a fake
+saving. Each metering record also stores the run cost and the reference
+price in force at call time, so `ambient usage` reports historical savings
+per model and in total (`$` and `%`; `--json` adds `reference_price`,
+`frontier_cost`, `saved`) accurately even if you change the reference later;
+records that predate stored references fall back to the current one with an
+explicit "(approx)" note. One honest gap: `ambient agent` hands off to an
+external opencode process whose spend is billed by Ambient but not visible
+to local metering — `ambient usage` discloses this instead of pretending its
+totals are complete.
+
 **Advisory routing** (your explicit model choice is *never* silently swapped):
 `-m auto` delegates the pick — the cheapest READY model that fits the input,
 resolved against the live catalog on every call and printed to stderr

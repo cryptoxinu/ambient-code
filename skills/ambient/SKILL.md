@@ -28,7 +28,7 @@ always points at the active install, so never hardcode a path.
 | `/ambient curate ...` | User model curation: `ambient curate` (status) / `hide <id\|glob>` / `show <id>` / `only <ids>` / `note <id> "text"` / `reset`. Curation shapes menus + automatic selection only — explicit `-m` always works. |
 | `/ambient setup` | First-run setup below (key rotation: `setup --force`; removal: `setup --remove`). |
 | `/ambient doctor` | Run `ambient doctor`, relay the PASS/FAIL table + DIAGNOSIS plainly. |
-| `/ambient usage` | Run `ambient usage`, report calls/tokens/estimated spend (local metering; agent-lane spend is not metered). |
+| `/ambient usage` | Run `ambient usage`, report calls/tokens/actual cost AND the savings vs the frontier reference (per model + total, `$` and `%`; `--json` adds `reference_price`/`frontier_cost`/`saved`). ALWAYS relay its agent-lane disclosure: `ambient agent` spend is billed by Ambient but NOT visible to local metering — never present the totals as complete if the user runs the agent lane. |
 
 ## Exit codes + machine output (parse these, not prose)
 
@@ -173,6 +173,21 @@ per-invocation gate with a one-line warning. `AMBIENT_FLEET_BUDGET=off` (env or
 config, like `AMBIENT_MAX_SPEND`) restores per-invocation-only gating. Relay the
 printed estimate to the user on big jobs. `--max-tokens` is only an override; leave
 it unset for the tuned default.
+
+**Savings receipts (v3 Phase 6):** every run's stderr receipt now prices the
+run and compares it to a frontier reference — `[ambient <model> | in=X out=Y
+tokens ≈ $0.013 (vs ~$0.42 frontier — saved 97%)]` — so relay the saving when
+the user asks what Ambient is worth. The reference is
+`AMBIENT_REFERENCE_PRICE` (env or config, like `AMBIENT_MAX_SPEND`): an
+`in/out` $/Mtok pair (`3/15`) or one blended figure; the default `3/15` is a
+representative frontier list price and explicitly an APPROXIMATION — offer to
+set it to the user's real baseline. The figures are deliberately
+conservative: unknown catalog pricing → worst-case cost shown as "(assumed
+pricing)" with NO savings claim; estimated token counts are labeled "(est.)";
+saved-% is floored; a pricier-than-reference model reads "costlier". Each
+usage record stores the run cost + the reference in force, so `ambient
+usage` computes historical savings against what was true at call time. Never
+quote a savings figure the CLI itself did not print.
 
 ## Error protocol (MANDATORY)
 
