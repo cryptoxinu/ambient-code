@@ -151,7 +151,11 @@ just work. Patterns, cheapest first:
   writers in one tree).
 - **Claude-orchestrated fleets**: Claude subagents/workflows where each worker
   shells out to `ambient …` — Claude fans out, Ambient does the token-heavy
-  lifting, Claude synthesizes.
+  lifting, Claude synthesizes. A Bash-capable subagent normally gets `ambient`
+  on PATH automatically (Claude Code injects each enabled plugin's `bin/`); if
+  a worker ever reports `ambient: command not found`, it should fall back to
+  `~/.local/bin/ambient` (the stable launcher `ambient link` installs at first
+  run) or `"${CLAUDE_PLUGIN_ROOT}/bin/ambient"` when that env var is set.
 - The network concentrates capacity on the models in demand — a 10-wide fan-out
   on ONE model is fine (it load-balances). Availability shifts with demand, so
   check `ambient models` right before a big fan-out or before spreading across

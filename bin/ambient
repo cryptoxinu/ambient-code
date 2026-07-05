@@ -4659,7 +4659,11 @@ def _model_badges(m):
 
 def format_model_line(m, chat_default, code_default, note=None, hidden=False):
     pricing = m.get("pricing") or {}
-    flag = paint("READY", "32") if m.get("is_ready") else "  ·  "
+    # Same vocabulary as `ambient models`' section headers: a model is either
+    # serving now (READY) or spins up on demand — never a bare mystery glyph.
+    # Both labels render 9 columns wide so every row stays aligned.
+    flag = (paint("READY", "32") + "    " if m.get("is_ready")
+            else paint("on-demand", "2"))
     marks = []
     if m["id"] == chat_default:
         marks.append("*chat")
@@ -7534,7 +7538,8 @@ def cmd_audit(args, api_key, api_url, conf):
                   "clean pass.\n", file=sys.stderr)
         if not ranked:
             if len(failed) == len(models):
-                print("No usable audit from any model (all failed/unready) — this "
+                print("No usable audit from any model (all failed or weren't "
+                      "serving) — this "
                       "is NOT a clean result. Retry or check `ambient models`.")
                 sys.exit(EXIT_PARTIAL)
             print("No defects found by the models that responded.")
@@ -9643,6 +9648,14 @@ def cmd_agent(args, api_key, api_url, conf):
     print(
         "ambient: the agent reads files itself — the secrets tripwire does "
         "NOT cover this lane; keep .env/credentials out of its working tree.",
+        file=sys.stderr,
+    )
+    # Spend honesty at LAUNCH, not just in `ambient usage`: this lane hands
+    # the key to opencode, so nothing flows through local metering or the
+    # fleet ceiling.
+    print(
+        "ambient: this agentic lane is billed by Ambient directly — its "
+        "spend is NOT covered by local metering or AMBIENT_MAX_SPEND.",
         file=sys.stderr,
     )
     # The key is passed to opencode via its process environment — the standard

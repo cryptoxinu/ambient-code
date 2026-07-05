@@ -9,12 +9,35 @@ set -eu
 
 if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -x "${CLAUDE_PLUGIN_ROOT}/bin/ambient" ]; then
   link="$HOME/.local/bin/ambient"
+  real="${CLAUDE_PLUGIN_ROOT}/bin/ambient"
+  # Heal ONLY this well-known path, and ONLY when it is a SYMLINK that is
+  # ours to fix:
+  #  - dangling (a plugin update GC'd the old versioned dir it pointed at), or
+  #  - a stale ambient launcher (target exists, is named `ambient`, but is not
+  #    the ACTIVE install).
+  # A real (non-symlink) file, or a symlink to some other tool, is NEVER
+  # touched — never clobber a foreign `ambient` the user installed themselves.
   if [ -L "$link" ]; then
-    target="$(readlink "$link" 2>/dev/null || true)"
-    real="${CLAUDE_PLUGIN_ROOT}/bin/ambient"
-    if [ "$target" != "$real" ]; then
-      # Repair quietly: the launcher must always point at the ACTIVE install.
-      "${CLAUDE_PLUGIN_ROOT}/bin/ambient" link >/dev/null 2>&1 || true
+    if [ ! -e "$link" ]; then
+      # Dangling: recreate quietly — but ONLY if its stored target basename is
+      # `ambient` (readlink still reports the target of a broken symlink), so a
+      # dangling FOREIGN symlink at this path is never replaced. Symmetric with
+      # the stale-symlink guard below.
+      case "$(readlink "$link" 2>/dev/null || true)" in
+        */ambient|ambient)
+          "$real" link >/dev/null 2>&1 || true
+          ;;
+      esac
+    else
+      target="$(readlink "$link" 2>/dev/null || true)"
+      if [ -n "$target" ] && [ "$target" != "$real" ]; then
+        case "$target" in
+          */ambient)
+            # Stale ambient launcher — repoint at the ACTIVE install.
+            "$real" link >/dev/null 2>&1 || true
+            ;;
+        esac
+      fi
     fi
   fi
 fi

@@ -84,7 +84,7 @@ can curate which models your menus show: `ambient curate only <ids>` /
 
 ```text
 ambient setup            store + verify your API key (--force rotate · --remove offboard)
-ambient models           live model list (READY = serving now) · --all shows curated-out
+ambient models           current model list (READY = serving now) · --all shows curated-out
 ambient use [id]         sticky default model picker (--chat/--code scopes)
 ambient curate …         choose which models the menus surface (hide/show/only/note)
 ambient ask "q"          one-shot answer · pipe docs: cat doc.txt | ambient ask "sum" -
