@@ -159,6 +159,16 @@ CHUNK_CHARS = 300_000         # default per-chunk budget (overridden per model)
 CHARS_PER_TOKEN = 3.2                  # aligns with estimate_cost/cost_gate
 REASONING_EXPANSION = 1.5              # reasoning chars produced per input char on
                                        # dense code (empirical ~1.43, rounded up)
+# --- Telemetry-EWMA routing (v3 Phase 8a) ------------------------------------
+# The tool gets SMARTER WITH USE: every real usage object the API returns is
+# already metered in the local ledger; observed_cpt() turns that history into
+# a per-model observed chars-per-token EWMA that model_profile/estimate_cost
+# prefer over the static CHARS_PER_TOKEN guess. With NO usable history the
+# math is byte-identical to the constant. AMBIENT_TELEMETRY=off opts out.
+TELEMETRY_CPT_MIN = 1.0                # sane clamp — a corrupt ledger can't
+TELEMETRY_CPT_MAX = 8.0                # skew budgets past believable ratios
+TELEMETRY_EWMA_ALPHA = 0.3             # recent-weighted: newest sample = 30%
+_TELEMETRY_CPT_CACHE = None            # per-process ledger memo (hot path)
 ANSWER_TOKENS_RESERVE = 6000           # tokens kept for the answer after reasoning
 OUTPUT_SAFETY = 1.15                   # headroom for expansion variance
 REASONING_SINGLE_SHOT_CHARS = 32_000   # minimum single-shot input for a reasoner
@@ -999,17 +1009,94 @@ def model_pricing(catalog, model):
     return None
 
 
+def _telemetry_enabled():
+    """AMBIENT_TELEMETRY=off|0|false|no keeps the static token constants."""
+    return (os.environ.get("AMBIENT_TELEMETRY", "").strip().lower()
+            not in ("off", "0", "false", "no"))
+
+
+def observed_cpt(model):
+    """Per-model OBSERVED chars-per-token from the local usage ledger — a
+    recent-weighted EWMA over records that carry both the input char count
+    and a REAL (non-estimated) prompt_tokens figure — or None when there is
+    no usable history (callers then fall back to EXACTLY the static
+    CHARS_PER_TOKEN default, so a fresh install is byte-identical). Every
+    sample and the result are clamped to [TELEMETRY_CPT_MIN,
+    TELEMETRY_CPT_MAX] so a corrupt ledger can never skew budgets. The
+    ledger is read ONCE per process (memoized) — model_profile sits on the
+    hot path and must not re-hit the disk per call."""
+    if not model or not _telemetry_enabled():
+        return None
+    global _TELEMETRY_CPT_CACHE
+    if _TELEMETRY_CPT_CACHE is None:
+        table = {}
+        try:
+            with open(USAGE_PATH, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict) or record.get("est"):
+                        continue
+                    mid = record.get("model")
+                    chars = record.get("chars")
+                    in_tok = record.get("in")
+                    if (not isinstance(mid, str)
+                            or isinstance(chars, bool)
+                            or isinstance(in_tok, bool)
+                            or not isinstance(chars, (int, float))
+                            or not isinstance(in_tok, (int, float))
+                            or not 0 < chars < float("inf")
+                            or not 0 < in_tok < float("inf")):
+                        continue
+                    ratio = max(TELEMETRY_CPT_MIN,
+                                min(TELEMETRY_CPT_MAX, chars / in_tok))
+                    prev = table.get(mid)
+                    table[mid] = ratio if prev is None else (
+                        TELEMETRY_EWMA_ALPHA * ratio
+                        + (1 - TELEMETRY_EWMA_ALPHA) * prev)
+        except OSError:
+            pass  # no ledger yet → no history → static defaults
+        _TELEMETRY_CPT_CACHE = table
+    val = _TELEMETRY_CPT_CACHE.get(model)
+    if val is None:
+        return None
+    return max(TELEMETRY_CPT_MIN, min(TELEMETRY_CPT_MAX, val))
+
+
+def _effective_cpt(model):
+    """The chars-per-token figure for SIZING `model`'s budget (how much content
+    fits): the ledger-observed EWMA when real usage history exists (self-
+    calibrating token math — smarter with use), else EXACTLY the static
+    CHARS_PER_TOKEN default so a no-history run never shifts by a byte."""
+    return observed_cpt(model) or CHARS_PER_TOKEN
+
+
+def _cost_cpt(model):
+    """The chars-per-token figure for COST / SPEND-GATE math. Telemetry may only
+    make the gate MORE conservative, never less: a higher observed cpt (fewer
+    tokens per char) would LOWER the estimated input tokens and could let a run
+    the static gate would block slip through, so the cost path clamps cpt to at
+    most the static default (min(observed, default)). A lower observed cpt (a
+    model that really uses MORE tokens per char) still tightens the gate. With
+    no history this is exactly CHARS_PER_TOKEN — byte-identical to before."""
+    return min(observed_cpt(model) or CHARS_PER_TOKEN, CHARS_PER_TOKEN)
+
+
 def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     """(expected, bound, assumed) dollar estimates for a run. `bound` assumes
     every call emits its FULL max_tokens budget (the old, 10-30x-pessimistic
     figure that over-refused big legitimate jobs); `expected` uses a realistic
     per-call output. Unpriced model / missing catalog → worst-case ASSUMED
-    prices with assumed=True, so the ceiling still applies."""
+    prices with assumed=True, so the ceiling still applies. Input tokens use
+    the model's OBSERVED chars-per-token when usage history exists (Phase 8a
+    telemetry), else the static CHARS_PER_TOKEN."""
     price = model_pricing(catalog, model)
     assumed = price is None
     if assumed:
         price = (ASSUMED_MAX_INPUT_PRICE, ASSUMED_MAX_OUTPUT_PRICE)
-    in_tok = input_chars / CHARS_PER_TOKEN
+    in_tok = input_chars / _cost_cpt(model)
     # Input is billed roughly ONCE total (each chunk sends only its own slice),
     # plus ~30% for the synthesis pass re-sending the partial results.
     input_cost = in_tok * 1.3 * price[0]
@@ -1544,7 +1631,7 @@ def cost_gate(catalog, model, input_chars, n_calls, args, conf):
     expected, bound, assumed = estimate_cost(
         catalog, model, input_chars, n_calls, args.max_tokens)
     note = " — assumed worst-case pricing (model unpriced)" if assumed else ""
-    in_tok = int(input_chars / CHARS_PER_TOKEN)
+    in_tok = int(input_chars / _cost_cpt(model))
     print(
         f"ambient: estimated cost ~${expected:.2f} (hard bound ${bound:.2f}){note} "
         f"({in_tok:,} input tokens, up to {n_calls} call(s))",
@@ -1643,7 +1730,7 @@ def estimate_cost_mr(catalog, model, reduce_model, input_chars, n_chunks,
     is priced, input billed once (Codex M3)."""
     if not synthesis:
         price, assumed = _lane_pricing(catalog, model)
-        in_tok = input_chars / CHARS_PER_TOKEN
+        in_tok = input_chars / _cost_cpt(model)
         n_calls = n_chunks + extra_calls
         input_cost = in_tok * price[0]
         bound = (input_cost + n_calls * max_tokens * price[1]) / 1e6
@@ -1657,7 +1744,7 @@ def estimate_cost_mr(catalog, model, reduce_model, input_chars, n_chunks,
                              n_chunks * 2 + extra_calls, max_tokens)
     mp, asm_m = _lane_pricing(catalog, model)
     rp, asm_r = _lane_pricing(catalog, rmodel)
-    in_tok = input_chars / CHARS_PER_TOKEN
+    in_tok = input_chars / _cost_cpt(model)  # the input is MAP-side data
     input_cost = in_tok * 1.0 * mp[0] + in_tok * 0.3 * rp[0]
     map_calls, red_calls = n_chunks + extra_calls, n_chunks
     bound = (input_cost + map_calls * max_tokens * mp[1]
@@ -1690,7 +1777,7 @@ def cost_gate_mr(catalog, model, reduce_model, input_chars, n_chunks, args,
             if assumed else "")
     detail = (f"map={model}, deterministic merge — no synthesis call"
               if not synthesis else f"map={model}, reduce={rmodel}")
-    in_tok = int(input_chars / CHARS_PER_TOKEN)
+    in_tok = int(input_chars / _cost_cpt(model))
     print(
         f"ambient: estimated cost ~${expected:.2f} (hard bound ${bound:.2f})"
         f"{note} ({in_tok:,} input tokens; {detail})",
@@ -1969,10 +2056,13 @@ def response_format_for(profile, schema):
     return None
 
 
-def _reasoning_output_budget(input_chars):
+def _reasoning_output_budget(input_chars, cpt=None):
     """Tokens needed to REASON over `input_chars` of dense code AND still emit a
-    real answer: reasoning_tokens + a fixed answer reserve, times a safety factor."""
-    reasoning_tokens = input_chars * REASONING_EXPANSION / CHARS_PER_TOKEN
+    real answer: reasoning_tokens + a fixed answer reserve, times a safety
+    factor. `cpt` lets model_profile pass the model's OBSERVED chars-per-token
+    (Phase 8a telemetry); default = the static constant, byte-identical."""
+    cpt = cpt or CHARS_PER_TOKEN
+    reasoning_tokens = input_chars * REASONING_EXPANSION / cpt
     return int((reasoning_tokens + ANSWER_TOKENS_RESERVE) * OUTPUT_SAFETY)
 
 
@@ -1987,15 +2077,17 @@ def single_shot_max_chars():
     return SINGLE_SHOT_MAX_CHARS_DEFAULT
 
 
-def _reasoning_single_shot_target(ctx, max_out):
+def _reasoning_single_shot_target(ctx, max_out, cpt=None):
     """Largest input a reasoning model can take in ONE pass and still fit both
-    its output cap and its context window. Bounded by the cost knob."""
+    its output cap and its context window. Bounded by the cost knob. `cpt` =
+    observed chars-per-token when history exists (Phase 8a); default static."""
+    cpt = cpt or CHARS_PER_TOKEN
     # Output constraint: _reasoning_output_budget(single) <= max_out
     by_output = ((max_out / OUTPUT_SAFETY - ANSWER_TOKENS_RESERVE)
-                 * CHARS_PER_TOKEN / REASONING_EXPANSION)
+                 * cpt / REASONING_EXPANSION)
     # Context constraint: input_tok + output_budget(single) + overhead <= ctx.
     # input_tok = single/CPT; output ≈ (single*EXP/CPT + RESERVE)*SAFETY.
-    denom = (1 + REASONING_EXPANSION * OUTPUT_SAFETY) / CHARS_PER_TOKEN
+    denom = (1 + REASONING_EXPANSION * OUTPUT_SAFETY) / cpt
     by_ctx = (ctx - ANSWER_TOKENS_RESERVE * OUTPUT_SAFETY - 2500) / denom
     target = min(by_output, by_ctx, single_shot_max_chars())
     return int(max(MIN_REASONING_CHUNK, target))
@@ -2007,7 +2099,11 @@ def model_profile(catalog, model):
     AND answer both fit, plus SMALL chunks so reasoning-per-chunk stays bounded;
     non-reasoning models get a modest budget and LARGE (context-sized) chunks.
     An unknown/offline model falls back to conservative REASONING defaults — the
-    safer failure mode (over-budget, under-chunk)."""
+    safer failure mode (over-budget, under-chunk). Char↔token conversion uses
+    the model's OBSERVED chars-per-token when the local ledger has real usage
+    history (Phase 8a telemetry-EWMA; AMBIENT_TELEMETRY=off opts out), else
+    the static CHARS_PER_TOKEN — a no-history profile is byte-identical."""
+    cpt = _effective_cpt(model)
     meta = next((m for m in (catalog or [])
                  if isinstance(m, dict) and m.get("id") == model), None)
     if meta is None:
@@ -2031,8 +2127,8 @@ def model_profile(catalog, model):
 
     if is_reasoning:
         # A1: size single-shot to the model's REAL window, not a flat 32k.
-        single = _reasoning_single_shot_target(ctx, max_out)
-        out = _reasoning_output_budget(single)
+        single = _reasoning_single_shot_target(ctx, max_out, cpt)
+        out = _reasoning_output_budget(single, cpt)
         if out > max_out:
             # Hard output cap (e.g. gemma-4-31b = 16384) can't hold
             # reasoning+answer for the target single-shot. INVERT
@@ -2042,7 +2138,7 @@ def model_profile(catalog, model):
             out = max_out
             reasoning_tok = max(256, max_out / OUTPUT_SAFETY - ANSWER_TOKENS_RESERVE)
             single = max(MIN_REASONING_CHUNK,
-                         int(reasoning_tok * CHARS_PER_TOKEN / REASONING_EXPANSION))
+                         int(reasoning_tok * cpt / REASONING_EXPANSION))
         chunk = int(single * REASONING_CHUNK_FACTOR)
     else:
         # Non-reasoning: answers directly. Size input off the context window with a
@@ -2051,7 +2147,7 @@ def model_profile(catalog, model):
         out = min(NONREASONING_OUTPUT_BUDGET, max_out, max(MIN_OUTPUT_TOKENS, ctx // 2))
         input_tokens = int(ctx * NONREASONING_CONTEXT_MARGIN) - out
         input_tokens = max(1000, min(input_tokens, ctx - out - 1000))
-        single = int(input_tokens * CHARS_PER_TOKEN)
+        single = int(input_tokens * cpt)
         chunk = int(single * REASONING_CHUNK_FACTOR)
     # REASONING INVARIANT (Codex round-3 MED): after all caps/floors, guarantee
     # the derived budget actually holds reasoning over `single` + the answer.
@@ -2059,7 +2155,7 @@ def model_profile(catalog, model):
     # otherwise leave _reasoning_output_budget(single) > out. Shrink until it
     # fits (or hit a hard floor — a truly tiny-cap model just can't audit well).
     if is_reasoning:
-        while single > 500 and _reasoning_output_budget(single) > out:
+        while single > 500 and _reasoning_output_budget(single, cpt) > out:
             single = int(single * 0.85)
         chunk = min(chunk, single)
     # FINAL context-fit clamp (Codex): guarantee single-shot input + output fit
@@ -2075,10 +2171,10 @@ def model_profile(catalog, model):
         # output cap (fuzz-caught: a tiny max_out could be exceeded here).
         out = min(max_out, max(256, ctx - 1000 - overhead_tok))
         max_input_tok = ctx - out - overhead_tok
-    single_tok = -(-single // CHARS_PER_TOKEN)  # ceil, conservative
+    single_tok = -(-single // cpt)  # ceil, conservative
     if single_tok > max_input_tok:
-        single = max(1000, int(max_input_tok * CHARS_PER_TOKEN))
-        single_tok = -(-single // CHARS_PER_TOKEN)
+        single = max(1000, int(max_input_tok * cpt))
+        single_tok = -(-single // cpt)
     # The escalation ceiling must also respect remaining context, not just the
     # model's output cap, so a budget bump can't push input+output past context.
     ceiling = min(ceiling, int(ctx - single_tok - overhead_tok))
@@ -2100,7 +2196,9 @@ def apply_output_budget(args, profile, input_chars=None):
     args.escalation_ceiling = profile.escalation_ceiling
     if getattr(args, "max_tokens", None) is None:  # auto — the common path
         if input_chars is not None and profile.is_reasoning:
-            want = _reasoning_output_budget(input_chars)
+            # Same observed-or-static chars/token the profile itself used.
+            want = _reasoning_output_budget(input_chars,
+                                            _effective_cpt(profile.model))
             # Floor gives room to think+answer, but must never exceed the
             # profile's already context-safe budget (Codex A+B MED).
             floor = min(8192, profile.output_budget)
@@ -2113,7 +2211,7 @@ def apply_output_budget(args, profile, input_chars=None):
     # explicit --max-tokens: respect it, but keep it sane for THIS model — clamp
     # to BOTH the output cap AND what leaves room for the input in context, so a
     # big --max-tokens on a big-context model can't overflow (Codex round-3 HIGH).
-    single_tok = int(profile.single_shot_chars / CHARS_PER_TOKEN)
+    single_tok = int(profile.single_shot_chars / _effective_cpt(profile.model))
     context_safe = profile.context_length - single_tok - 2500
     # The floor must never exceed the model's real output cap (fuzz-caught: a
     # 500-token-cap model must not be forced up to the 2048 floor).
@@ -2440,7 +2538,7 @@ def _merge_usage_spools():
             continue
 
 
-def log_usage(model, usage):
+def log_usage(model, usage, input_chars=None):
     """Best-effort local metering (Ambient has no balance endpoint). Caps the
     file so it can't grow without bound over a long-lived install. The trim is
     a read-modify-rewrite, so it must be exclusive across BOTH in-process
@@ -2457,6 +2555,16 @@ def log_usage(model, usage):
             "in": usage.get("prompt_tokens", 0),
             "out": usage.get("completion_tokens", 0),
         }
+        # Phase 8a telemetry (additive): store the observed input CHAR count
+        # alongside REAL token usage so observed_cpt() can learn each model's
+        # true chars-per-token. Estimated usage is skipped — its token counts
+        # were themselves derived from chars via the static constant, so the
+        # ratio would be a circular echo, not an observation.
+        if (input_chars and not usage.get("_estimated")
+                and isinstance(input_chars, (int, float))
+                and isinstance(record["in"], (int, float))
+                and record["in"] > 0):
+            record["chars"] = int(input_chars)
         # Phase 6 (additive; old records without these fields still parse):
         # price the run NOW and pin the frontier reference in force, so
         # `ambient usage` computes historical savings against what was true
@@ -2936,7 +3044,11 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
         if isinstance(body, dict):
             body["usage"] = usage
     if usage:
-        log_usage(model, usage)
+        # Real usage carries the observed input char count for the Phase 8a
+        # telemetry EWMA (estimated usage is ignored inside log_usage).
+        log_usage(model, usage,
+                  input_chars=sum(len(m.get("content", ""))
+                                  for m in messages))
     if not isinstance(content, str) or not content.strip():
         # All budget spent on reasoning, nothing emitted: escalate ONCE, bounded.
         # The ceiling is the MODEL's real max output (from its profile), not a
@@ -8874,124 +8986,158 @@ def _add_best_of_flag(parser):
     )
 
 
-def main():
-    parser = _Parser(
-        prog="ambient", description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--version", "-V", action="version",
-                        version=f"ambient {__version__}")
-    sub = parser.add_subparsers(dest="command", required=False,
-                                metavar="<command>", parser_class=_Parser)
+# --- Declarative command registry (v3 Phase 8a) -------------------------------
+# ONE table drives BOTH argparse construction and dispatch — replacing the old
+# dual mechanism (a pre-credential if-chain + a post-credential handlers dict).
+# Each entry:
+#   name           the subcommand
+#   configure      builds the subparser (owns its own flags/help text)
+#   handler        NAME of the handler function — resolved via module globals
+#                  at dispatch time (tests monkeypatch cmd_* attributes)
+#   needs_key      True → load_config() first (exit 3 when unconfigured) and
+#                  handler(args, api_key, api_url, conf); False → handler(args)
+#   pre_env        dispatch BEFORE the HOME check / numeric clamps (version)
+#   keyless_route  NAME of a predicate(args) -> handler-name-or-None: lets a
+#                  needs_key command short-circuit a pure-local sub-mode
+#                  (audit --install-hook) before any credentials are needed
 
+
+def _configure_version(sub):
     sub.add_parser("version", help="print version")
-    p_models = sub.add_parser("models", help="list models")
-    p_models.add_argument("--json", action="store_true", help="machine-readable list")
-    p_models.add_argument("--all", action="store_true",
-                          help="include models hidden by your curation")
 
-    p_curate = sub.add_parser(
+
+def _configure_models(sub):
+    p = sub.add_parser("models", help="list models")
+    p.add_argument("--json", action="store_true", help="machine-readable list")
+    p.add_argument("--all", action="store_true",
+                   help="include models hidden by your curation")
+
+
+def _configure_curate(sub):
+    p = sub.add_parser(
         "curate", help="pick which models the menus surface (hide/show/only/note)"
     )
-    p_curate.add_argument(
+    p.add_argument(
         "verb", nargs="?",
         choices=["status", "hide", "show", "only", "note", "reset"],
         default="status", help="what to do (default: show current curation)")
-    p_curate.add_argument("ids", nargs="*",
-                          help="model ids or globs (e.g. qwen/*); for `note`: "
-                               "<id> then the note text")
+    p.add_argument("ids", nargs="*",
+                   help="model ids or globs (e.g. qwen/*); for `note`: "
+                        "<id> then the note text")
 
-    p_setup = sub.add_parser("setup", help="first-run: store + verify API key")
-    p_setup.add_argument("--key-stdin", action="store_true", help="read key from stdin")
-    p_setup.add_argument("--force", action="store_true", help="replace existing key")
-    p_setup.add_argument(
+
+def _configure_setup(sub):
+    p = sub.add_parser("setup", help="first-run: store + verify API key")
+    p.add_argument("--key-stdin", action="store_true", help="read key from stdin")
+    p.add_argument("--force", action="store_true", help="replace existing key")
+    p.add_argument(
         "--file", action="store_true",
         help="store in the env file instead of the macOS Keychain",
     )
-    p_setup.add_argument(
+    p.add_argument(
         "--remove", action="store_true",
         help="delete the stored key (Keychain + env file) — clean offboarding",
     )
 
-    p_link = sub.add_parser(
+
+def _configure_link(sub):
+    p = sub.add_parser(
         "link", help="put a stable `ambient` launcher on your PATH (~/.local/bin)"
     )
-    p_link.add_argument("--dir", default=None, metavar="DIR",
-                        help="link directory (default ~/.local/bin)")
-    p_link.add_argument("--remove", action="store_true",
-                        help="remove the launcher symlink")
+    p.add_argument("--dir", default=None, metavar="DIR",
+                   help="link directory (default ~/.local/bin)")
+    p.add_argument("--remove", action="store_true",
+                   help="remove the launcher symlink")
 
-    p_cache = sub.add_parser(
+
+def _configure_cache(sub):
+    p = sub.add_parser(
         "cache", help="inspect or clear the local chunk cache"
     )
-    p_cache.add_argument("action", nargs="?", choices=["status", "clear"],
-                         default="status", help="status (default) or clear")
-    p_cache.add_argument("--older-than", type=int, default=None, metavar="DAYS",
-                         help="clear only entries older than DAYS")
+    p.add_argument("action", nargs="?", choices=["status", "clear"],
+                   default="status", help="status (default) or clear")
+    p.add_argument("--older-than", type=int, default=None, metavar="DAYS",
+                   help="clear only entries older than DAYS")
 
-    p_trust = sub.add_parser(
+
+def _configure_trust_url(sub):
+    p = sub.add_parser(
         "trust-url",
         help="explicitly trust a non-Ambient API endpoint (self-hosted gateway)",
     )
-    p_trust.add_argument("url", nargs="?", help="https:// endpoint to trust")
-    p_trust.add_argument("--reset", action="store_true",
-                         help="clear the trusted endpoint (back to api.ambient.xyz)")
+    p.add_argument("url", nargs="?", help="https:// endpoint to trust")
+    p.add_argument("--reset", action="store_true",
+                   help="clear the trusted endpoint (back to api.ambient.xyz)")
 
-    p_usage = sub.add_parser(
+
+def _configure_usage(sub):
+    p = sub.add_parser(
         "usage",
         help="local token/cost summary + savings vs the frontier reference "
              "(AMBIENT_REFERENCE_PRICE; agent-lane spend is disclosed as "
              "unmetered)")
-    p_usage.add_argument("--days", type=int, default=30,
-                         help="look-back window in days (default 30)")
-    p_usage.add_argument("--json", action="store_true", help="machine-readable summary")
+    p.add_argument("--days", type=int, default=30,
+                   help="look-back window in days (default 30)")
+    p.add_argument("--json", action="store_true", help="machine-readable summary")
 
-    p_mode = sub.add_parser("mode", help="delegate mode: on / off / status")
-    p_mode.add_argument("state", nargs="?", choices=["on", "off"], default=None,
-                        help="on/off; omit to print current status")
 
+def _configure_mode(sub):
+    p = sub.add_parser("mode", help="delegate mode: on / off / status")
+    p.add_argument("state", nargs="?", choices=["on", "off"], default=None,
+                   help="on/off; omit to print current status")
+
+
+def _configure_doctor(sub):
     sub.add_parser("doctor", help="diagnose key/funds/model/network/service issues")
 
-    p_use = sub.add_parser("use", help="pick the sticky default model")
-    p_use.add_argument(
+
+def _configure_use(sub):
+    p = sub.add_parser("use", help="pick the sticky default model")
+    p.add_argument(
         "model_id", nargs="?",
         help="model id (omit for interactive menu); 'auto[:cheapest|:largest]' "
              "stores a per-call delegation instead of a fixed model")
-    p_use.add_argument("--chat", action="store_true", help="only set the chat/audit default")
-    p_use.add_argument("--code", action="store_true", help="only set the code/agent default")
-    p_use.add_argument("--all", action="store_true",
-                       help="pick from every model, including curated-out ones")
+    p.add_argument("--chat", action="store_true",
+                   help="only set the chat/audit default")
+    p.add_argument("--code", action="store_true",
+                   help="only set the code/agent default")
+    p.add_argument("--all", action="store_true",
+                   help="pick from every model, including curated-out ones")
 
-    p_ask = sub.add_parser(
+
+def _configure_ask(sub):
+    p = sub.add_parser(
         "ask", help="one-shot completion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   ambient ask "explain CRDTs in two paragraphs"
   cat design.md | ambient ask "list the open questions" -
   ambient ask "summarize" --json           (stable machine envelope)""")
-    p_ask.add_argument(
+    p.add_argument(
         "prompt", nargs="*",
         help="the question; add '-' to ALSO read stdin "
              "(cat doc.txt | ambient ask \"summarize\" -)")
-    p_ask.add_argument("-s", "--system", help="system prompt")
-    p_ask.add_argument(
+    p.add_argument("-s", "--system", help="system prompt")
+    p.add_argument(
         "--allow-secrets", action="store_true",
         help="bypass the credentials tripwire (false positives only)",
     )
-    p_ask.add_argument(
+    p.add_argument(
         "--json", action="store_true",
         help="emit a stable JSON envelope instead of prose",
     )
-    p_ask.add_argument(
+    p.add_argument(
         "--consensus", metavar="M1,M2",
         help="ask the SAME question on several explicitly-named models and "
              "report each answer plus an agreement/divergence note "
              "(one summed cost gate up front)",
     )
-    _add_best_of_flag(p_ask)
-    add_common_flags(p_ask)
+    _add_best_of_flag(p)
+    add_common_flags(p)
 
-    p_audit = sub.add_parser(
+
+def _configure_audit(sub):
+    p = sub.add_parser(
         "audit", help="second-opinion code audit",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
@@ -9001,78 +9147,80 @@ def main():
   ambient audit src/*.py --dry-run       (plan + cost, nothing sent)
   ambient audit --repo . --focus security   (whole repo — git-aware walker)
   ambient audit app.py --consensus moonshotai/kimi-k2.7-code,z-ai/glm-5.2""")
-    p_audit.add_argument("paths", nargs="*",
-                         help="files to audit (or pipe a diff on stdin)")
-    p_audit.add_argument(
+    p.add_argument("paths", nargs="*",
+                   help="files to audit (or pipe a diff on stdin)")
+    p.add_argument(
         "--repo", metavar="DIR", nargs="?", const=".",
         help="audit a whole repository/directory (default .): text source "
              "files via git ls-files (.gitignore respected) or a safe walk; "
              "binaries, lockfiles and vendored dirs skipped; file count, "
              "size and est. cost reported BEFORE anything is sent",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--deep", dest="deep", action="store_true", default=None,
         help="after a chunked audit, run ONE bounded cross-file confirmation "
              "pass over files pass-1 flagged across chunks (default: on for "
              "--repo, off otherwise)",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--no-deep", dest="deep", action="store_false",
         help="skip the cross-file confirmation pass",
     )
-    p_audit.add_argument("--focus", help="e.g. 'security', 'concurrency'")
-    p_audit.add_argument(
+    p.add_argument("--focus", help="e.g. 'security', 'concurrency'")
+    p.add_argument(
         "--allow-secrets", action="store_true",
         help="bypass the credentials tripwire (false positives only)",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--format", choices=["prose", "json", "report"], default="prose",
         help="prose (default) | json (machine-readable findings) | report "
              "(clean findings table)",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--json", dest="format", action="store_const", const="json",
         help="shorthand for --format json",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--dry-run", action="store_true",
         help="show the plan (model, budget, chunks, cost ceiling) and exit — no call",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--staged", action="store_true",
         help="audit `git diff --cached` WITH full context of each changed file",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--diff", metavar="REF", nargs="?", const="HEAD",
         help="audit `git diff REF` (default HEAD) with full changed-file context",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--consensus", metavar="M1,M2",
         help="audit with several models and rank findings corroborated by 2+ "
              "first (usually only 2 models are READY at once)",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--install-hook", metavar="HOOK", nargs="?", const="pre-commit",
         choices=["pre-commit", "pre-push"], dest="install_hook",
         help="install a FIXED git hook that runs `ambient audit` on the "
              "staged/outgoing diff and blocks on verdict FIX FIRST "
              "(default: pre-commit; needs no API key)",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--uninstall-hook", metavar="HOOK", nargs="?", const="pre-commit",
         choices=["pre-commit", "pre-push"], dest="uninstall_hook",
         help="remove the ambient-installed git hook (only ours — a foreign "
              "hook is never touched)",
     )
-    p_audit.add_argument(
+    p.add_argument(
         "--force", action="store_true",
         help="with --install-hook: replace an existing non-ambient hook "
              "(the original is backed up to <hook>.pre-ambient.bak)",
     )
-    _add_best_of_flag(p_audit)
-    add_common_flags(p_audit)
+    _add_best_of_flag(p)
+    add_common_flags(p)
 
-    p_map = sub.add_parser(
+
+def _configure_map(sub):
+    p = sub.add_parser(
         "map",
         help="bulk lane: run ONE prompt independently over MANY items "
              "(files or stdin lines), streaming one result per item",
@@ -9086,100 +9234,208 @@ the item is the user message). Output streams per item as it completes —
 under --json as JSONL (one envelope per line, always carrying the item id).
 One batch cost gate up front; re-runs serve finished items from the cache
 and re-bill only the missing ones.""")
-    p_map.add_argument(
+    p.add_argument(
         "prompt",
         help="the instruction applied INDEPENDENTLY to each item")
-    p_map.add_argument(
+    p.add_argument(
         "paths", nargs="*",
         help="files — each file is ONE item (glob via your shell); omit to "
              "read one item per stdin line")
-    p_map.add_argument(
+    p.add_argument(
         "--jsonl", action="store_true",
         help='stdin lines are JSON objects: {"input": "...", "id": ...} '
              "(id optional; falls back to the line's item index)")
-    p_map.add_argument(
+    p.add_argument(
         "--json", action="store_true",
         help="emit one JSON envelope per item (JSONL) instead of prose")
-    p_map.add_argument(
+    p.add_argument(
         "--allow-secrets", action="store_true",
         help="bypass the credentials tripwire (false positives only)",
     )
-    add_common_flags(p_map)
+    add_common_flags(p)
 
-    p_code = sub.add_parser("code", help="code generation")
-    p_code.add_argument("task", nargs="*", help="what to build, in plain words")
-    p_code.add_argument("-f", "--context", action="append", metavar="FILE",
-                        help="context file the generation should match (repeatable)")
-    p_code.add_argument(
+
+def _configure_code(sub):
+    p = sub.add_parser("code", help="code generation")
+    p.add_argument("task", nargs="*", help="what to build, in plain words")
+    p.add_argument("-f", "--context", action="append", metavar="FILE",
+                   help="context file the generation should match (repeatable)")
+    p.add_argument(
         "--allow-secrets", action="store_true",
         help="bypass the credentials tripwire (false positives only)",
     )
-    p_code.add_argument(
+    p.add_argument(
         "--json", action="store_true",
         help="emit a stable JSON envelope instead of prose",
     )
-    _add_best_of_flag(p_code)
-    add_common_flags(p_code)
+    _add_best_of_flag(p)
+    add_common_flags(p)
 
-    p_chat = sub.add_parser(
+
+def _configure_chat(sub):
+    p = sub.add_parser(
         "chat",
         help="interactive REPL on Ambient — streams each reply with a "
              "per-turn cost/savings receipt; /model /clear /help /exit",
     )
-    p_chat.add_argument("-s", "--system",
-                        help="system prompt for the whole session")
-    add_common_flags(p_chat)
+    p.add_argument("-s", "--system",
+                   help="system prompt for the whole session")
+    add_common_flags(p)
 
-    p_build = sub.add_parser(
+
+def _configure_build(sub):
+    p = sub.add_parser(
         "build",
         help="plan + generate a set of files from a task (manifest-first; "
              "never executes anything)",
     )
-    p_build.add_argument("task", nargs="*", help="what to build, in plain words")
-    p_build.add_argument(
+    p.add_argument("task", nargs="*", help="what to build, in plain words")
+    p.add_argument(
         "--dir", default=None, metavar="DIR",
         help="target directory (default: current dir; REQUIRED for headless --apply)")
-    p_build.add_argument("-f", "--context", action="append", metavar="FILE",
-                         help="context file the build should match (repeatable)")
-    p_build.add_argument(
+    p.add_argument("-f", "--context", action="append", metavar="FILE",
+                   help="context file the build should match (repeatable)")
+    p.add_argument(
         "--apply", action="store_true",
         help="write the generated files into --dir (default: manifest only)")
-    p_build.add_argument(
+    p.add_argument(
         "--force", action="store_true",
         help="overwrite existing files (originals saved to .ambient-build.bak/)")
-    p_build.add_argument(
+    p.add_argument(
         "--plan-only", action="store_true",
         help="run just the cheap planning call, print the plan, stop")
-    p_build.add_argument(
+    p.add_argument(
         "--dry-run", action="store_true",
         help="show model/budget/caps/cost with NO API calls")
-    p_build.add_argument("--max-files", type=int, default=32,
-                         help="cap on planned files (default 32)")
-    p_build.add_argument("--max-file-bytes", type=int, default=200_000,
-                         help="cap on one generated file (default 200,000)")
-    p_build.add_argument(
+    p.add_argument("--max-files", type=int, default=32,
+                   help="cap on planned files (default 32)")
+    p.add_argument("--max-file-bytes", type=int, default=200_000,
+                   help="cap on one generated file (default 200,000)")
+    p.add_argument(
         "--no-resume", action="store_true",
         help="ignore a previous interrupted run's cached plan/files")
-    p_build.add_argument("--json", action="store_true",
-                         help="emit the machine-readable manifest envelope")
-    p_build.add_argument(
+    p.add_argument("--json", action="store_true",
+                   help="emit the machine-readable manifest envelope")
+    p.add_argument(
         "--allow-secrets", action="store_true",
         help="bypass the credentials tripwire (false positives only)")
-    add_common_flags(p_build)
+    add_common_flags(p)
 
-    p_agent = sub.add_parser(
+
+def _configure_agent(sub):
+    p = sub.add_parser(
         "agent",
         help="interactive agentic terminal on Ambient (opencode TUI). For "
              "headless builds Claude can review, use: ambient build",
     )
-    p_agent.add_argument("-m", "--model", default=None,
-                         help="model id for this session only")
-    p_agent.add_argument("agent_args", nargs=argparse.REMAINDER,
-                         help="passed straight to opencode; first arg 'run' = "
-                              "headless one-task mode")
+    p.add_argument("-m", "--model", default=None,
+                   help="model id for this session only")
+    p.add_argument("agent_args", nargs=argparse.REMAINDER,
+                   help="passed straight to opencode; first arg 'run' = "
+                        "headless one-task mode")
 
-    p_codex = sub.add_parser("codex", help="blocked upstream; see `ambient agent`")
-    p_codex.add_argument("codex_args", nargs=argparse.REMAINDER)
+
+def _configure_codex(sub):
+    p = sub.add_parser("codex", help="blocked upstream; see `ambient agent`")
+    p.add_argument("codex_args", nargs=argparse.REMAINDER)
+
+
+def _cmd_version(args):
+    print(f"ambient {__version__}")
+
+
+def _cmd_models_keyless(args):
+    # The catalog endpoint is unauthenticated — let a curious stranger see
+    # the live network BEFORE creating an account (pre-signup funnel).
+    conf = read_config_file()
+    key, _ = resolve_key_and_backend(conf)
+    try:
+        cmd_models(args, key or "none", resolve_api_url(conf), conf)
+    except NetworkError as err:
+        sys.exit(f"ambient [network]: {err}")
+
+
+def _cmd_trust_url_dispatch(args):
+    if args.reset:
+        cmd_trust_url_reset()
+    elif args.url:
+        cmd_trust_url(args)
+    else:
+        usage_exit("trust-url needs a URL (or --reset)")
+
+
+def _cmd_codex_keyless(args):
+    cmd_codex(args, None, None, None)
+
+
+def _audit_keyless_route(args):
+    """audit --install-hook / --uninstall-hook is pure hooks-file management
+    (7d): no key, no network — it must work before any credentials exist."""
+    if getattr(args, "install_hook", None) or getattr(args, "uninstall_hook", None):
+        return "cmd_audit_hook"
+    return None
+
+
+COMMANDS = (
+    {"name": "version", "needs_key": False, "pre_env": True,
+     "configure": _configure_version, "handler": "_cmd_version"},
+    {"name": "models", "needs_key": False,
+     "configure": _configure_models, "handler": "_cmd_models_keyless"},
+    {"name": "curate", "needs_key": False,
+     "configure": _configure_curate, "handler": "cmd_curate"},
+    {"name": "setup", "needs_key": False,
+     "configure": _configure_setup, "handler": "cmd_setup"},
+    {"name": "link", "needs_key": False,
+     "configure": _configure_link, "handler": "cmd_link"},
+    {"name": "cache", "needs_key": False,
+     "configure": _configure_cache, "handler": "cmd_cache"},
+    {"name": "trust-url", "needs_key": False,
+     "configure": _configure_trust_url, "handler": "_cmd_trust_url_dispatch"},
+    {"name": "usage", "needs_key": False,
+     "configure": _configure_usage, "handler": "cmd_usage"},
+    {"name": "mode", "needs_key": False,
+     "configure": _configure_mode, "handler": "cmd_mode"},
+    {"name": "doctor", "needs_key": False,
+     "configure": _configure_doctor, "handler": "cmd_doctor"},
+    {"name": "use", "needs_key": True,
+     "configure": _configure_use, "handler": "cmd_use"},
+    {"name": "ask", "needs_key": True,
+     "configure": _configure_ask, "handler": "cmd_ask"},
+    {"name": "audit", "needs_key": True,
+     "keyless_route": "_audit_keyless_route",
+     "configure": _configure_audit, "handler": "cmd_audit"},
+    {"name": "map", "needs_key": True,
+     "configure": _configure_map, "handler": "cmd_map"},
+    {"name": "code", "needs_key": True,
+     "configure": _configure_code, "handler": "cmd_code"},
+    {"name": "chat", "needs_key": True,
+     "configure": _configure_chat, "handler": "cmd_chat"},
+    {"name": "build", "needs_key": True,
+     "configure": _configure_build, "handler": "cmd_build"},
+    {"name": "agent", "needs_key": True,
+     "configure": _configure_agent, "handler": "cmd_agent"},
+    {"name": "codex", "needs_key": False,
+     "configure": _configure_codex, "handler": "_cmd_codex_keyless"},
+)
+
+
+def _registry_handler(name):
+    """Resolve a registry handler by NAME at dispatch time, so tests that
+    monkeypatch module attributes (amb.cmd_ask = stub) keep working."""
+    return globals()[name]
+
+
+def main():
+    parser = _Parser(
+        prog="ambient", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", "-V", action="version",
+                        version=f"ambient {__version__}")
+    sub = parser.add_subparsers(dest="command", required=False,
+                                metavar="<command>", parser_class=_Parser)
+    for _spec in COMMANDS:
+        _spec["configure"](sub)
 
     # Never accept a key as a command-line argument: argv lands in shell
     # history and process listings (security sweep). Refuse BEFORE argparse
@@ -9197,8 +9453,10 @@ and re-bill only the missing ones.""")
                     f"ROTATE that key at {KEY_CONSOLE_URL}."
                 )
     args = parser.parse_args()
-    if args.command == "version":
-        print(f"ambient {__version__}")
+    spec = next((s for s in COMMANDS if s["name"] == args.command), None)
+    if spec is not None and spec.get("pre_env"):
+        # `ambient version` must work even before HOME/config resolve.
+        _registry_handler(spec["handler"])(args)
         return
     if args.command is None:  # bare `ambient` → onboarding banner, not an error
         print(build_banner())
@@ -9237,68 +9495,21 @@ and re-bill only the missing ones.""")
             file=sys.stderr,
         )
         args.timeout = DEFAULT_TIMEOUT_S
-    # These work before any credentials exist:
-    if args.command == "codex":
-        cmd_codex(args, None, None, None)
+    # Key-less commands work before any credentials exist:
+    if not spec["needs_key"]:
+        _registry_handler(spec["handler"])(args)
         return
-    if args.command == "mode":
-        cmd_mode(args)
-        return
-    if args.command == "setup":
-        cmd_setup(args)
-        return
-    if args.command == "doctor":
-        cmd_doctor(args)
-        return
-    if args.command == "usage":
-        cmd_usage(args)
-        return
-    if args.command == "link":
-        cmd_link(args)
-        return
-    if args.command == "cache":
-        cmd_cache(args)
-        return
-    if args.command == "curate":
-        cmd_curate(args)
-        return
-    if args.command == "trust-url":
-        if args.reset:
-            cmd_trust_url_reset()
-        elif args.url:
-            cmd_trust_url(args)
-        else:
-            usage_exit("trust-url needs a URL (or --reset)")
-        return
-    if args.command == "audit" and (getattr(args, "install_hook", None)
-                                    or getattr(args, "uninstall_hook", None)):
-        # Pure hooks-file management (7d): no key, no network — must work
-        # before any credentials exist.
-        cmd_audit_hook(args)
-        return
-    if args.command == "models":
-        # The catalog endpoint is unauthenticated — let a curious stranger see
-        # the live network BEFORE creating an account (pre-signup funnel).
-        conf = read_config_file()
-        key, _ = resolve_key_and_backend(conf)
-        try:
-            cmd_models(args, key or "none", resolve_api_url(conf), conf)
-        except NetworkError as err:
-            sys.exit(f"ambient [network]: {err}")
-        return
+    # A needs_key command may still expose a pure-local sub-mode
+    # (audit --install-hook) that must run without credentials:
+    route = spec.get("keyless_route")
+    if route:
+        alt = _registry_handler(route)(args)
+        if alt:
+            _registry_handler(alt)(args)
+            return
     api_key, api_url, conf = load_config()
-    handlers = {
-        "use": cmd_use,
-        "ask": cmd_ask,
-        "audit": cmd_audit,
-        "map": cmd_map,
-        "chat": cmd_chat,
-        "code": cmd_code,
-        "build": cmd_build,
-        "agent": cmd_agent,
-    }
     try:
-        handlers[args.command](args, api_key, api_url, conf)
+        _registry_handler(spec["handler"])(args, api_key, api_url, conf)
     except ChatError as err:
         # A map-reduce that exhausts its retries raises ChatError up here — show
         # it as the clean classified diagnosis, not a generic internal error.

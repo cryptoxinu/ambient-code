@@ -146,6 +146,16 @@ external opencode process whose spend is billed by Ambient but not visible
 to local metering — `ambient usage` discloses this instead of pretending its
 totals are complete.
 
+**Self-calibrating token math (smarter with use)** — cost estimates and
+per-model budgets convert characters to tokens. Out of the box that uses a
+fixed 3.2 chars/token heuristic; once real runs land in the local usage
+ledger, ambient learns each model's *observed* chars-per-token (a
+recent-weighted average of what the API actually reported) and uses it for
+that model's budget sizing and cost estimates. No history → exactly the
+static default, so nothing shifts on a fresh install; observed ratios are
+clamped to a sane 1.0–8.0 range so a corrupt ledger can't skew budgets. Set
+`AMBIENT_TELEMETRY=off` to keep the static constants.
+
 **Advisory routing** (your explicit model choice is *never* silently swapped):
 `-m auto` delegates the pick — the cheapest READY model that fits the input,
 resolved against the live catalog on every call and printed to stderr

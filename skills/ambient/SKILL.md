@@ -219,6 +219,14 @@ usage record stores the run cost + the reference in force, so `ambient
 usage` computes historical savings against what was true at call time. Never
 quote a savings figure the CLI itself did not print.
 
+**Self-calibrating token math (v3 Phase 8a):** budget sizing and cost
+estimates convert chars→tokens with a per-model OBSERVED chars-per-token
+learned from the local usage ledger (recent-weighted EWMA over real API
+usage records, clamped to 1.0–8.0) — the tool gets smarter with use. With no
+usable history the math is byte-identical to the static 3.2 default, so
+estimates never shift on a fresh install. `AMBIENT_TELEMETRY=off` (env)
+keeps the static constants.
+
 ## Error protocol (MANDATORY)
 
 When ANY ambient command fails, do NOT guess and never tell the user "Ambient is
