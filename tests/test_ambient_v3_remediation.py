@@ -22,8 +22,8 @@ BIN = os.path.join(ROOT, "bin", "ambient")
 
 
 def load_module():
-    loader = importlib.machinery.SourceFileLoader("ambient_cli_v3r", BIN)
-    spec = importlib.util.spec_from_loader("ambient_cli_v3r", loader)
+    loader = importlib.machinery.SourceFileLoader("ambient_cli_v3rem", BIN)
+    spec = importlib.util.spec_from_loader("ambient_cli_v3rem", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
