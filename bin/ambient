@@ -8679,14 +8679,17 @@ def cmd_build(args, api_key, api_url, conf):
         # may be re-served by a pricier candidate, so the up-front reserve must
         # cover that exposure across the batch/retry-cap set (byte-identical to
         # estimate_cost when fallback is off / SACRED / no costlier candidate).
-        # Each generation call re-sends the FULL prompt (~prompt_chars), so the
-        # fallback candidate must be sized per-call at prompt_chars, NOT the
-        # input_chars/n_calls average (which would pick a cheaper small-context
-        # alt and under-reserve a big prompt's pricier large-context swap).
+        # Each generation call re-sends the FULL prompt (~prompt_chars), so
+        # input_chars counts prompt_chars for EVERY call (n_gen), the candidate
+        # is sized per-call at prompt_chars (NOT the input/n_calls average that
+        # would pick a cheaper small-context alt), and the base + per-call uplift
+        # together are the true per-call sum-of-maxima. Byte-identical to
+        # estimate_cost when fallback is off / SACRED / no costlier candidate.
+        n_gen = len(batches) + 2
         expected, _b1, assumed = estimate_cost_fb(
-            catalog, model, prompt_chars * len(batches),
-            len(batches) + 2, args.max_tokens, args, conf,
-            per_call_chars=[prompt_chars] * (len(batches) + 2))
+            catalog, model, prompt_chars * n_gen,
+            n_gen, args.max_tokens, args, conf,
+            per_call_chars=[prompt_chars] * n_gen)
         _e2, bound, _a2 = estimate_cost_fb(
             catalog, model, prompt_chars * max_gen_calls,
             max_gen_calls, args.max_tokens, args, conf,
