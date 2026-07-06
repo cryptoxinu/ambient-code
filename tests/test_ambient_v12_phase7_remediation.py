@@ -565,7 +565,7 @@ class ChatRemediationTests(unittest.TestCase):
         self.assertEqual(len(gate.calls), 2)          # per-turn cost gate
 
 
-# -------------------------------------------- M2: unified failed_samples shape
+# -------------------------------------------- unified failed_samples shape
 
 class FailedSamplesShapeTests(unittest.TestCase):
     def setUp(self):
@@ -607,7 +607,7 @@ class FailedSamplesShapeTests(unittest.TestCase):
         self.assertEqual(env["failed_sample_count"], 1)
 
 
-# ------------------------------------------------ M3: strict hook ownership
+# ------------------------------------------------ strict hook ownership
 
 def make_git_repo():
     tmp = tempfile.mkdtemp()

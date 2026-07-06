@@ -60,7 +60,7 @@ Every task-running `--json` surface (ask, code, audit, consensus, build) emits O
 envelope shape: `{"schema_version": 1, "kind": …, "status": "ok|partial", "model",
 "partial", "coverage_gap", "exit_code", …}` with `content` (ask/code), `findings` +
 `verdict` (audit/consensus), or `files[]` + `failed[]` + `advisory_steps[]` (build).
-Phase-7 lanes add ADDITIVE fields to the same envelope: `--best-of` →
+lanes add ADDITIVE fields to the same envelope: `--best-of` →
 `best_of`, `candidates[]`, `selected_index`, `selection`, and (audit) a
 per-finding `corroboration:{count,of}`; `ask --consensus` → `consensus[]`,
 `answers[]`, `agreement:{level,similarity,note}`. `ambient chat` is a
@@ -185,7 +185,7 @@ the price delta, and it now picks the CHEAPEST fitting alternate (fit-then-cheap
 not the biggest. Never enable it on the user's behalf without asking. User
 curation (`ambient curate`) shapes what menus SHOW, never what `-m` can do.
 
-Advisory routing (v3) stays inside that rule: `-m auto[:cheapest|:largest]` is the
+Advisory routing stays inside that rule: `-m auto[:cheapest|:largest]` is the
 user EXPLICITLY delegating the pick — resolved per call from READY, curation-visible
 models and ALWAYS printed (`ambient use auto` makes it sticky; it stores the literal
 spec and re-resolves each call). If a CONCRETE model is not currently serving or the

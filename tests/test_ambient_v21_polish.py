@@ -1,4 +1,4 @@
-"""Polish + hardening batch (post-review hardening).
+"""Polish + hardening (post-review hardening).
 
 Pins the two NEW behaviors this batch introduced:
 

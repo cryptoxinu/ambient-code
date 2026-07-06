@@ -6,12 +6,12 @@ H1: prune is LIVENESS-FIRST — a provably-alive pid is never TTL-pruned (a
     existing reservation (max amount, fresh ts) instead of double-counting.
 H2: an over-budget DECISION always refuses — a store-persist failure may
     only ever fail open on the allow path, never turn a refusal into allow.
-M1: a ledger append under lock-timeout goes to a per-pid SPOOL file merged
+a ledger append under lock-timeout goes to a per-pid SPOOL file merged
     back under the lock later — never an unlocked append a concurrent trim
     can truncate away.
-M2: the no-fcntl lock path never break-and-enters a lock whose owner might
+the no-fcntl lock path never break-and-enters a lock whose owner might
     be alive; it breaks only a PROVABLY-dead owner's lock, else fails open.
-M3: release clears reservation ids only after the removal actually lands,
+release clears reservation ids only after the removal actually lands,
     so a failed release can be retried.
 LOW: a REAL two-process race on the shared store — exactly one refused,
     no leaked reservation.
@@ -165,7 +165,7 @@ class TestRefusalNeverSwallowed(unittest.TestCase):
 
 
 class TestLedgerSpool(unittest.TestCase):
-    """M1: no unlocked append that a concurrent trim can truncate away."""
+    """no unlocked append that a concurrent trim can truncate away."""
 
     def _held_lock(self, d):
         lock_path = os.path.join(d, ".usage.lock")
@@ -227,7 +227,7 @@ class TestLedgerSpool(unittest.TestCase):
 
 
 class TestNoFcntlLockSafety(unittest.TestCase):
-    """M2: never break-and-enter a possibly-live owner's lock."""
+    """never break-and-enter a possibly-live owner's lock."""
 
     def test_stale_mtime_alone_never_breaks_a_live_owner(self):
         with tempfile.TemporaryDirectory() as d:
@@ -266,7 +266,7 @@ class TestNoFcntlLockSafety(unittest.TestCase):
 
 
 class TestReleaseRetry(unittest.TestCase):
-    """M3: ids survive a failed release so it can be retried."""
+    """ids survive a failed release so it can be retried."""
 
     def test_release_keeps_ids_when_write_fails_then_retries(self):
         def boom(*a, **k):

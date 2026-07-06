@@ -83,7 +83,7 @@ def _mr_args(**over):
 
 
 class TestGlobalGate(unittest.TestCase):
-    """R1: one shared Semaphore must cap TOTAL concurrent complete() calls
+    """one shared Semaphore must cap TOTAL concurrent complete() calls
     across NESTED fan-outs (outer consensus models × inner chunk pools)."""
 
     def _fan_out(self, gate, outer=4, chunks=3, hold_s=0.05):
@@ -127,7 +127,7 @@ class TestGlobalGate(unittest.TestCase):
 
 
 class TestCancelEvent(unittest.TestCase):
-    """R2: a set cancel_event must stop chunks from STARTING — zero new
+    """a set cancel_event must stop chunks from STARTING — zero new
     billed calls once the caller is unwinding."""
 
     def test_set_event_prevents_any_complete_call(self):
@@ -170,7 +170,7 @@ def _src_file(body="print('hi')\n"):
 
 
 class TestConsensusFailFast(unittest.TestCase):
-    """R2: the FIRST fatal-category worker error (key/funds/auth) must cancel
+    """the FIRST fatal-category worker error (key/funds/auth) must cancel
     the queued siblings instead of billing them to completion."""
 
     def test_fatal_error_cancels_queued_models(self):
@@ -211,7 +211,7 @@ class TestConsensusFailFast(unittest.TestCase):
         self.assertEqual(ran[0], "fake/model-a")
         # any sibling that raced into the worker observed the cancel signal
         self.assertTrue(all(sibling_saw_cancel))
-        # R1/R2: one SHARED gate + cancel_event reached the workers, and the
+        # R1/one SHARED gate + cancel_event reached the workers, and the
         # fail-fast flipped the event so fan-outs stop starting chunks.
         self.assertTrue(hasattr(seen_kwargs.get("gate"), "acquire"))
         self.assertIsInstance(seen_kwargs.get("cancel_event"),
@@ -271,7 +271,7 @@ class TestConsensusFailFast(unittest.TestCase):
 
 
 class TestConsensusPerModelBudget(unittest.TestCase):
-    """R4: consensus workers must get a PROFILE-derived budget per model —
+    """consensus workers must get a PROFILE-derived budget per model —
     not the default model's resolved number — unless --max-tokens was
     explicitly set by the user."""
 
@@ -304,7 +304,7 @@ class TestConsensusPerModelBudget(unittest.TestCase):
 
 
 class TestJsonFailFromHandlers(unittest.TestCase):
-    """R3: a ChatError caught INSIDE the real task handlers must still produce
+    """a ChatError caught INSIDE the real task handlers must still produce
     the machine envelope under --json — parseable, status:"error", exit 1,
     key never on stdout. Only the engine (complete) is patched."""
 
@@ -520,7 +520,7 @@ class TestTotalJsonFailureContract(unittest.TestCase):
         self.assertIn("nothing to audit", env["diagnosis"])
 
     def test_audit_no_input_prose_exits_64_with_prose_on_stderr(self):
-        # Phase-2 H2: _fail_exit now honors exit_code on the prose path too —
+        # H2: _fail_exit now honors exit_code on the prose path too —
         # a usage error exits EX_USAGE=64 (matching its --json twin), with the
         # byte-identical prose line on stderr instead of a string exit 1.
         code, out, err = self._audit_no_input("prose")

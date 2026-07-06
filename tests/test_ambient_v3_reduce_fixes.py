@@ -6,12 +6,12 @@
 - H2: when the reduce model has a SMALLER window than the map model, the
   synthesis inputs are packed to the REDUCE window and the synthesis call
   gets reduce-sized max_tokens — never the map model's.
-- M1: the split cost gate uses the explicit formula (map input 1.0x at map
+- the split cost gate uses the explicit formula (map input 1.0x at map
   prices + synthesis input 0.3x at reduce prices + each lane's output) and
   stays byte-identical to the classic gate when map == reduce.
-- M2: audit/build --dry-run share the split estimate helper with the live
+- audit/build --dry-run share the split estimate helper with the live
   gate and display map=/reduce= when they differ.
-- M3: a deterministic reducer (structured audit) makes NO synthesis call —
+- a deterministic reducer (structured audit) makes NO synthesis call —
   the gate prices only the map lane, and the reduce model plays no role.
 No network, no live API."""
 import argparse

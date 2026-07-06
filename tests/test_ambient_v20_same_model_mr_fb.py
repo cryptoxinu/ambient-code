@@ -5,7 +5,7 @@ Final spend-safety fixture: with a live
 exposure on a UNIFORM input/(n_chunks*2+extra) pseudo-call. The live map
 workers each carry their REAL chunk (gate_fallback=False — no later per-call
 gate), and a big real chunk swaps to a pricier LARGE-context candidate the
-small averaged pseudo-call never priced. The counterexample: 4 chunks,
+small averaged pseudo-call never priced. The edge case: 4 chunks,
 input_chars=80_000, max_tokens=8000, requested model unready, a cheap
 small-context alt fits the 10k pseudo-call while the pricier big-context alt
 fits each real 20k map call — reserve ~$0.045 exp / ~$0.058 bound vs ~$0.77
@@ -96,7 +96,7 @@ def _mdl(mid, ctx, max_out, ready, price_in, price_out):
             "pricing": {"input": price_in, "output": price_out}}
 
 
-def counterexample_catalog():
+def edge_case_catalog():
     """The an unready cheap requested model, a
     CHEAP small-context candidate that fits the 10k-char averaged pseudo-call
     (10_000/3.2 = 3125 tok <= 4000) but NOT a real 20k-char map chunk
@@ -124,11 +124,11 @@ def _fb_ctx():
 # (a) the the reserve must cover the REAL map fallbacks
 # --------------------------------------------------------------------------
 
-class TestSpendCounterexample(unittest.TestCase):
+class TestSpendEdgeCase(unittest.TestCase):
     def test_fixture_candidates_split_by_size(self):
         """Sanity: the averaged pseudo-call picks the cheap alt; each REAL
         20k map chunk can only fall back to the pricier big-context one."""
-        cat = counterexample_catalog()
+        cat = edge_case_catalog()
         a = ns(fallback=True)
         pseudo = INPUT / (N * 2)  # the old delegated per-call average
         with env_var("AMBIENT_FALLBACK", None):
@@ -142,7 +142,7 @@ class TestSpendCounterexample(unittest.TestCase):
     def test_reserve_covers_the_real_map_fallback_spend(self):
         """The per-chunk reserve must be >= the 4 real map-call fallbacks
         (~$0.77 exp / ~$1.01 bound) — not the ~$0.045 averaged figure."""
-        cat = counterexample_catalog()
+        cat = edge_case_catalog()
         with env_var("AMBIENT_FALLBACK", None):
             fb = amb.estimate_cost_mr_fb(
                 cat, "req/pro", None, INPUT, N, MT, ns(fallback=True), {},
@@ -176,7 +176,7 @@ class TestSpendCounterexample(unittest.TestCase):
         """cost_gate_mr must refuse at a $0.30 ceiling: the old averaged
         figure (~$0.045) sailed under it while the live run could legally
         spend ~$0.77+ on map fallbacks alone."""
-        cat = counterexample_catalog()
+        cat = edge_case_catalog()
 
         def gate(fallback):
             with env_var("AMBIENT_FALLBACK", None), \
@@ -193,7 +193,7 @@ class TestSpendCounterexample(unittest.TestCase):
         gate(fallback=False)  # control: no fallback exposure — pennies, runs
 
     def test_gate_allows_with_a_ceiling_above_the_true_reserve(self):
-        cat = counterexample_catalog()
+        cat = edge_case_catalog()
         with env_var("AMBIENT_FALLBACK", None), \
                 env_var("AMBIENT_MAX_SPEND", "50"), \
                 env_var("AMBIENT_FLEET_BUDGET", "off"), \
@@ -216,7 +216,7 @@ class TestMixtureDomination(unittest.TestCase):
         small/alt), every 2^4 x 2^4 map/synthesis fallback mixture priced
         per the estimate's own lane decomposition — none may exceed the
         reserve."""
-        cat = counterexample_catalog()
+        cat = edge_case_catalog()
         total = sum(self.SIZES)
         a = ns(fallback=True)
         with env_var("AMBIENT_FALLBACK", None):
@@ -260,7 +260,7 @@ class TestMixtureDomination(unittest.TestCase):
         """Threading the REAL chunk list must reserve strictly more than the
         uniform input/n average when only the big chunk's own sizing selects
         the pricier large-context candidate."""
-        cat = counterexample_catalog()
+        cat = edge_case_catalog()
         sizes = [20_000, 800, 800, 800]
         total = sum(sizes)
         with env_var("AMBIENT_FALLBACK", None):

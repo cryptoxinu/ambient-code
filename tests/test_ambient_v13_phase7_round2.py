@@ -1,4 +1,4 @@
-"""remediation round 2.
+"""tests.
 
 - H1: ask/code --best-of must never OVER-STATE a saving when samples were
   served by DIFFERENT models (--fallback): the true cost prices EACH
@@ -7,9 +7,9 @@
 - H2: a chat turn's ASSEMBLED request (system + trimmed history + latest)
   must fit the model window before gating/sending — the 2000-char history
   floor must never bill a doomed over-window request.
-- M1: _hook_is_ours requires the EXACT header lines — a foreign hook whose
+- _hook_is_ours requires the EXACT header lines — a foreign hook whose
   line 3 merely shares the installed-by prefix is foreign.
-- M2: an unknown ask --consensus model is a USAGE error — exit 64 on both
+- an unknown ask --consensus model is a USAGE error — exit 64 on both
   the --json and prose paths.
 - LOW: cmd_code's --best-of 0→0.7 temperature bump applies to the
   GENERATION samples only, not the billed distillation passes.
@@ -273,7 +273,7 @@ class ChatAssembledWindowTests(unittest.TestCase):
         self.assertIn("first reply", joined)          # history retained
 
 
-# ------------------------------------------- M1: exact hook-header ownership
+# ------------------------------------------- exact hook-header ownership
 
 def make_git_repo():
     tmp = tempfile.mkdtemp()
@@ -332,7 +332,7 @@ class ExactHookHeaderTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path))
 
 
-# --------------------------------- M2: unknown consensus model exits 64
+# --------------------------------- unknown consensus model exits 64
 
 class ConsensusUnknownModelUsageExitTests(unittest.TestCase):
     def setUp(self):

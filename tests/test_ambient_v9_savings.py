@@ -328,7 +328,7 @@ class TestUsageSavings(unittest.TestCase):
             # new-style record with its own stored ref (1/1) + cost
             {"ts": now, "model": "m/x", "in": 1_000_000, "out": 0,
              "cost": 0.1, "ref": [1.0, 1.0]},
-            # old-style record (pre-Phase-6): no cost, no ref
+            # old-style record (pre-): no cost, no ref
             {"ts": now, "model": "m/x", "in": 1_000_000, "out": 0},
         ]
         cat = [dict(fake_catalog()[0], id="m/x",

@@ -169,7 +169,7 @@ class TestFakeSSE(unittest.TestCase):
 
 
 class TestTransportClassification(unittest.TestCase):
-    """re-verify coverage: the stream_completion error-classification sweep."""
+    """re-verify coverage: the stream_completion error-classification coverage."""
 
     def test_connect_oserror_becomes_networkerror(self):
         # #3: a bare OSError from urlopen (RemoteDisconnected/ConnectionReset

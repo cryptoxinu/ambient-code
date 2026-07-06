@@ -3,7 +3,7 @@
 Hermetic — every test fakes the transport; no network, no live API. Focus:
 (1) RequestSpec is frozen and from_args captures EVERY engine knob with a
 default that matches the engine's old getattr(args, X, D) read exactly
-(default parity is the #1 regression risk of 8b-2); (2) every request
+(default parity is the #1 regression risk of); (2) every request
 variant — retry budget shrink/escalation, --fallback re-derivation, SACRED
 _no_fallback workers, best-of cache salts — is a dataclasses.replace that
 returns a NEW spec and never mutates the original; (3) the engine runs on a

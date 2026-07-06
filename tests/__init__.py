@@ -11,7 +11,7 @@ import os
 
 os.environ.setdefault("AMBIENT_TELEMETRY", "off")
 
-# Capstone H1 makes EVERY lane (including plain ask/code/single-shot audit)
+# makes EVERY lane (including plain ask/code/single-shot audit)
 # fleet-reserve through ~/.config/ambient/reservations.jsonl. Cmd-level tests
 # that aren't about the fleet must not write to (or get refused by) the REAL
 # store on the developer's machine — default the fleet lane off at import

@@ -1,10 +1,10 @@
-"""Hermetic remediation round-2 tests.
+"""Hermetic tests tests.
 
-- M2: a chunked consensus model is priced MAP-ONLY (n_chunks calls per
+- a chunked consensus model is priced MAP-ONLY (n_chunks calls per
   model, not n_chunks*2) — consensus reduces with the deterministic
   findings_reducer, which makes NO synthesis LLM call. The old 2x figure
   spuriously refused batches that actually fit the spend ceiling.
-- M1: under --repo --consensus the machine-readable plan and the consensus
+- under --repo --consensus the machine-readable plan and the consensus
   gate must AGREE BY CONSTRUCTION — one shared estimate helper feeds both,
   and the plan's model field reflects the consensus SET, not the lone
   default model. An invalid consensus id must never yield a misleading

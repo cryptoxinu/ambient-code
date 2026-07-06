@@ -11,9 +11,9 @@
   be rejected (realpath containment), even when the leaf is a regular file.
 - H3: the ABS_MAX_CHARS ceiling bounds the POST-GUTTER size (what is
   actually sent), not the raw byte sizes.
-- M1: the plan/gate input estimate includes the repo map injected into
+- the plan/gate input estimate includes the repo map injected into
   every chunk (map size x chunk count).
-- M2: --repo --consensus explicitly SKIPS the deep pass and says so;
+- --repo --consensus explicitly SKIPS the deep pass and says so;
   --deep/--no-deep are documented no-ops there.
 
 Every test patches complete()/run_map_reduce/safe_catalog; no network, no

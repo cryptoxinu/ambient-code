@@ -468,7 +468,7 @@ class TestConfigKnobs(unittest.TestCase):
 
     def test_reservation_ttl_default_and_override(self):
         # default is generous (1h): on Windows liveness is unknowable, so a
-        # long single job that never re-gates must rarely hit the TTL (H1)
+        # long single job that never re-gates must rarely hit the TTL
         with env_var("AMBIENT_RESERVATION_TTL", None):
             self.assertEqual(amb._reservation_ttl({}), 3600.0)
             self.assertEqual(amb._reservation_ttl(

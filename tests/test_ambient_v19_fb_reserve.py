@@ -114,7 +114,7 @@ def two_alt_catalog():
 
 def crossed_catalog():
     """Crossed price vectors: requested is input-heavy (5.0/1.0), the alt
-    is output-heavy (0.5/20.0) — the mixture counterexample's shape."""
+    is output-heavy (0.5/20.0) — the mixture edge case's shape."""
     return [_mdl("req/x", 200_000, 60_000, False, 5.0, 1.0),
             _mdl("alt/x", 400_000, 60_000, True, 0.5, 20.0)]
 
@@ -322,7 +322,7 @@ class TestMixtureDomination(unittest.TestCase):
                 f"mixture {mask:04b} exceeds the bound reserve")
             worst_exp = max(worst_exp, mix_exp)
             worst_bnd = max(worst_bnd, mix_bnd)
-        # the R2 counterexample is REAL: the worst mixture exceeds
+        # the edge case is REAL: the worst mixture exceeds
         # max(all-requested, all-alt) on these crossed price vectors…
         sum_req = amb.estimate_cost(cat, "req/x", total, len(sizes), mt)
         sum_alt = amb.estimate_cost(cat, "alt/x", total, len(sizes), mt)

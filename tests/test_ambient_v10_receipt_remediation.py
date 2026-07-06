@@ -10,10 +10,10 @@ violation (over-stated saving or under-counted spend):
 - H3: log_usage rounded cost to 6dp and cmd_usage rounded again before
   computing %, so many sub-microdollar calls aggregated as $0 spend and read
   as a fabricated ~100% saving;
-- M1: cmd_usage ignored the stored `est` flag, presenting estimated spend as
+- cmd_usage ignored the stored `est` flag, presenting estimated spend as
   exact;
-- M2: `ambient usage --json` lacked the contractual schema_version:1;
-- M3: locally-estimated usage never landed in body["usage"], so ask/code
+- `ambient usage --json` lacked the contractual schema_version:1;
+- locally-estimated usage never landed in body["usage"], so ask/code
   --json could emit usage:null while the ledger had an estimated record.
 
 Everything is offline: fake catalogs, tempdir ledgers, patched config/env.

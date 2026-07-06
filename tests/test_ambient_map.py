@@ -665,7 +665,7 @@ class _FlushSpyIO(io.StringIO):
 
 
 class TestMapInterruptPrompt(unittest.TestCase):
-    """M5 + Phase-2 MED: Ctrl-C must end the PROCESS promptly. The pool's
+    """M5 + MED: Ctrl-C must end the PROCESS promptly. The pool's
     worker threads are non-daemon, so merely re-raising KeyboardInterrupt
     leaves the interpreter joining an in-flight complete() at exit (up to
     --timeout). cmd_map must flush stdout+stderr and os._exit(130)."""
@@ -733,7 +733,7 @@ class TestMapInterruptPrompt(unittest.TestCase):
 
 
 class TestMapInputCaps(unittest.TestCase):
-    """M6/M7: batch input is bounded — a cumulative total cap while gathering,
+    """M6/batch input is bounded — a cumulative total cap while gathering,
     and a PER-ITEM error (never a silent truncation) for a file bigger than
     the per-item ceiling."""
 
@@ -807,7 +807,7 @@ class TestMapDensityBudget(unittest.TestCase):
 
 
 class TestMapPerItemBudget(unittest.TestCase):
-    """Phase-2 HIGH: each item is budgeted INDEPENDENTLY from its OWN size, so
+    """HIGH: each item is budgeted INDEPENDENTLY from its OWN size, so
     its cache key depends only on (model, prompt, item, its-own-budget, temp,
     response_format) — stable no matter what else is in the batch. A shared
     batch-max budget would re-key (and re-bill) every cached item the moment

@@ -1357,7 +1357,7 @@ def _fs_lock(lock_path, wait_s):
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.write(fd, str(os.getpid()).encode())  # ownership token
         except FileExistsError:
-            # M2: never break-and-enter on mtime age alone — only a
+            # never break-and-enter on mtime age alone — only a
             # PROVABLY-dead owner's lock is reclaimed (checked immediately
             # before the unlink; the O_EXCL create stays the arbiter, so a
             # racing breaker loses the create and re-evaluates the winner's
@@ -1704,7 +1704,7 @@ def cost_gate_soft(catalog, model, input_chars, n_calls, args, conf):
 
 
 def _single_call_gate(catalog, model, input_chars, args, conf):
-    """Capstone H1: cost-gate + FLEET-RESERVE one direct complete() call.
+    """cost-gate + FLEET-RESERVE one direct complete() call.
     The single-call lanes (normal ask, code's final generation, single-shot
     audit) used to spend without any reservation, so a fan-out fleet could
     sit at the AMBIENT_MAX_SPEND ceiling while single calls kept slipping
@@ -1713,7 +1713,7 @@ def _single_call_gate(catalog, model, input_chars, args, conf):
     cmd_* boundary first; an unresolved spec is resolved here through the
     same _resolve_output_budget core) plus the ACTUAL input chars, and
     routes through _gate_amount — inheriting the ceiling, the 3x worst-case
-    bound, the Phase-4 aggregate fleet reservation, the TTY confirm, and
+    bound, the aggregate fleet reservation, the TTY confirm, and
     the --allow-cost bypass, exactly like the sibling fan-out gates.
     PARITY: silent on the allow path — no estimate line, no prompt on a
     non-TTY — so a normal small ask/code/audit call behaves exactly as
@@ -2266,7 +2266,7 @@ def preflight_hint(model, catalog, conf, input_chars=0):
 
 
 def route_model(args, conf, kind, catalog, input_chars=0, phase=None):
-    """The shared Phase-3 command preamble: resolve the model, expand an
+    """The shared command preamble: resolve the model, expand an
     explicit `auto` spec to a concrete READY pick (printed), or print the
     pre-flight advisory for a concrete model. Returns the model to run.
     NEVER changes a concrete model — the hint is information only."""
@@ -2303,7 +2303,7 @@ def resolve_reduce_model(args, conf, map_model, catalog=None):
     When a `catalog` is available: an `auto[:…]` reduce spec resolves to a
     concrete READY pick (printed) instead of being silently dropped, and a
     concrete id is VALIDATED up front so a typo'd --reduce-model / stale
-    map entry fails before any map spend (H1). A degraded/absent catalog
+    map entry fails before any map spend. A degraded/absent catalog
     changes nothing — no false refusals while offline."""
     flag = getattr(args, "reduce_model", None)
     if flag:
@@ -3051,7 +3051,7 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                 delta = ch.get("delta") or {}
                 if delta.get("content"):
                     content.append(delta["content"])
-                    if on_delta is not None:  # D1: live stdout streaming
+                    if on_delta is not None: # live stdout streaming
                         on_delta(delta["content"])
                 # Providers differ: OpenAI-style uses "reasoning_content",
                 # Kimi/others stream "reasoning". Capture BOTH — dropping either
@@ -3240,7 +3240,7 @@ class RequestSpec:
     _auto_budget: bool = False           # getattr(..., False)
     _cache_salt: object = None           # getattr(..., None) — best-of lanes
     escalation_ceiling: int = MAX_AUTO_BUDGET_TOKENS  # getattr default
-    # Capstone re-audit: True (default) = SINGLE-CALL lane — complete()
+    # True (default) = SINGLE-CALL lane — complete()
     # re-gates a live --fallback swap per call (main thread; sys.exit on a
     # refusal is correct). Fan-out workers (map/consensus/best-of) set False:
     # their batch gate already reserved the swap exposure UP FRONT
@@ -3282,7 +3282,7 @@ class AttemptState:
 
     model: str
     messages: list
-    spec: RequestSpec  # per-attempt frozen knobs (replaced per variant, 8b-2)
+    spec: RequestSpec # per-attempt frozen knobs (replaced per variant)
     stall_retried: bool = False
     budget_retried: bool = False
     fallback_retried: bool = False
@@ -3467,7 +3467,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                                 alt_rf = {"type": "json_object"}
                             else:
                                 alt_rf = None
-                        # Capstone H2: the up-front gate priced the
+                        # the up-front gate priced the
                         # REQUESTED model — an opt-in fallback to a pricier
                         # alt would otherwise spend UNRESERVED dollars.
                         # Re-price this attempt at the ALT model (actual
@@ -3477,7 +3477,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                         # spend gate. SACRED is untouched: _no_fallback
                         # blocked the swap long before this, and --fallback
                         # is the user's own opt-in.
-                        # Capstone re-audit: SINGLE-CALL lanes only
+                        # SINGLE-CALL lanes only
                         # (gate_fallback). Fan-out workers reserved the swap
                         # exposure UP FRONT via the fallback-aware batch
                         # gate — re-gating here would max-refresh (not add
@@ -4131,7 +4131,7 @@ def _resolve_parallel(args):
 
 def _reduce_response_format(rf, reduce_profile):
     """Re-gate a response_format request to the REDUCE model's capabilities
-    (H2): a strict json_schema the map model supports can 400 on a reduce
+    a strict json_schema the map model supports can 400 on a reduce
     model that lacks structured_outputs — downgrade per its own features."""
     if not rf:
         return rf
@@ -4148,7 +4148,7 @@ def _reduce_response_format(rf, reduce_profile):
 
 def _map_note(map_system, code_map, n_chunks):
     """The per-chunk system prompt run_map_reduce sends (chunk index patched
-    in per call). Factored out so the best-of audit miss-plan (H3) can
+    in per call). Factored out so the best-of audit miss-plan can
     precompute the SAME salted cache keys the live fan-out will use — key
     parity by construction, never by copy-paste."""
     return (map_system
@@ -4176,7 +4176,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     routes the SYNTHESIS calls to a different model — cheap map, strong
     reduce; default = the map model, byte-identical behavior. When it
     differs and a `catalog` is supplied, the synthesis is sized to the
-    REDUCE model's own window (H2): the hierarchical grouping budget is
+    REDUCE model's own window the hierarchical grouping budget is
     clamped to its single-shot capacity and the synthesis call gets a
     reduce-specific replaced spec (max_tokens/response_format re-derived) — a
     smaller-window reduce model must never receive merge prompts or token
@@ -4238,7 +4238,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
             {"role": "system", "content": system},
             {"role": "user", "content": chunks[i]},
         ]
-        # D7: content-addressed cache — a re-run after a Ctrl-C / failed synthesis
+        # content-addressed cache — a re-run after a Ctrl-C / failed synthesis
         # / PARTIAL exit re-bills only the MISSING chunks, not the whole fan-out.
         # _cache_salt keeps each --best-of sample's chunks in its
         # own cache lane so samples stay independent AND resumable.
@@ -4303,7 +4303,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                 where = f" [{'; '.join(cov)}]" if cov else ""
                 errors.append(f"chunk {i + 1}{where}: {type(err).__name__}: {err}")
             except BaseException:
-                # Capstone re-audit MED: a worker-side FATAL (SystemExit &
+                # a worker-side FATAL (SystemExit &
                 # co) fails the whole fan-out FAST — trip the cancel event
                 # and drop the queue so no sibling starts billing while the
                 # unwind propagates (in-flight calls drain in finally).
@@ -5074,7 +5074,7 @@ def cmd_ask(args, api_key, api_url, conf):
         _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
                       catalog, conf, kind="ask", session=session)
         return
-    # D1: live-stream the answer to stdout on an interactive terminal (not --raw,
+    # live-stream the answer to stdout on an interactive terminal (not --raw,
     # not --json). Reasoning shows as heartbeats first, then the answer streams.
     live_stream = sys.stdout.isatty() and not args.raw and not want_json
     streamed_parts = []
@@ -5084,7 +5084,7 @@ def cmd_ask(args, api_key, api_url, conf):
         sys.stdout.flush()
         streamed_parts.append(piece)
 
-    # Capstone H1: the single-shot ask is real spend — gate + fleet-reserve
+    # the single-shot ask is real spend — gate + fleet-reserve
     # it up front like every fan-out lane (silent pass when under ceiling).
     _single_call_gate(catalog, model,
                       sum(len(m.get("content", "")) for m in messages),
@@ -5329,7 +5329,7 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
                                    getattr(err, "diagnosis", None) or str(err)))
                     continue
                 except BaseException:
-                    # Capstone re-audit MED: any worker-side fatal (incl.
+                    # any worker-side fatal (incl.
                     # SystemExit) fails the batch FAST — no sibling may keep
                     # billing while the unwind propagates.
                     _abort()
@@ -5566,7 +5566,7 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
                 _abort()
                 raise
             except BaseException:
-                # Capstone re-audit MED: worker-side fatal → fail-fast, no
+                # worker-side fatal → fail-fast, no
                 # sibling may keep billing during the unwind.
                 _abort()
                 raise
@@ -5866,7 +5866,7 @@ def cmd_map(args, api_key, api_url, conf):
         # items are arbitrary sizes, and a big item live-switches to a
         # large-context (possibly pricier) candidate that an average-input
         # pick would miss (final re-audit H2). Whether the batch is
-        # auto-budgeted also decides the ALT's own resend budget (H1) —
+        # auto-budgeted also decides the ALT's own resend budget —
         # thread the per-item data on the gate's private args copy (the
         # gate signature stays stable for its many callers).
         gate_args._auto_budget = not explicit_budget
@@ -5884,7 +5884,7 @@ def cmd_map(args, api_key, api_url, conf):
         _emit_map_result(args, api_key, item_id, content=hit, cached=True)
 
     width = min(_resolve_parallel(args), max(1, len(to_run)))
-    # Phase-1 shape: a shared gate around the network call + a cancel_event
+    # shape: a shared gate around the network call + a cancel_event
     # flipped on the first fatal failure so no queued item starts billing
     # while the batch unwinds (re-checked after acquiring any gate slot).
     gate = threading.Semaphore(width)
@@ -5978,7 +5978,7 @@ def cmd_map(args, api_key, api_url, conf):
                                  diagnosis=f"{type(err).__name__}: {err}")
                 continue
             except BaseException:
-                # Capstone re-audit MED: a worker-side fatal (SystemExit &
+                # a worker-side fatal (SystemExit &
                 # co) cancels the whole batch — siblings must stop billing.
                 _abort()
                 raise
@@ -6823,7 +6823,7 @@ def _audit_sample_prep(model, catalog, labeled, sys_prompt, args):
     """Shared prep for ONE audit run: (a, sp, single, chunk, total) — the
     replaced RequestSpec (budget + response_format resolved for THIS model),
     the final system prompt, and the sizing numbers. Used by run_one_audit
-    AND the best-of miss-plan (H3) so precomputed cache keys match the live
+    AND the best-of miss-plan so precomputed cache keys match the live
     call's BY CONSTRUCTION."""
     profile = model_profile(catalog, model)
     single, chunk = profile.single_shot_chars, profile.chunk_chars
@@ -6840,7 +6840,7 @@ def _audit_sample_prep(model, catalog, labeled, sys_prompt, args):
 
 def _audit_single_key(model, sp, labeled, a):
     """Salted content-address for ONE single-shot audit call — shared by
-    run_one_audit's cache lane and the best-of miss-plan (H3)."""
+    run_one_audit's cache lane and the best-of miss-plan."""
     return _cache_key(model, sp, files_block(labeled), a.max_tokens,
                       a.temperature, a.response_format,
                       salt=a._cache_salt)
@@ -6854,7 +6854,7 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
     Each model gets its OWN profile/budget. `gate`/`cancel_event` flow
     through to run_map_reduce so the consensus lane's shared cap and fail-fast
     reach every model's inner fan-out. The single-shot path reads/writes the
-    same salted cache as the chunked fan-out (H3): a re-run — best-of salted
+    same salted cache as the chunked fan-out a re-run — best-of salted
     or not — re-bills only what the cache does not already hold."""
     session = _session_or(session, api_key, api_url, conf)
     api_key, api_url = session.api_key, session.api_url
@@ -6993,7 +6993,7 @@ def _parse_consensus_models(args, catalog, api_key):
                              + (f" (did you mean: {close[0]}?)" if close else ""))
             cmsg = ("unknown consensus model(s): " + ", ".join(hints)
                     + " — nothing was run or billed.")
-            # M2: a bad model id is a USAGE error — exit 64 on BOTH the
+            # a bad model id is a USAGE error — exit 64 on BOTH the
             # --json and prose paths (was: envelope exit_code 1 + a bare
             # sys.exit(string) → 1), matching every other usage refusal.
             _fail_exit(args, "consensus", "usage", cmsg,
@@ -7013,7 +7013,7 @@ def _consensus_estimate(catalog, models, labeled, total,
     consensus audits reduce with the deterministic findings_reducer (NO
     synthesis LLM call), so a chunked model costs n_chunks calls, not
     n_chunks*2, which over-priced every chunked consensus batch 2x into
-    spurious spend/fleet refusals. Capstone H3: each model is
+    spurious spend/fleet refusals. each model is
     priced at the SAME max_tokens its live worker resolves —
     `explicit_max_tokens` is the user's --max-tokens (as the worker specs
     carry it; None = auto) run through the same with_output_budget core
@@ -7076,7 +7076,7 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
     run_map_reduce's own resume lane). Each sample's spec/keys are built
     through the SAME helpers run_one_audit uses (_audit_sample_prep/
     _audit_single_key/_map_note), so a predicted hit here is a real hit
-    there by construction. Capstone H3: sample_max_tokens is the RESOLVED
+    there by construction. sample_max_tokens is the RESOLVED
     budget the live sample runs at (a.max_tokens) — the gate must price
     that exact figure, not the profile default, or a larger explicit
     --max-tokens under-prices the run and weakens the 3x worst-case guard.
@@ -7141,7 +7141,7 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
     elif best_of:
         # Under --best-of the plan prices the FULL K-sample work
         # (_consensus_estimate over [model]*K); the live gate prices only
-        # its cache-missing share (H3) — equal cold, less on a resume.
+        # its cache-missing share — equal cold, less on a resume.
         # Fallback-aware (fb_args): best-of samples may --fallback, and the
         # live gate prices that — plan == gate.
         expected, bound, _parts, chunks_by, assumed = \
@@ -7285,7 +7285,7 @@ def cmd_audit(args, api_key, api_url, conf):
     # Right-size the output budget to the actual work (A1): whole input if it
     # fits single-shot, else a chunk's worth.
     apply_output_budget(args, profile, total if eff_total <= single else chunk)
-    # Capstone H3: what the consensus/best-of worker specs will carry as
+    # what the consensus/best-of worker specs will carry as
     # max_tokens (the user's explicit budget, or None = per-model auto) —
     # threaded into the shared estimates so plan == gate == live.
     explicit_mt = args.max_tokens if explicit_max_tokens else None
@@ -7308,7 +7308,7 @@ def cmd_audit(args, api_key, api_url, conf):
                          conf=conf)
 
     if getattr(args, "dry_run", False):
-        # D6: preview using the SAME sizing functions, then exit without a call.
+        # preview using the SAME sizing functions, then exit without a call.
         one_pass = eff_total <= single
         structured_preview = args.format in ("json", "report")
         if consensus_models:
@@ -7332,7 +7332,7 @@ def cmd_audit(args, api_key, api_url, conf):
         # that makes NO synthesis call.
         if best_of_k:
             # The plan prices the FULL K-sample work; the live gate then
-            # prices only the cache-missing share of it (H3) — equal on a
+            # prices only the cache-missing share of it — equal on a
             # cold cache, strictly less on a resume, never more.
             expected, bound, _parts, chunks_by, assumed = _consensus_estimate(
                 catalog, [model] * best_of_k, labeled, total, explicit_mt,
@@ -7357,7 +7357,7 @@ def cmd_audit(args, api_key, api_url, conf):
         return
 
     if consensus_models:
-        # D8: run the same audit on several models; rank findings corroborated by
+        # run the same audit on several models; rank findings corroborated by
         # 2+ models first. Usually only ~2 models are READY at once — be honest.
         # (The set was parsed + validated above, BEFORE the plan printed.)
         models = consensus_models
@@ -7387,22 +7387,22 @@ def cmd_audit(args, api_key, api_url, conf):
         _gate_amount(expected_sum, args, conf, bound=bound_sum)
         agg = []
         failed = []
-        # R4: each model derives its OWN profile budget — args.max_tokens was
+        # each model derives its OWN profile budget — args.max_tokens was
         # resolved for the DEFAULT model above, and inheriting that number
         # would mis-budget every other model in the set. An explicit
         # --max-tokens from the user still applies to all of them.
         # SACRED: the --consensus set IS the user's model choice —
         # --fallback/AMBIENT_FALLBACK must never substitute a member. A
         # workerless model is reported as ITS OWN failure below. The worker
-        # spec is a frozen REPLACE (8b-2), never a mutated args copy.
+        # spec is a frozen REPLACE, never a mutated args copy.
         worker_spec = dataclasses.replace(
             RequestSpec.from_args(args), _no_fallback=True,
             max_tokens=args.max_tokens if explicit_max_tokens else None)
-        # R1: ONE shared gate caps TOTAL concurrent network calls across every
+        # ONE shared gate caps TOTAL concurrent network calls across every
         # model's inner fan-out at the resolved width — without it N models ×
         # N chunks each = width² simultaneous calls (bounded).
         gate = threading.Semaphore(_resolve_parallel(args))
-        # R2: flipped on the first fatal error / Ctrl-C so every sibling's
+        # flipped on the first fatal error / Ctrl-C so every sibling's
         # map-reduce stops STARTING chunks — billing must not continue while
         # the consensus unwinds.
         cancel_event = threading.Event()
@@ -7458,7 +7458,7 @@ def cmd_audit(args, api_key, api_url, conf):
                     # model order, preserving the sequential lane's semantics.
                     worker_errs[i] = err
                 except BaseException:
-                    # Capstone re-audit MED: worker-side fatal → fail-fast,
+                    # worker-side fatal → fail-fast,
                     # no sibling model may keep billing during the unwind.
                     _abort_consensus()
                     raise
@@ -7573,7 +7573,7 @@ def cmd_audit(args, api_key, api_url, conf):
             for n_calls_m, in_chars_m, mt_m, sizes_m in miss_plans:
                 if not n_calls_m:
                     continue
-                # Capstone H3: price each sample at ITS resolved budget
+                # price each sample at ITS resolved budget
                 # (the same a.max_tokens the live run sends) — never the
                 # profile default, which under-priced a larger explicit
                 # --max-tokens and weakened the 3x worst-case guard.
@@ -7603,7 +7603,7 @@ def cmd_audit(args, api_key, api_url, conf):
         def _one_sample(i):
             print(f"ambient: best-of — audit sample {i + 1}/{best_of_k}…",
                   file=sys.stderr)
-            # per-sample cache lane (resume) via frozen replace (8b-2);
+            # per-sample cache lane (resume) via frozen replace;
             # run_one_audit re-derives the budget per profile when auto.
             # gate_fallback=False: FAN-OUT worker — the batch gate above
             # reserved any --fallback swap exposure up front.
@@ -7643,7 +7643,7 @@ def cmd_audit(args, api_key, api_url, conf):
                 except Exception as err:  # noqa: BLE001 — re-raised below
                     worker_errs[i] = err
                 except BaseException:
-                    # Capstone re-audit MED: worker-side fatal → fail-fast,
+                    # worker-side fatal → fail-fast,
                     # no sibling sample may keep billing during the unwind.
                     _abort_best_of()
                     raise
@@ -7769,7 +7769,7 @@ def cmd_audit(args, api_key, api_url, conf):
                           None, model)
 
     if eff_total <= single:
-        # Capstone H1: a single audit pass of ANY size is real spend — gate
+        # a single audit pass of ANY size is real spend — gate
         # + fleet-reserve it unconditionally (the old >150k-chars-only
         # cost_gate exception let every smaller single-shot audit spend
         # outside the aggregate AMBIENT_MAX_SPEND ceiling). Silent pass when
@@ -7968,14 +7968,14 @@ def cmd_code(args, api_key, api_url, conf):
     ]
     # 7a: --best-of applies to the final GENERATION call only (any brief/
     # context distillation above stays a single pass — sampling diversity
-    # buys nothing on extraction). Validated at the TOP of cmd_code (H2);
+    # buys nothing on extraction). Validated at the TOP of cmd_code;
     # the diversity temperature applies HERE only.
     if best_of_k:
         args.temperature = best_of_temp
         _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
                       catalog, conf, kind="code", session=session)
         return
-    # Capstone H1: the final generation call is real spend — gate +
+    # the final generation call is real spend — gate +
     # fleet-reserve it up front like every fan-out lane (silent pass when
     # under ceiling; any distillation passes above ran their own gates).
     _single_call_gate(catalog, model,
@@ -7988,7 +7988,7 @@ def cmd_code(args, api_key, api_url, conf):
 # --------------------------------------------------------------------------
 # `ambient chat` — native REPL. A readline loop over the SAME
 # complete()/stream/redact/model_profile machinery as `ask`: rolling in-memory
-# history trimmed to the model window, streamed replies, a Phase-6 cost/
+# history trimmed to the model window, streamed replies, a cost/
 # savings receipt after every turn, and per-turn cost gating + fleet
 # reservation. Nothing is persisted; the key is never printed (redact).
 
@@ -8097,7 +8097,7 @@ def cmd_chat(args, api_key, api_url, conf):
                 else:
                     note_if_hidden(spec, conf, source="/model")
                     model = spec
-                    model_pinned = True   # concrete choice — SACRED (H4)
+                    model_pinned = True # concrete choice — SACRED
                     print(f"ambient: model → {model}", file=sys.stderr)
                 continue
             print(f"ambient: unknown command {cmd} — /help", file=sys.stderr)
@@ -8106,7 +8106,7 @@ def cmd_chat(args, api_key, api_url, conf):
         profile = model_profile(catalog, model)
         sys_len = len(getattr(args, "system", None) or "")
         if sys_len + len(line) > profile.single_shot_chars:
-            # M1: even with ALL history dropped this turn cannot fit the
+            # even with ALL history dropped this turn cannot fit the
             # model's window — refuse it cleanly BEFORE gating or billing
             # (a floored budget would silently overflow context). The REPL
             # survives; nothing was sent and history is unchanged.
@@ -8135,8 +8135,8 @@ def cmd_chat(args, api_key, api_url, conf):
         messages = ([{"role": "system", "content": args.system}]
                     if getattr(args, "system", None) else []) \
             + history + [{"role": "user", "content": line}]
-        # SACRED (H4): a /model-pinned turn never falls back to another
-        # model. The turn rides a frozen replaced spec (8b-2): max_tokens
+        # SACRED a /model-pinned turn never falls back to another
+        # model. The turn rides a frozen replaced spec: max_tokens
         # re-derived for THIS turn's size unless the user set it explicitly.
         turn_spec = dataclasses.replace(
             RequestSpec.from_args(args), _no_fallback=model_pinned,
@@ -8195,7 +8195,7 @@ def cmd_chat(args, api_key, api_url, conf):
         if usage:
             served = body.get("_served_model", model) \
                 if isinstance(body, dict) else model
-            # Phase-6 per-turn receipt: cost + vs-frontier saving.
+            # per-turn receipt: cost + vs-frontier saving.
             print(f"[ambient {served} | in={usage.get('prompt_tokens')} "
                   f"out={usage.get('completion_tokens')} tokens"
                   f"{savings_note(served, usage, catalog, conf)}]",
