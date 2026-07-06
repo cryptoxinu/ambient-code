@@ -96,7 +96,7 @@ def _mdl(mid, ctx, max_out, ready, price_in, price_out):
             "pricing": {"input": price_in, "output": price_out}}
 
 
-def codex_catalog():
+def counterexample_catalog():
     """The an unready cheap requested model, a
     CHEAP small-context candidate that fits the 10k-char averaged pseudo-call
     (10_000/3.2 = 3125 tok <= 4000) but NOT a real 20k-char map chunk
@@ -124,11 +124,11 @@ def _fb_ctx():
 # (a) the the reserve must cover the REAL map fallbacks
 # --------------------------------------------------------------------------
 
-class TestCodexCounterexample(unittest.TestCase):
+class TestSpendCounterexample(unittest.TestCase):
     def test_fixture_candidates_split_by_size(self):
         """Sanity: the averaged pseudo-call picks the cheap alt; each REAL
         20k map chunk can only fall back to the pricier big-context one."""
-        cat = codex_catalog()
+        cat = counterexample_catalog()
         a = ns(fallback=True)
         pseudo = INPUT / (N * 2)  # the old delegated per-call average
         with env_var("AMBIENT_FALLBACK", None):
@@ -142,7 +142,7 @@ class TestCodexCounterexample(unittest.TestCase):
     def test_reserve_covers_the_real_map_fallback_spend(self):
         """The per-chunk reserve must be >= the 4 real map-call fallbacks
         (~$0.77 exp / ~$1.01 bound) — not the ~$0.045 averaged figure."""
-        cat = codex_catalog()
+        cat = counterexample_catalog()
         with env_var("AMBIENT_FALLBACK", None):
             fb = amb.estimate_cost_mr_fb(
                 cat, "req/pro", None, INPUT, N, MT, ns(fallback=True), {},
@@ -176,7 +176,7 @@ class TestCodexCounterexample(unittest.TestCase):
         """cost_gate_mr must refuse at a $0.30 ceiling: the old averaged
         figure (~$0.045) sailed under it while the live run could legally
         spend ~$0.77+ on map fallbacks alone."""
-        cat = codex_catalog()
+        cat = counterexample_catalog()
 
         def gate(fallback):
             with env_var("AMBIENT_FALLBACK", None), \
@@ -193,7 +193,7 @@ class TestCodexCounterexample(unittest.TestCase):
         gate(fallback=False)  # control: no fallback exposure — pennies, runs
 
     def test_gate_allows_with_a_ceiling_above_the_true_reserve(self):
-        cat = codex_catalog()
+        cat = counterexample_catalog()
         with env_var("AMBIENT_FALLBACK", None), \
                 env_var("AMBIENT_MAX_SPEND", "50"), \
                 env_var("AMBIENT_FLEET_BUDGET", "off"), \
@@ -216,7 +216,7 @@ class TestMixtureDomination(unittest.TestCase):
         small/alt), every 2^4 x 2^4 map/synthesis fallback mixture priced
         per the estimate's own lane decomposition — none may exceed the
         reserve."""
-        cat = codex_catalog()
+        cat = counterexample_catalog()
         total = sum(self.SIZES)
         a = ns(fallback=True)
         with env_var("AMBIENT_FALLBACK", None):
@@ -260,7 +260,7 @@ class TestMixtureDomination(unittest.TestCase):
         """Threading the REAL chunk list must reserve strictly more than the
         uniform input/n average when only the big chunk's own sizing selects
         the pricier large-context candidate."""
-        cat = codex_catalog()
+        cat = counterexample_catalog()
         sizes = [20_000, 800, 800, 800]
         total = sum(sizes)
         with env_var("AMBIENT_FALLBACK", None):

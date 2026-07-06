@@ -4,7 +4,7 @@
 # a key-leak tripwire, and pathological-input robustness checks — all under a
 # SANDBOX HOME so the operator's real config is never touched.
 #
-# Usage:  bash tools/stress_test.sh                 # full battery (spends ~a few $)
+# Usage:  bash tools/stress_test.sh                 # full battery (spends a small amount of Ambient credit)
 #         AMB_NO_LIVE=1 bash tools/stress_test.sh   # offline checks only (no spend)
 #         AMB=/path/to/bin/ambient bash tools/stress_test.sh
 set -u
@@ -185,7 +185,7 @@ jassert "$OUT" "d['content'].strip()=='OK' and d['status']=='ok' and d['schema_v
 AMBIENT_API_KEY="$KEY" "$AMB" ask "Reply with exactly: PIPEONCE" --yes </dev/null 2>>"$LOG" | tee "$WORK/pipe.txt" >> "$LOG"
 N=$(grep -c "PIPEONCE" "$WORK/pipe.txt" 2>/dev/null || echo 0)
 [ "$N" -eq 1 ] && pass "piped ask prints exactly once" || fail "piped-once" "count=$N"
-# Grep the pty capture FILE — piping `script`'s stdout is flaky headless (macOS).
+# Grep the pty capture FILE — piping `script`'s stdout is unreliable headless (macOS).
 AMBIENT_API_KEY="$KEY" script -q "$WORK/tty.txt" "$AMB" ask "Reply with exactly: STREAMOK" </dev/null >/dev/null 2>&1
 cat "$WORK/tty.txt" >> "$LOG" 2>/dev/null || true
 N=$(grep -c "STREAMOK" "$WORK/tty.txt" 2>/dev/null || echo 0)

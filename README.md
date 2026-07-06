@@ -141,7 +141,7 @@ claim, estimated token counts are labeled `(est.)`, the saved-% is rounded
 down, and a model pricier than the reference reads "costlier", not a fake
 saving. Each metering record also stores the run cost and the reference
 price in force at call time, so `ambient usage` reports historical savings
-per model and in total (`$` and `%`; `--json` adds `reference_price`,
+per model and in total (relative `%`; `--json` adds `reference_price`,
 `frontier_cost`, `saved`) accurately even if you change the reference later;
 records that predate stored references fall back to the current one with an
 explicit "(approx)" note. One honest gap: `ambient agent` hands off to an

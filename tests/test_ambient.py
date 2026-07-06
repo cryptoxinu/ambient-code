@@ -370,7 +370,7 @@ class TestRetryAfter(unittest.TestCase):
 
 class TestUsageMetering(unittest.TestCase):
     def test_estimates_usage_when_backend_omits_it(self):
-        # Live-probe finding: Ambient's stream often omits a usage object, so
+        # Ambient's stream often omits a usage object, so
         # metering was blind. complete() must estimate + record instead.
         d = tempfile.mkdtemp()
         orig_u, orig_s = amb.USAGE_PATH, amb.stream_completion

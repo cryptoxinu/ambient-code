@@ -6,7 +6,7 @@ before shipping.
 ## How to run
 
 ```bash
-# full battery (spends a few $ of Ambient credit; sandbox HOME, real key from
+# full battery (spends a small amount of Ambient credit; sandbox HOME, real key from
 # the OS keychain — the operator's own config is never touched)
 bash tools/stress_test.sh
 
