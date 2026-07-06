@@ -107,16 +107,19 @@ EXIT_UNCONFIGURED = 3
 EXIT_USAGE = 64
 # Terminal-injection guard: model output comes from anonymous, untrusted remote nodes on a
 # decentralized network. Strip ANSI/OSC/DCS escapes and stray C0 controls
-# (keeping \n and \t) before anything model-derived reaches a terminal —
+# (keeping only \n and \t) before anything model-derived reaches a terminal —
 # otherwise a poisoned reply can rewrite verdicts, spoof the PARTIAL banner,
-# or fire OSC-52 clipboard writes. AMBIENT_NO_SANITIZE=1 = debug escape hatch.
+# or fire OSC-52 clipboard writes. Carriage return (\x0d) is stripped too: a bare
+# CR moves the cursor to column 0 and lets model output overwrite the current
+# line (spoofing a verdict/banner/receipt). AMBIENT_NO_SANITIZE=1 = debug escape hatch.
 ANSI_RE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]"          # CSI
     r"|\][^\x07\x1b]*(?:\x07|\x1b\\)?"      # OSC (incl. unterminated)
     r"|[PX^_][^\x1b]*(?:\x1b\\)?"           # DCS/SOS/PM/APC
     r"|[@-Z\\-_=><~])"                      # two-char sequences
 )
-CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Strips C0 controls 0x00-0x08 and 0x0b-0x1f (incl. \x0d CR) plus DEL; keeps only \t (0x09) and \n (0x0a).
+CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 # Kimi is the default for BOTH lanes; GLM-5.2 stays fully selectable
 # (`ambient use z-ai/glm-5.2 --chat`).
 DEFAULT_MODEL = "moonshotai/kimi-k2.7-code"
@@ -2775,9 +2778,17 @@ def _cache_put(key, text):
         _private_dir(CACHE_DIR)
         entries = os.listdir(CACHE_DIR)
         if len(entries) > CACHE_MAX_FILES:  # prune oldest ~10%
+            def _mtime(p):
+                # A sibling process can delete p between exists() and stat();
+                # swallow the race so one FileNotFoundError inside sorted()
+                # can't abort the whole _cache_put and drop this new entry.
+                try:
+                    return os.stat(p).st_mtime
+                except OSError:
+                    return 0.0
             paths = sorted(
                 (os.path.join(CACHE_DIR, e) for e in entries),
-                key=lambda p: os.stat(p).st_mtime if os.path.exists(p) else 0)
+                key=_mtime)
             for p in paths[:len(paths) // 10 + 1]:
                 try:
                     os.unlink(p)
@@ -6138,9 +6149,11 @@ SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
 
 def _finding_sig(f):
-    """(file-basename, line, title words) — the identity used to match the
-    same bug reported by different chunks/models."""
-    path = os.path.basename(str(f.get("file", ""))).lower()
+    """(normalized-relative-path, line, title words) — the identity used to
+    match the same bug reported by different chunks/models. Keyed on the full
+    path, NOT the basename: src/utils.py and tests/utils.py are distinct files
+    and must not collapse into one finding (which silently drops the other)."""
+    path = str(f.get("file", "")).strip().replace("\\", "/").lstrip("./").lower()
     try:
         line = int(f.get("line") or 0)
     except (TypeError, ValueError):
@@ -7317,6 +7330,21 @@ def cmd_audit(args, api_key, api_url, conf):
             # the lone default model.
             expected, bound, _parts, chunks_by, assumed = _consensus_estimate(
                 catalog, consensus_models, labeled, total, explicit_mt)
+            if structured_preview:
+                # --json/--report must ALWAYS emit valid JSON, never prose —
+                # a plan object mirroring _print_repo_plan's dry-run shape.
+                plan = {"schema_version": 1, "kind": "audit", "status": "plan",
+                        "dry_run": True,
+                        "model": "consensus:" + ",".join(consensus_models),
+                        "consensus": list(consensus_models),
+                        "input_chars": total, "items": len(labeled),
+                        "n_chunks": sum(chunks_by.values()),
+                        "n_chunks_by_model": chunks_by,
+                        "est_cost": round(expected, 4),
+                        "est_bound": round(bound, 4),
+                        "assumed_pricing": assumed}
+                print(redact(json.dumps(plan, separators=(",", ":")), api_key))
+                return
             print("ambient audit plan (dry run — nothing sent):")
             print(f"  models:       consensus: {', '.join(consensus_models)}")
             print(f"  input:        {total:,} chars across "
@@ -7343,6 +7371,24 @@ def cmd_audit(args, api_key, api_url, conf):
                 catalog, model, reduce_model, labeled, total, eff_total,
                 profile, dens, args.max_tokens, structured_preview,
                 fb_args=args, fb_conf=conf)
+        if structured_preview:
+            # --json/--report must ALWAYS emit valid JSON, never prose —
+            # a plan object mirroring _print_repo_plan's dry-run shape.
+            plan = {"schema_version": 1, "kind": "audit", "status": "plan",
+                    "dry_run": True, "model": model,
+                    "input_chars": total, "items": len(labeled),
+                    "one_pass": one_pass,
+                    "n_chunks": 1 if one_pass else n_chunks,
+                    "output_budget": args.max_tokens,
+                    "est_cost": round(expected, 4),
+                    "est_bound": round(bound, 4),
+                    "assumed_pricing": assumed}
+            if best_of_k:
+                plan["best_of"] = best_of_k
+            if not one_pass and reduce_model != model:
+                plan["reduce_model"] = reduce_model
+            print(redact(json.dumps(plan, separators=(",", ":")), api_key))
+            return
         print("ambient audit plan (dry run — nothing sent):")
         print(f"  model:        {model} ({'reasoning' if profile.is_reasoning else 'direct'})")
         if best_of_k:
@@ -8454,25 +8500,36 @@ def cmd_build(args, api_key, api_url, conf):
     # contents to the network. A flag that says "nothing sent" must send nothing.
     if getattr(args, "dry_run", False):
         gen_calls = max(2, args.max_files // 4 + 2)
+        # Each live generation call re-sends the FULL prompt: task + context +
+        # plan_overview + a ~2000-char scaffold (see the live gate below). The
+        # dry-run can't know plan_overview (it's model-generated at plan time),
+        # but it MUST include the context and the fixed overhead, or the preview
+        # under-prices what the live gate will actually reserve. In the distill
+        # case the generation calls send the DISTILLED context, which the live
+        # lane caps at ~single//2, so estimate with that ceiling.
+        GEN_OVERHEAD = 2000
         if needs_distill:
             # The distillation lane is priced by the SAME split helper the
             # live cost_gate_mr below uses (M2) — same chunk count, same +1
-            # generation call; the remaining generation calls are priced on
-            # the task at the map model.
+            # generation call. The remaining generation calls each re-send the
+            # distilled context (capped at ~single//2) + task + overhead.
+            gen_ctx = min(len(context), single // 2)
+            gen_call_chars = len(task) + gen_ctx + GEN_OVERHEAD
             expected, bound, assumed = estimate_cost_mr_fb(
                 catalog, model, reduce_model, len(context), len(packed),
                 args.max_tokens, args, conf, extra_calls=1,
                 per_call_chars=[len(c) for c in packed])
             e_g, b_g, a_g = estimate_cost_fb(
-                catalog, model, len(task), gen_calls - 1, args.max_tokens,
-                args, conf, per_call_chars=[len(task)] * (gen_calls - 1))
+                catalog, model, gen_call_chars, gen_calls - 1, args.max_tokens,
+                args, conf, per_call_chars=[gen_call_chars] * (gen_calls - 1))
             expected, bound = expected + e_g, bound + b_g
             assumed = assumed or a_g
         else:
+            gen_call_chars = len(task) + len(context) + GEN_OVERHEAD
             expected, bound, assumed = estimate_cost_fb(
-                catalog, model, len(task) + len(context), gen_calls,
+                catalog, model, gen_call_chars, gen_calls,
                 args.max_tokens, args, conf,
-                per_call_chars=[len(task) + len(context)] * gen_calls)
+                per_call_chars=[gen_call_chars] * gen_calls)
         print("ambient build plan (dry run — nothing sent):")
         print(f"  model:         {model} "
               f"({'reasoning' if profile.is_reasoning else 'direct'})")
@@ -9327,9 +9384,17 @@ def cmd_usage(args):
                 if not line.strip():
                     continue
                 try:
-                    records.append(json.loads(line))  # skip corrupt lines
+                    rec = json.loads(line)
                 except json.JSONDecodeError:
                     bad += 1
+                    continue
+                # A well-formed non-object line (e.g. `42`, `"x"`, `[...]`)
+                # parses cleanly but has no .get — treat it as corrupt too,
+                # rather than crashing the summary with AttributeError.
+                if not isinstance(rec, dict):
+                    bad += 1
+                    continue
+                records.append(rec)
     except FileNotFoundError:
         sys.exit("ambient: no usage recorded yet")
     except OSError as err:
@@ -9651,14 +9716,25 @@ def ensure_opencode_config(api_url, model):
     try:
         # Atomic write so a mid-write failure can't destroy the user's existing
         # opencode config with its custom providers (Ambient self-audit #2).
+        # This file may hold OTHER providers' literal API keys, so preserve its
+        # restrictive mode across the rewrite: a fresh tmp defaults to the umask
+        # (often 0644), and os.replace would hand that mode to the destination,
+        # silently widening a previously 0600 config to world/group-readable.
         conf_dir = os.path.dirname(OPENCODE_CONFIG_PATH)
         os.makedirs(conf_dir, exist_ok=True)
+        try:
+            orig_mode = os.stat(OPENCODE_CONFIG_PATH).st_mode & 0o777
+        except OSError:
+            orig_mode = 0o600  # new file → secret-safe default, not the umask
         tmp = OPENCODE_CONFIG_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        # Create the tmp restrictively so the key is never even briefly exposed.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, OPENCODE_CONFIG_PATH)
+        os.chmod(OPENCODE_CONFIG_PATH, orig_mode)
         print(
             f"ambient: wrote opencode provider config → {OPENCODE_CONFIG_PATH}",
             file=sys.stderr,
@@ -10273,7 +10349,12 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == "setup":
         for tok in sys.argv[2:]:
             if tok.startswith("-"):
-                continue
+                # A bare flag is safe, but `--key=sk-...` smuggles the secret
+                # inside the token; inspect the value after the first '=' too,
+                # else argparse echoes it in its 'unrecognized arguments' error.
+                if "=" not in tok:
+                    continue
+                tok = tok.split("=", 1)[1]
             if (len(tok) >= 20 and re.fullmatch(r"[A-Za-z0-9_.\-]{20,}", tok)) \
                     or any(p.search(tok) for p in SECRET_PATTERNS):
                 sys.exit(
