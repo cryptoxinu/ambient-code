@@ -191,5 +191,57 @@ class TestA9GitDiffFromSubdirectory(unittest.TestCase):
         self.assertTrue(any("main.py" in lbl for lbl, _t in labeled))
 
 
+# --------------------------------------------------- Phase 4: config/onboard
+
+class TestA6OpencodeConfigTmpRace(unittest.TestCase):
+    """A6: ensure_opencode_config must use a pid-unique tmp (so concurrent
+    writers can't share one .tmp inode) AND preserve a 0600 config's mode."""
+
+    def test_write_preserves_600_and_leaves_no_stray_tmp(self):
+        import io
+        import stat
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            cfg = os.path.join(d, "opencode.json")
+            with open(cfg, "w") as fh:
+                fh.write('{"provider": {"openai": {"options": '
+                         '{"apiKey": "sk-secret"}}}}')
+            os.chmod(cfg, 0o600)
+            with _patch_attr(amb, "OPENCODE_CONFIG_PATH", cfg), \
+                    _patch_attr(sys, "stderr", io.StringIO()):
+                amb.ensure_opencode_config("https://api.example", "some/model")
+            mode = stat.S_IMODE(os.stat(cfg).st_mode)
+            self.assertEqual(mode, 0o600, f"mode widened to {oct(mode)}")
+            strays = [f for f in os.listdir(d) if ".tmp" in f]
+            self.assertEqual(strays, [], f"stray tmp left: {strays}")
+
+    def test_tmp_name_is_pid_unique(self):
+        # the tmp path embeds the pid so two processes never collide
+        self.assertIn(str(os.getpid()),
+                      amb.OPENCODE_CONFIG_PATH + f".tmp-{os.getpid()}-1")
+
+
+class TestA13OnboardingNotBlockedByUrlCheck(unittest.TestCase):
+    """A13: a first-run user with a custom AMBIENT_API_URL but NO key must
+    reach onboarding (exit UNCONFIGURED), not be blocked by the key-exfil URL
+    refusal for a key that does not exist yet."""
+
+    def test_keyless_custom_url_reaches_unconfigured_not_url_refusal(self):
+        import io
+        import sys
+        env = {k: v for k, v in os.environ.items()}
+        env["AMBIENT_API_URL"] = "https://not-ambient.example.com"
+        env["AMBIENT_NO_ONBOARD"] = "1"   # force non-interactive path
+        with _patch_attr(amb, "read_config_file", lambda: {}), \
+                _patch_attr(amb, "resolve_key_and_backend",
+                            lambda conf: (None, None)), \
+                _patch_attr(amb.os, "environ", env), \
+                _patch_attr(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                amb.load_config()
+        # EXIT_UNCONFIGURED (onboarding path), NOT the URL-refusal exit
+        self.assertEqual(cm.exception.code, amb.EXIT_UNCONFIGURED)
+
+
 if __name__ == "__main__":
     unittest.main()

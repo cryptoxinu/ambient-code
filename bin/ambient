@@ -486,9 +486,12 @@ def load_config():
     code and never hang."""
     conf = read_config_file()
     api_key, _ = resolve_key_and_backend(conf)
-    api_url = resolve_api_url(conf)
     if api_key:
-        return api_key, api_url, conf
+        # A13: validate the URL only when a key EXISTS to protect. A first-run
+        # user with a custom AMBIENT_API_URL but no key must reach onboarding
+        # below — not be blocked by the key-exfil refusal for a key that does
+        # not exist yet (the refusal fires again, correctly, once a key is set).
+        return api_key, resolve_api_url(conf), conf
     # stdout.isatty matters too: `ambient ask --json > out.json` on a first
     # run must NOT interleave the setup preamble/welcome panel into the
     # captured file — a redirected first run gets exit 3.
@@ -9827,6 +9830,7 @@ def ensure_opencode_config(api_url, model):
                         "apiKey": "{env:AMBIENT_API_KEY}"},
             "models": {model: {"name": model}},
         }
+    tmp = None
     try:
         # Atomic write so a mid-write failure can't destroy the user's existing
         # opencode config with its custom providers.
@@ -9840,7 +9844,11 @@ def ensure_opencode_config(api_url, model):
             orig_mode = os.stat(OPENCODE_CONFIG_PATH).st_mode & 0o777
         except OSError:
             orig_mode = 0o600  # new file → secret-safe default, not the umask
-        tmp = OPENCODE_CONFIG_PATH + ".tmp"
+        # A6: pid+time-unique tmp (matching the vault helper's convention) so
+        # two concurrent writers never share one `.tmp` inode — a fixed name let
+        # process B's O_TRUNC clobber A's in-flight write, and the interleaved
+        # bytes could land as corrupt JSON or drop a provider on os.replace.
+        tmp = OPENCODE_CONFIG_PATH + f".tmp-{os.getpid()}-{time.time_ns()}"
         # Create the tmp restrictively so the key is never even briefly exposed.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -9854,6 +9862,11 @@ def ensure_opencode_config(api_url, model):
             file=sys.stderr,
         )
     except OSError as err:
+        # A unique tmp name won't be reused, so clean up a stray on failure
+        # (a fixed name was harmlessly overwritten next run).
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
         print(f"ambient: could not write opencode config ({err})", file=sys.stderr)
 
 
