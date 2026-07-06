@@ -3958,9 +3958,9 @@ def read_files(paths):
         except OSError as err:
             print(f"ambient: skipping {path} ({err})", file=sys.stderr)
             continue
-        if b"\x00" in raw[:8192]:
+        if b"\x00" in raw:   # L11: a NUL ANYWHERE marks binary (was only [:8192],
             print(f"ambient: skipping {path} (looks binary)", file=sys.stderr)
-            continue
+            continue         # so a text-headed binary slipped through as garbage)
         text = raw.decode("utf-8", errors="replace")
         total += len(text)
         if total > ABS_MAX_CHARS:
@@ -4304,6 +4304,12 @@ def _reduce_response_format(rf, reduce_profile):
     return rf
 
 
+# L13: a distinctive sentinel for the per-chunk index — collision-safe, unlike
+# the old literal "{i}" which corrupted a user system prompt / code map that
+# happened to contain "{i}". Always substituted before the note is sent/hashed.
+_CHUNK_IDX_TOKEN = "AMBIENT_CHUNK_INDEX"
+
+
 def _map_note(map_system, code_map, n_chunks):
     """The per-chunk system prompt run_map_reduce sends (chunk index patched
     in per call). Factored out so the best-of audit miss-plan can
@@ -4311,9 +4317,9 @@ def _map_note(map_system, code_map, n_chunks):
     parity by construction, never by copy-paste."""
     return (map_system
             + (f"\n\n{code_map}" if code_map else "")
-            + f"\n\n(You are seeing chunk {{i}} of {n_chunks} of a larger "
-            "input. File boundaries may be split across chunks — flag suspected "
-            "split artifacts as such instead of guessing.)")
+            + f"\n\n(You are seeing chunk {_CHUNK_IDX_TOKEN} of {n_chunks} of a "
+            "larger input. File boundaries may be split across chunks — flag "
+            "suspected split artifacts as such instead of guessing.)")
 
 
 def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
@@ -4393,7 +4399,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
             # whose result gets discarded anyway.
             raise ChatError("cancelled",
                             "fan-out cancelled before this chunk started")
-        system = map_note.replace("{i}", str(i + 1))
+        system = map_note.replace(_CHUNK_IDX_TOKEN, str(i + 1))
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": chunks[i]},
@@ -6332,8 +6338,11 @@ def _finding_sig(f):
     """(normalized-relative-path, line, title words) — the identity used to
     match the same bug reported by different chunks/models. Keyed on the full
     path, NOT the basename: src/utils.py and tests/utils.py are distinct files
-    and must not collapse into one finding (which silently drops the other)."""
-    path = str(f.get("file", "")).strip().replace("\\", "/").lstrip("./").lower()
+    and must not collapse into one finding (which silently drops the other).
+    Path case is PRESERVED (L23): case-folding merged case-distinct files on a
+    case-sensitive filesystem and dropped a real finding — a duplicate on a
+    case-insensitive FS is the safer failure than lost coverage."""
+    path = str(f.get("file", "")).strip().replace("\\", "/").lstrip("./")
     try:
         line = int(f.get("line") or 0)
     except (TypeError, ValueError):
@@ -6372,12 +6381,15 @@ def dedupe_findings(findings):
             kept.append(((path, line, title), f))
             continue
         prev = slot[1]
-        best = prev
-        if SEVERITY_ORDER.get(f.get("severity"), 9) < \
-                SEVERITY_ORDER.get(prev.get("severity"), 9):
-            best = f
-        if len(str(f.get("scenario", ""))) > len(str(best.get("scenario", ""))):
-            best = {**best, "scenario": f.get("scenario")}
+        best = f if (SEVERITY_ORDER.get(f.get("severity"), 9) <
+                     SEVERITY_ORDER.get(prev.get("severity"), 9)) else prev
+        # M36: keep the richest scenario from EITHER report. The old code only
+        # grafted f's scenario onto `best`, so escalating the severity to `f`
+        # (best=f) silently discarded prev's longer scenario.
+        richest = max(prev, f, key=lambda x: len(str(x.get("scenario", ""))))
+        if len(str(richest.get("scenario", ""))) > \
+                len(str(best.get("scenario", ""))):
+            best = {**best, "scenario": richest.get("scenario", "")}
         kept[kept.index(slot)] = (slot[0], best)
     result = [f for _, f in kept]
     result.sort(key=lambda f: SEVERITY_ORDER.get(f.get("severity"), 9))
@@ -6799,8 +6811,8 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
     messages = [{"role": "system", "content": sp},
                 {"role": "user", "content": user}]
     try:
-        text, _usage, _body = complete(api_key, api_url, model, messages,
-                                       deep_spec, session=session)
+        text, _usage, body2 = complete(api_key, api_url, model, messages,
+                                        deep_spec, session=session)
     except (ChatError, NetworkError) as err:
         print(f"ambient: cross-file pass failed "
               f"({getattr(err, 'diagnosis', None) or err}) — pass-1 "
@@ -6819,8 +6831,18 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
     obj1 = extract_json(final) or {}
     merged = dedupe_findings(list(obj1.get("findings") or [])
                              + list(obj2.get("findings") or []))
-    unparsed = int(obj1.get("_unparsed_chunks") or 0)
-    repaired = int(obj1.get("_repaired_chunks") or 0)
+    # _as_pos_int coerces UNTRUSTED counts (obj2 is raw model JSON; a
+    # non-numeric _repaired_chunks would crash int()) to a safe non-negative int.
+    unparsed = _as_pos_int(obj1.get("_unparsed_chunks"), 0)
+    repaired = _as_pos_int(obj1.get("_repaired_chunks"), 0)
+    # M38: the second pass itself can be truncated/JSON-repaired — fold its
+    # state in, else the merged verdict over-states completeness (a truncated
+    # confirmation pass would read as clean).
+    if (obj2.get("_repaired") or obj2.get("_repaired_chunks")
+            or (isinstance(body2, dict)
+                and (body2.get("finish_reason") == "length"
+                     or body2.get("salvaged_partial")))):
+        repaired += _as_pos_int(obj2.get("_repaired_chunks"), 1)
     verdict = ("NEEDS WORK" if (unparsed or repaired)
                else _verdict_from(merged, False))
     return json.dumps({"findings": merged, "verdict": verdict,
@@ -7278,7 +7300,11 @@ def _consensus_estimate(catalog, models, labeled, total,
         bound_sum += bnd_m
         assumed_any = assumed_any or assumed_m
         parts.append(m.split('/')[-1])
-        per_model_chunks[m] = n_calls_m
+        # M6/M37: best-of/consensus can list the SAME model id more than once
+        # (K samples). ACCUMULATE its calls — assigning overwrote earlier
+        # samples so the displayed n_chunks under-counted (cost was already
+        # correct via expected_sum +=).
+        per_model_chunks[m] = per_model_chunks.get(m, 0) + n_calls_m
     return expected_sum, bound_sum, parts, per_model_chunks, assumed_any
 
 
@@ -7323,7 +7349,7 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
         note = _map_note(sp, code_map, len(packed))
         miss_calls, miss_input, miss_sizes = 0, 0, []
         for j, ch in enumerate(packed):
-            key = _cache_key(model, note.replace("{i}", str(j + 1)), ch,
+            key = _cache_key(model, note.replace(_CHUNK_IDX_TOKEN, str(j + 1)), ch,
                              a.max_tokens, a.temperature,
                              a.response_format, salt=a._cache_salt)
             if use_cache and _cache_get(key, ttl) is not None:

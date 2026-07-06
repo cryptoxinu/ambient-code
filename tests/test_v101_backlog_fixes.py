@@ -220,5 +220,35 @@ class TestPhase4Build(unittest.TestCase):
             self.assertFalse(amb._stdin_is_tty())
 
 
+# ------------------------------------------------ Phase 5: audit/reporting
+
+class TestPhase5AuditDedupe(unittest.TestCase):
+    def test_M36_escalating_severity_keeps_richer_scenario(self):
+        rich = ("A very detailed long scenario describing the exact failure "
+                "path in depth with inputs and the resulting crash")
+        prev = {"file": "a.py", "line": 10, "title": "SQL injection",
+                "severity": "MEDIUM", "scenario": rich}
+        f = {"file": "a.py", "line": 11, "title": "SQL injection",
+             "severity": "HIGH", "scenario": "short"}
+        out = amb.dedupe_findings([prev, f])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["severity"], "HIGH")     # highest severity
+        self.assertEqual(out[0]["scenario"], rich)        # richest scenario kept
+
+    def test_L23_case_distinct_paths_not_merged(self):
+        out = amb.dedupe_findings([
+            {"file": "Foo.py", "line": 1, "title": "bug x", "severity": "LOW",
+             "scenario": "s"},
+            {"file": "foo.py", "line": 1, "title": "bug x", "severity": "LOW",
+             "scenario": "s"}])
+        self.assertEqual(len(out), 2)   # distinct files on a case-sensitive FS
+
+    def test_L13_user_brace_i_not_corrupted(self):
+        note = amb._map_note("User prompt with {i} literal", "", 5)
+        rendered = note.replace(amb._CHUNK_IDX_TOKEN, "3")
+        self.assertIn("{i} literal", rendered)     # user's {i} survives
+        self.assertIn("chunk 3 of 5", rendered)     # ambient index substituted
+
+
 if __name__ == "__main__":
     unittest.main()
