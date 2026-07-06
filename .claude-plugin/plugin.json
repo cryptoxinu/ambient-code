@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "ambient-code",
+  "displayName": "Ambient Code",
+  "version": "1.0.0",
+  "description": "Community integration (not affiliated with Ambient). Use the Ambient (ambient.xyz) decentralized AI network from Claude Code: /ambient control panel (installs as /ambient-code:ambient), first-run onboarding, sticky model picker with user-curated model menus, second-opinion code audits, native `ambient build` file generation, delegate mode where Ambient models write the code under Claude's review at ~10-40x lower cost, and an Ambient-powered agentic terminal.",
+  "author": {
+    "name": "xinu",
+    "email": "262228884+cryptoxinu@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/cryptoxinu/ambient-code",
+  "repository": "https://github.com/cryptoxinu/ambient-code",
+  "license": "MIT",
+  "keywords": [
+    "ambient",
+    "decentralized-ai",
+    "inference",
+    "second-opinion",
+    "code-audit",
+    "multi-model",
+    "cost-savings",
+    "openai-compatible"
+  ]
+}

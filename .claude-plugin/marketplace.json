@@ -1,0 +1,18 @@
+{
+  "name": "cryptoxinu",
+  "owner": {
+    "name": "xinu",
+    "email": "262228884+cryptoxinu@users.noreply.github.com"
+  },
+  "description": "Plugins by cryptoxinu — Ambient decentralized-inference integration for Claude Code.",
+  "plugins": [
+    {
+      "name": "ambient-code",
+      "source": "./",
+      "description": "Use the Ambient (ambient.xyz) decentralized AI network from Claude Code: /ambient control panel, delegate mode (Claude plans, Ambient writes, Claude reviews), second-opinion audits, native file-set builds, 10-40x cheaper bulk inference. Community integration, not affiliated with Ambient.",
+      "category": "productivity",
+      "license": "MIT",
+      "homepage": "https://github.com/cryptoxinu/ambient-code"
+    }
+  ]
+}
