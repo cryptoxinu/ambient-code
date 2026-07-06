@@ -207,27 +207,27 @@ class BestOfPartialTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.cache, ignore_errors=True)
 
-    def _flaky(self):
+    def _intermittent(self):
         return CompleteRecorder(answers=["same answer", "same answer"],
                                 fail_first=1,
                                 fail_exc=amb.ChatError("stall", "worker died"))
 
     def test_failed_sample_is_partial_exit_2_prose(self):
-        rec = self._flaky()
+        rec = self._intermittent()
         with self.assertRaises(SystemExit) as cm:
             run_ask(ask_args(best_of=3, parallel=1), rec, self.cache)
         self.assertEqual(cm.exception.code, amb.EXIT_PARTIAL)
         self.assertEqual(len(rec.calls), 3)
 
     def test_failed_sample_names_itself_in_json_reason(self):
-        rec = self._flaky()
+        rec = self._intermittent()
         with self.assertRaises(SystemExit) as cm:
             run_ask(ask_args(best_of=3, parallel=1, json=True),
                     rec, self.cache)
         self.assertEqual(cm.exception.code, amb.EXIT_PARTIAL)
 
     def test_json_envelope_partial_with_failed_sample_list(self):
-        rec = self._flaky()
+        rec = self._intermittent()
         out = io.StringIO()
         gate = GateRecorder()
         with patched(amb,
@@ -252,7 +252,7 @@ class BestOfPartialTests(unittest.TestCase):
         self.assertEqual(env["exit_code"], amb.EXIT_PARTIAL)
 
     def test_allow_partial_accepts_failed_samples(self):
-        rec = self._flaky()
+        rec = self._intermittent()
         out, err, _g = run_ask(
             ask_args(best_of=3, parallel=1, allow_partial=True),
             rec, self.cache)

@@ -35,9 +35,9 @@ Commands:
   codex     [args…]    Blocked upstream for now — explains why; use `agent`
 
 No input is refused for size: anything past the model's single-shot budget is
-auto map-reduced (parallel chunk calls + merge). Spend is gated: estimates print
-up front, a $5 default ceiling (AMBIENT_MAX_SPEND) blocks surprises, and jobs
-above $0.50 confirm on a TTY (--yes skips; --allow-cost overrides the ceiling).
+auto map-reduced (parallel chunk calls + merge). Spend is gated: set
+AMBIENT_MAX_SPEND to cap it, large jobs confirm on a TTY (--yes skips;
+--allow-cost overrides the ceiling).
 
 Exit codes: 0 ok · 1 diagnosed error · 2 PARTIAL result · 3 no key configured
             64 usage error · 130 interrupted
@@ -3396,8 +3396,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 # The server rejected our output budget outright (offline-
                 # profile guess above the model's real cap). Splitting the
                 # INPUT can't fix that — every chunk would resend the same
-                # doomed max_tokens — so self-heal by halving the budget once
-                #.
+                # doomed max_tokens — so self-heal by halving the budget once.
                 shrunk_tokens = max(MIN_OUTPUT_TOKENS, spec.max_tokens // 2)
                 print(
                     f"ambient: server rejected the {spec.max_tokens}-token "
@@ -3430,8 +3429,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     # The chunk was already sized for `model`; only fall back
                     # to a model whose context can hold the input we're about
                     # to resend PLUS its own output budget + overhead, so the
-                    # switch can't overflow context or induce a marathon
-                    #.
+                    # switch can't overflow context or induce a marathon.
                     input_tok = int(sum(len(m.get("content", ""))
                                         for m in messages) / CHARS_PER_TOKEN)
                     alt = pick_fallback_model(catalog, model,
@@ -6164,8 +6162,8 @@ def _titles_match(a, b):
 def dedupe_findings(findings):
     """Deterministically dedupe findings across chunks (A5): same file, title
     prefix, and line within ±3 = the same bug. True proximity (not //3 buckets,
-    which missed duplicates straddling a bucket edge and false-merged neighbors
-   ). Keep the highest severity + longest scenario."""
+    which missed duplicates straddling a bucket edge and false-merged
+    neighbors). Keep the highest severity + longest scenario."""
     kept = []  # [(sig, finding)]
     for f in findings:
         if not isinstance(f, dict):
@@ -7169,14 +7167,14 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
         plan = {"schema_version": 1, "kind": "audit", "status": "plan",
                 "repo": meta["root"], "files": meta["files"],
                 "chars": meta["chars"], "git": meta["git"],
+                "est_cost": round(expected, 4),
+                "est_bound": round(bound, 4),
                 "skipped": meta["skipped"],
                 "omitted_over_cap": meta["omitted_over_cap"],
                 "model": ("consensus:" + ",".join(consensus_models))
                 if consensus_models else model,
                 "n_chunks": n_chunks,
                 "deep": bool(deep),
-                "est_cost": round(expected, 4),
-                "est_bound": round(bound, 4),
                 "assumed_pricing": assumed}
         if consensus_models:
             # Additive fields: name the model SET the estimate covers and
@@ -9785,7 +9783,7 @@ def add_common_flags(parser):
     )
     parser.add_argument(
         "--allow-cost", action="store_true",
-        help="proceed even if the estimated spend exceeds AMBIENT_MAX_SPEND (default $5)",
+        help="proceed even if the estimated spend exceeds your AMBIENT_MAX_SPEND ceiling",
     )
     parser.add_argument(
         "--yes", "-y", action="store_true",

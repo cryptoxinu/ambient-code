@@ -212,11 +212,11 @@ chunks become explicit coverage gaps (exit 2), never silent holes. Fan-out width
 defaults to 3 concurrent calls — `--parallel N` (per run) or `AMBIENT_MAX_PARALLEL`
 (env) raises or lowers it, clamped to 1-16; it also sets how many `--consensus`
 models run at once. Spend is gated:
-estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`), jobs over
-$0.50 confirm on a TTY (`--yes` skips), `--allow-cost` overrides, and a worst-case
+set `AMBIENT_MAX_SPEND` to cap spend, large jobs confirm on a TTY (`--yes` skips),
+`--allow-cost` overrides, and a worst-case
 guard blocks runs whose hard bound exceeds 3x the ceiling. The ceiling is a **fleet
 aggregate**: every gated ambient process records a spend reservation in
-`~/.config/ambient/reservations.jsonl`, so a 10-wide fan-out shares ONE `$5` budget
+`~/.config/ambient/reservations.jsonl`, so a 10-wide fan-out shares ONE budget
 instead of multiplying it by 10 — a call whose estimate plus the live siblings'
 reservations would blow the ceiling is refused with the fleet total named.
 Reservations release on exit and self-heal (dead-pid pruning on POSIX, where a
@@ -232,10 +232,10 @@ it unset for the tuned default.
 
 **Savings receipts:** every run's stderr receipt now prices the
 run and compares it to a frontier reference — `[ambient <model> | in=X out=Y
-tokens ≈ $0.013 (vs ~$0.42 frontier — saved 97%)]` — so relay the saving when
+tokens — ~97% cheaper than a frontier model]` — relay the relative saving when
 the user asks what Ambient is worth. The reference is
 `AMBIENT_REFERENCE_PRICE` (env or config, like `AMBIENT_MAX_SPEND`): an
-`in/out` $/Mtok pair (`3/15`) or one blended figure; the default `3/15` is a
+`in/out` per-million-token pair (`3/15`) or one blended figure; the default `3/15` is a
 representative frontier list price and explicitly an APPROXIMATION — offer to
 set it to the user's real baseline. The figures are deliberately
 conservative: unknown catalog pricing → worst-case cost shown as "(assumed
@@ -313,7 +313,7 @@ build, agent) — each has its own default model.
    **Code writing** (`--code` — code, build, agent) / **Both lanes** (bare —
    suggest this as the default). Then persist.
    Resolution order everywhere: `-m` flag > env vars > saved default > built-in
-   (`moonshotai/kimi-k2.7-code` both lanes — probe-measured best auditor; GLM-5.2
+   (`moonshotai/kimi-k2.7-code` both lanes — the default auditor; GLM-5.2
    stays selectable while its network capacity ramps up).
 
 ## Trust boundary (MANDATORY)

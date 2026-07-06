@@ -105,7 +105,7 @@ run env AMBIENT_API_KEY="$FAKEKEY" "$AMB" build "x" --apply < /dev/null
 jassert() {  # jassert <file> <python-expr-on-d> <passmsg> <failmsg> [expected_rc]
   # run() merges stderr into the capture, so parse from the first JSON object.
   # Also asserts the process exit code (default 0) and the envelope's own
-  # exit_code agree — a partial result must not false-pass (Codex final MED).
+  # exit_code agree — a partial result must not false-pass.
   want_rc="${5:-0}"
   if [ "$RC" -ne "$want_rc" ]; then fail "$4" "rc=$RC (want $want_rc)"; return; fi
   if JRC="$RC" python3 - "$1" "$2" <<'PY' 2>/dev/null

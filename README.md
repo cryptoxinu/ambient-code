@@ -113,10 +113,10 @@ model, and merged, with failed pieces reported as explicit coverage gaps. The
 fan-out width defaults to 3 concurrent calls — raise or lower it per run with
 `--parallel N` or persistently with `AMBIENT_MAX_PARALLEL` (clamped to 1-16); it
 also sets how many `--consensus` models run at once. Spend is
-gated: estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`),
-and jobs over $0.50 ask first (`--yes` skips, `--allow-cost` overrides). The
+gated: set `AMBIENT_MAX_SPEND` to cap it, and large jobs ask first (`--yes`
+skips, `--allow-cost` overrides). The
 ceiling is enforced **across every concurrently-running ambient process** — a
-10-wide fan-out shares one $5 budget, not $50: each gated call reserves its
+10-wide fan-out shares one budget, not ten: each gated call reserves its
 estimate in `~/.config/ambient/reservations.jsonl` (released on exit; stale
 entries from crashed processes are pruned by pid-liveness — a provably-alive
 holder is never expired — and, where liveness is unknowable (Windows), by
@@ -128,11 +128,11 @@ mechanism itself is fail-open and never blocks a call on its own failure.
 the same tokens would have cost at a frontier price:
 
 ```
-[ambient moonshotai/kimi-k2.7-code | in=48210 out=1834 tokens ≈ $0.013 (vs ~$0.42 frontier — saved 97%)]
+[ambient moonshotai/kimi-k2.7-code | in=48210 out=1834 tokens — ~97% cheaper than a frontier model]
 ```
 
 The frontier comparison uses `AMBIENT_REFERENCE_PRICE` (env or config):
-either an `in/out` $/Mtok pair like `3/15` or a single blended figure like
+either an `in/out` per-million-token pair like `3/15` or a single blended figure like
 `10`. The default is `3/15` — a *representative frontier list price*
 (approximation; set it to whatever baseline you actually compare against).
 The receipt never over-states savings: if a model's pricing is missing from

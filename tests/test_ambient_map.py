@@ -716,7 +716,7 @@ class TestMapInterruptPrompt(unittest.TestCase):
                          "threads cannot stall process exit")
         self.assertEqual(se_code, 130)
         # Prompt exit returns in ~0s; the in-flight call sleeps 2.0s. Assert
-        # well under that (1.5s margin absorbs CI load without going flaky).
+        # well under that (1.5s margin absorbs CI load without timing sensitivity).
         self.assertLess(elapsed, 1.5,
                         "exit blocked draining an in-flight call")
         self.assertIn("cancelling map", err.getvalue())
