@@ -530,13 +530,18 @@ def redact(text, api_key):
     echoing auth back must never land it in terminal output or transcripts)
     AND neutralize terminal-escape injection from untrusted model output.
     Keys shorter than 8 chars are not redacted: substring collisions would
-    mangle ordinary text (real keys are far longer)."""
+    mangle ordinary text (real keys are far longer).
+    ORDER MATTERS (M16): sanitize FIRST, then redact the key. A compromised
+    endpoint could echo the key with an embedded escape (sk-abc<ESC>[0mdef) so
+    the raw substring match misses it; stripping escapes first reassembles the
+    contiguous key so the replace catches it. Keys are validated alphanumeric,
+    so sanitizing can never corrupt a real key."""
     if not text:
         return text
-    if api_key and len(api_key) >= 8:
-        text = text.replace(api_key, "[AMBIENT_API_KEY]")
     if os.environ.get("AMBIENT_NO_SANITIZE") != "1":
         text = CTRL_RE.sub("", ANSI_RE.sub("", text))
+    if api_key and len(api_key) >= 8:
+        text = text.replace(api_key, "[AMBIENT_API_KEY]")
     return text
 
 
@@ -549,6 +554,78 @@ def sanitize(text):
     if text is None or isinstance(text, str):
         return redact(text, "")
     return redact(str(text), "")
+
+
+class _StreamRedactor:
+    """Streaming-safe redaction (M43). Per-piece redact() misses an API key or
+    escape sequence that STRADDLES a provider chunk boundary — neither piece
+    holds the contiguous secret. Two concerns are handled SEPARATELY so neither
+    can defeat the other (an escape injected inside a boundary-split key was the
+    subtle failure of the naive rolling-tail):
+
+    1. Escapes: peel any INCOMPLETE trailing escape (an ESC not yet a full
+       sequence) back into the raw buffer; sanitize the rest into an
+       append-stable, escape-free `_san` buffer.
+    2. Key: key-redact `_san` and emit all but its last (len(key)-1) chars — a
+       still-in-flight key prefix is at most that long and stays held until it
+       either completes (→ redacted placeholder) or is flushed.
+    `_emitted` tracks committed output length so nothing is re-emitted."""
+
+    def __init__(self, api_key):
+        self._key = api_key if (api_key and len(api_key) >= 8) else ""
+        self._keep = max(len(self._key) - 1, 0)
+        self._raw = ""        # not-yet-escape-stable input
+        self._san = ""        # sanitized (escape-free), APPEND-ONLY
+        self._emitted = 0     # chars of key-redacted `_san` already emitted
+
+    @staticmethod
+    def _stable_len(s):
+        """Index up to which `s` has no trailing INCOMPLETE escape sequence.
+        Conservative for streaming: an OSC/DCS/PM/APC without its string
+        terminator (BEL or ST=ESC\\) may still be arriving, so it is HELD — even
+        though ANSI_RE would match the unterminated form in a whole-string pass.
+        A CSI is stable only once it has a final byte (@-~)."""
+        i = s.rfind("\x1b")                   # DCS/OSC content has no ESC, so the
+        if i == -1:                           # last ESC starts the only open escape
+            return len(s)
+        tail = s[i:]
+        if len(tail) == 1:
+            return i                          # lone ESC — incomplete
+        c = tail[1]
+        if c == "[":                          # CSI: complete once it has a final byte
+            return len(s) if re.match(r"\x1b\[[0-?]*[ -/]*[@-~]", tail) else i
+        if c == "]":                          # OSC: BEL or ST (ESC\) terminates
+            return len(s) if ("\x07" in tail[2:] or "\x1b\\" in tail[2:]) else i
+        if c in "PX^_":                       # DCS/SOS/PM/APC: ST only (BEL is content)
+            return len(s) if "\x1b\\" in tail[2:] else i
+        return len(s)                         # 2-char ESC-x escape is complete
+
+    def feed(self, piece):
+        self._raw += piece
+        cut = self._stable_len(self._raw)
+        stable_raw, self._raw = self._raw[:cut], self._raw[cut:]
+        if stable_raw:
+            self._san += redact(stable_raw, "")   # sanitize only; append-stable
+        return self._emit(hold=self._keep)
+
+    def _emit(self, hold):
+        # Redact the WHOLE sanitized buffer so a key straddling the hold
+        # boundary is a stable placeholder, then emit up to len(red)-hold. A
+        # still-in-flight key prefix is at most (len(key)-1) chars and always
+        # lands inside the held region, so the emitted prefix is final.
+        red = redact(self._san, self._key) if self._key else self._san
+        end = len(red) - hold if hold else len(red)
+        if end <= self._emitted:
+            return ""
+        out = red[self._emitted:end]
+        self._emitted = end
+        return out
+
+    def flush(self):
+        if self._raw:                 # commit any held (possibly incomplete) escape
+            self._san += redact(self._raw, "")
+            self._raw = ""
+        return self._emit(hold=0)
 
 
 def _stderr_is_tty():
@@ -3698,10 +3775,13 @@ def chat(api_key, api_url, model, messages, args, kind="ask", session=None):
     want_json = spec.json
     live_stream = sys.stdout.isatty() and not spec.raw and not want_json
     streamed_parts = []
+    _sr = _StreamRedactor(api_key)   # M43: boundary-split-safe streaming redaction
 
     def on_delta(piece):
-        sys.stdout.write(redact(piece, api_key))
-        sys.stdout.flush()
+        out = _sr.feed(piece)
+        if out:
+            sys.stdout.write(out)
+            sys.stdout.flush()
         streamed_parts.append(piece)
 
     try:
@@ -3710,9 +3790,13 @@ def chat(api_key, api_url, model, messages, args, kind="ask", session=None):
             on_delta=(on_delta if live_stream else None), session=session)
     except ChatError as err:
         if streamed_parts:
+            sys.stdout.write(_sr.flush())   # emit the buffered tail safely
             sys.stdout.write("\n")
             sys.stdout.flush()
         _fail(spec, kind, err, api_key)
+    if streamed_parts:                       # success: flush the redactor tail
+        sys.stdout.write(_sr.flush())
+        sys.stdout.flush()
     if want_json:
         served = body.get("_served_model", model)
         emit_json(
@@ -5145,16 +5229,19 @@ def cmd_ask(args, api_key, api_url, conf):
     # not --json). Reasoning shows as heartbeats first, then the answer streams.
     live_stream = sys.stdout.isatty() and not args.raw and not want_json
     streamed_parts = []
+    _sr = _StreamRedactor(api_key)   # M43: boundary-split-safe streaming redaction
 
     def on_delta(piece):
-        sys.stdout.write(redact(piece, api_key))
-        sys.stdout.flush()
+        out = _sr.feed(piece)
+        if out:
+            sys.stdout.write(out)
+            sys.stdout.flush()
         streamed_parts.append(piece)
 
     # the single-shot ask is real spend — gate + fleet-reserve
     # it up front like every fan-out lane (silent pass when under ceiling).
     _single_call_gate(catalog, model,
-                      sum(len(m.get("content", "")) for m in messages),
+                      sum(len(m.get("content") or "") for m in messages),
                       args, conf)
     try:
         content, usage, body = complete(
@@ -5162,6 +5249,7 @@ def cmd_ask(args, api_key, api_url, conf):
             on_delta=(on_delta if live_stream else None), session=session)
     except ChatError as err:
         if streamed_parts:
+            sys.stdout.write(_sr.flush())
             sys.stdout.write("\n")
             sys.stdout.flush()
         if err.category in ("empty", "context") and len(prompt) > 20_000:
@@ -5177,6 +5265,9 @@ def cmd_ask(args, api_key, api_url, conf):
             split_over_doc()
             return
         _fail(args, "ask", err, api_key)
+    if streamed_parts:          # M43: emit the buffered streaming tail on success
+        sys.stdout.write(_sr.flush())
+        sys.stdout.flush()
     if want_json:
         served = body.get("_served_model", model)
         emit_json(
@@ -8311,10 +8402,13 @@ def cmd_chat(args, api_key, api_url, conf):
         except SystemExit:
             continue  # refused/declined turn — nothing sent, REPL survives
         streamed = []
+        _sr = _StreamRedactor(api_key)   # M43: per-turn boundary-safe redaction
 
-        def on_delta(piece):
-            sys.stdout.write(redact(piece, api_key))
-            sys.stdout.flush()
+        def on_delta(piece, _sr=_sr):
+            out = _sr.feed(piece)
+            if out:
+                sys.stdout.write(out)
+                sys.stdout.flush()
             streamed.append(piece)
 
         try:
@@ -8331,6 +8425,7 @@ def cmd_chat(args, api_key, api_url, conf):
             continue
         except (ChatError, NetworkError) as err:
             if streamed:
+                sys.stdout.write(_sr.flush())
                 sys.stdout.write("\n")
                 sys.stdout.flush()
             cat = getattr(err, "category", "network")
@@ -8338,6 +8433,9 @@ def cmd_chat(args, api_key, api_url, conf):
             print(redact(f"ambient [{cat}]: {diag}", api_key),
                   file=sys.stderr)
             continue
+        if streamed:                # M43: emit the buffered streaming tail
+            sys.stdout.write(_sr.flush())
+            sys.stdout.flush()
         clean_stream = bool(streamed) \
             and "".join(streamed).strip() == content
         if not clean_stream:
@@ -9349,6 +9447,16 @@ def cmd_setup(args):
             "  Remove:         ambient setup --remove"
         )
     if args.key_stdin:
+        # M11: --key-stdin is for a PIPED key. On a TTY, readline() echoes the
+        # typed key to the screen/scrollback — refuse and point at the hidden-
+        # input interactive path instead.
+        try:
+            stdin_is_tty = sys.stdin.isatty()
+        except Exception:  # noqa: BLE001 — closed/odd stdin is not a TTY
+            stdin_is_tty = False
+        if stdin_is_tty:
+            sys.exit("ambient: --key-stdin expects a piped key (echo-safe). "
+                     "For interactive entry with hidden input, run: ambient setup")
         key = sys.stdin.readline().strip()
         if key.lower().startswith("bearer "):
             key = key[7:].strip()
