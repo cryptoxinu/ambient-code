@@ -8480,13 +8480,14 @@ def cmd_build(args, api_key, api_url, conf):
                 per_call_chars=[len(c) for c in packed])
             e_g, b_g, a_g = estimate_cost_fb(
                 catalog, model, len(task), gen_calls - 1, args.max_tokens,
-                args, conf)
+                args, conf, per_call_chars=[len(task)] * (gen_calls - 1))
             expected, bound = expected + e_g, bound + b_g
             assumed = assumed or a_g
         else:
             expected, bound, assumed = estimate_cost_fb(
                 catalog, model, len(task) + len(context), gen_calls,
-                args.max_tokens, args, conf)
+                args.max_tokens, args, conf,
+                per_call_chars=[len(task) + len(context)] * gen_calls)
         print("ambient build plan (dry run — nothing sent):")
         print(f"  model:         {model} "
               f"({'reasoning' if profile.is_reasoning else 'direct'})")
@@ -8678,12 +8679,18 @@ def cmd_build(args, api_key, api_url, conf):
         # may be re-served by a pricier candidate, so the up-front reserve must
         # cover that exposure across the batch/retry-cap set (byte-identical to
         # estimate_cost when fallback is off / SACRED / no costlier candidate).
+        # Each generation call re-sends the FULL prompt (~prompt_chars), so the
+        # fallback candidate must be sized per-call at prompt_chars, NOT the
+        # input_chars/n_calls average (which would pick a cheaper small-context
+        # alt and under-reserve a big prompt's pricier large-context swap).
         expected, _b1, assumed = estimate_cost_fb(
             catalog, model, prompt_chars * len(batches),
-            len(batches) + 2, args.max_tokens, args, conf)
+            len(batches) + 2, args.max_tokens, args, conf,
+            per_call_chars=[prompt_chars] * (len(batches) + 2))
         _e2, bound, _a2 = estimate_cost_fb(
             catalog, model, prompt_chars * max_gen_calls,
-            max_gen_calls, args.max_tokens, args, conf)
+            max_gen_calls, args.max_tokens, args, conf,
+            per_call_chars=[prompt_chars] * max_gen_calls)
         print(f"ambient: build estimated ~${expected:.2f} "
               f"(hard bound ${bound:.2f} at the retry cap)"
               + (" — assumed worst-case pricing" if assumed else ""),

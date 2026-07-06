@@ -543,7 +543,7 @@ class TestM2DryRunParity(unittest.TestCase):
         real_fb = amb.estimate_cost_fb
 
         def spy(*a, **k):
-            seen.append(a)
+            seen.append((a, k))
             return real_fb(*a, **k)
 
         args = build_args(root, dry_run=True, model="cheap/reason")
@@ -554,6 +554,13 @@ class TestM2DryRunParity(unittest.TestCase):
             amb.cmd_build(args, "key-abcdef123456", "https://x", {})
         self.assertTrue(
             seen, "build must price generation via the fallback-aware helper")
+        # per-call sizing must be threaded (final re-audit HIGH): each
+        # generation call re-sends the full prompt, so the fallback candidate is
+        # sized per-call, never the input_chars/n_calls average.
+        self.assertTrue(
+            any(k.get("per_call_chars") for _a, k in seen),
+            "build must thread per_call_chars so a big prompt's pricier "
+            "large-context fallback is reserved")
 
     def test_dry_run_without_reduce_model_shows_no_reduce_line(self):
         catalog = fix_catalog()
