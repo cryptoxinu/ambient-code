@@ -3,6 +3,8 @@ MED/LOW findings, each independently verified). Phases appended as they land.
 
 No network, no live API. Run: python3 -m pytest tests/test_v101_backlog_fixes.py
 """
+import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
 import os
@@ -122,9 +124,6 @@ class TestPhase2Hardening(unittest.TestCase):
             ("", False, "no input"))
 
 
-import contextlib
-
-
 @contextlib.contextmanager
 def _patch(obj, name, value):
     old = getattr(obj, name)
@@ -133,6 +132,49 @@ def _patch(obj, name, value):
         yield
     finally:
         setattr(obj, name, old)
+
+
+# ------------------------------------------------ Phase 3: input/path edges
+
+class TestPhase3InputPath(unittest.TestCase):
+    def test_M9_within_root_correct_at_filesystem_root(self):
+        self.assertTrue(amb._within_root("/foo/bar", "/"))    # subdir of / allowed
+        self.assertTrue(amb._within_root("/foo", "/"))         # top-level under /
+        self.assertTrue(amb._within_root("/repo/src/a.py", "/repo"))
+        self.assertTrue(amb._within_root("/repo", "/repo"))    # root itself
+        self.assertFalse(amb._within_root("/other", "/repo"))
+        self.assertFalse(amb._within_root("/repofoo", "/repo"))  # sibling-prefix
+
+    def test_M27_negative_older_than_refused(self):
+        import io
+        import sys
+        args = argparse.Namespace(action="clear", older_than=-1)
+        err = io.StringIO()
+        with _patch(sys, "stderr", err), _patch(sys, "argv", ["ambient"]):
+            with self.assertRaises(SystemExit) as cm:
+                amb.cmd_cache(args)
+        self.assertEqual(cm.exception.code, amb.EXIT_USAGE)
+        self.assertIn("non-negative", err.getvalue())
+
+    def test_L18_negative_days_refused(self):
+        import io
+        import sys
+        args = argparse.Namespace(days=-5, json=False)
+        err = io.StringIO()
+        with _patch(sys, "stderr", err), _patch(sys, "argv", ["ambient"]):
+            with self.assertRaises(SystemExit) as cm:
+                amb.cmd_usage(args)   # fires before any ledger read now
+        self.assertEqual(cm.exception.code, amb.EXIT_USAGE)
+        self.assertIn("positive", err.getvalue())
+
+
+def _mk_usage_ledger(body):
+    import tempfile
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "usage.jsonl")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return p
 
 
 if __name__ == "__main__":

@@ -2446,6 +2446,11 @@ def resolve_reduce_model(args, conf, map_model, catalog=None):
         chosen, source = mapped, "AMBIENT_MODEL_MAP reduce="
     if is_auto_model(chosen):
         if catalog:
+            # input_chars=0 is intentional: the reduce input (concatenated map
+            # extracts) is genuinely unknown here, and run_map_reduce clamps the
+            # hierarchical synthesis to the CHOSEN reduce model's own window
+            # (multi-level reduce) so a small model degrades, never 400s.
+            # auto:cheapest therefore honestly returns the cheapest READY model.
             return resolve_auto_model(chosen, catalog, conf, 0, args,
                                       label=source)
         # No catalog to resolve against: say so explicitly rather than
@@ -6572,7 +6577,7 @@ def repo_walk(root, per_file_cap=REPO_FILE_MAX_BYTES):
         # opened. Resolve the whole path and require it to stay under the
         # resolved root — nothing outside --repo may ever be read.
         real = os.path.realpath(full)
-        if real != real_root and not real.startswith(real_root + os.sep):
+        if not _within_root(real, real_root):   # M9: correct at root '/'
             skipped["nonregular"] += 1
             continue
         if st.st_size == 0:
@@ -6861,8 +6866,7 @@ def git_diff_inputs(staged, ref):
         # emits an absolute or ..-traversing path from an unusual/malicious tree.
         if real_root is not None:
             real_full = os.path.realpath(full)
-            if real_full != real_root \
-                    and not real_full.startswith(real_root + os.sep):
+            if not _within_root(real_full, real_root):   # M9: correct at root '/'
                 print(f"ambient: skipping {path} (outside repo root)",
                       file=sys.stderr)
                 continue
@@ -8544,6 +8548,17 @@ BUILD_JSON_INSTRUCTION_FILES = (
 )
 
 
+def _within_root(child_real, root_real):
+    """True if realpath `child_real` is inside (or equal to) `root_real`. Uses
+    commonpath so it is correct even when root_real is the filesystem root '/'
+    (M9: `child.startswith(root + os.sep)` fails there — nothing starts with
+    '//', wrongly rejecting every subdirectory)."""
+    try:
+        return os.path.commonpath([child_real, root_real]) == root_real
+    except ValueError:   # different drives (Windows) / mixed abs+rel → not within
+        return False
+
+
 def safe_relpath(path, root):
     """Path-traversal firewall for manifest writes. Model
     output is UNTRUSTED: any path it names must resolve to a plain relative
@@ -8590,8 +8605,7 @@ def safe_relpath(path, root):
     # A symlinked EXISTING ancestor can point outside while the lexical path
     # stays inside — realpath resolves what exists and keeps the rest lexical.
     parent_real = os.path.realpath(os.path.dirname(dest))
-    if parent_real != root_real and \
-            not parent_real.startswith(root_real + os.sep):
+    if not _within_root(parent_real, root_real):   # M9: correct at root '/'
         raise ValueError("resolves outside the target directory (symlink escape)")
     if os.path.islink(dest):
         raise ValueError("destination is an existing symlink")
@@ -9174,8 +9188,7 @@ def cmd_build(args, api_key, api_url, conf):
                     # firewall check.
                     root_real = os.path.realpath(root)
                     parent_real = os.path.realpath(os.path.dirname(dest))
-                    if parent_real != root_real and \
-                            not parent_real.startswith(root_real + os.sep):
+                    if not _within_root(parent_real, root_real):   # M9
                         raise OSError("parent escaped the target directory")
                     fd, tmp = tempfile.mkstemp(
                         dir=os.path.dirname(dest), prefix=".ambient-")
@@ -9626,6 +9639,8 @@ def cmd_doctor(args):
 
 def cmd_usage(args):
     """Local spend summary (Ambient exposes no balance endpoint)."""
+    if args.days <= 0:   # L18: validate the ARG first, before touching the ledger
+        usage_exit("--days must be a positive number of days")
     conf = read_config_file()
     records = []
     bad = 0
@@ -9887,8 +9902,11 @@ def cmd_cache(args):
     except OSError:
         entries = []
     if args.action == "clear":
-        cutoff = (time.time() - args.older_than * 86400
-                  if getattr(args, "older_than", None) else None)
+        ot = getattr(args, "older_than", None)
+        if ot is not None and ot < 0:   # M27: a negative cutoff is in the FUTURE
+            usage_exit("--older-than must be a non-negative number of days "
+                       "(a negative value would clear the entire cache)")
+        cutoff = (time.time() - ot * 86400 if ot else None)
         removed = 0
         for e in entries:
             p = os.path.join(CACHE_DIR, e)
