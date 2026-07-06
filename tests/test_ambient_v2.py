@@ -470,7 +470,7 @@ class TestSpendGate(unittest.TestCase):
     def test_worst_case_guard_blocks_3x(self):
         with self.assertRaises(SystemExit) as cm:
             amb._gate_amount(0.4, ns(allow_cost=False), {}, bound=16.0)
-        self.assertIn("WORST-CASE", str(cm.exception))
+        self.assertIn("worst-case", str(cm.exception).lower())
 
     def test_bad_ceiling_string_defaults_to_5(self):
         with self.assertRaises(SystemExit):

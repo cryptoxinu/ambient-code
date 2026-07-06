@@ -21,15 +21,15 @@ always points at the active install, so never hardcode a path.
 | `/ambient on` | `ambient mode on`, announce the delegate contract (below), follow it all session. |
 | `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). |
 | `/ambient model` | Model picking UX below. |
-| `/ambient audit <target>` | `git diff \| ambient audit` or `ambient audit <files> [--focus X] --json`, then verify + report. Whole codebase: `ambient audit --repo <dir> [--focus X] --json` — git-aware walker (`.gitignore` respected; binaries/lockfiles/vendored dirs skipped) that reports files + chars + est. cost BEFORE spending; under `--json` a one-line `{"status":"plan",…}` object precedes the standard envelope. A repo over the input ceiling is refused unless `--allow-cost`/`--allow-partial` (which audits what fits and reports the rest as an explicit coverage gap). `--parallel`/`--reduce-model`/`--consensus`/the cost gate apply unchanged; a bounded cross-file confirmation pass (ONE extra gated call max) is on by default for `--repo` — `--no-deep` skips it, and under `--consensus` it is always skipped (multi-model corroboration replaces it; `--deep`/`--no-deep` have no effect there). |
+| `/ambient audit <target>` | `git diff \| ambient audit` or `ambient audit <files> [--focus X] --json`, then verify + report. Whole codebase: `ambient audit --repo <dir> [--focus X] --json` — git-aware walker (`.gitignore` respected; binaries/lockfiles/vendored dirs skipped) that reports files + chars BEFORE spending; under `--json` a one-line `{"status":"plan",…}` object precedes the standard envelope. A repo over the input ceiling is refused unless `--allow-cost`/`--allow-partial` (which audits what fits and reports the rest as an explicit coverage gap). `--parallel`/`--reduce-model`/`--consensus`/the cost gate apply unchanged; a bounded cross-file confirmation pass (ONE extra gated call max) is on by default for `--repo` — `--no-deep` skips it, and under `--consensus` it is always skipped (multi-model corroboration replaces it; `--deep`/`--no-deep` have no effect there). |
 | `/ambient map <prompt> <items>` | Bulk lane: `ambient map "<prompt>" <files> --json` (or pipe one item per line; `--jsonl` for objects). One prompt, applied independently per item, one JSONL envelope per item out. |
-| `/ambient chat` | The user's interactive REPL (`ambient chat` in THEIR terminal — it requires a TTY; scripted use routes to `ambient ask`). Streams replies, prints a per-turn cost/savings receipt, `/model` switches models mid-session (explicit + printed), `/clear` resets history, Ctrl-C interrupts only the current turn. Every turn is cost-gated + fleet-reserved. |
+| `/ambient chat` | The user's interactive REPL (`ambient chat` in THEIR terminal — it requires a TTY; scripted use routes to `ambient ask`). Streams replies, prints a per-turn savings receipt (relative % only), `/model` switches models mid-session (explicit + printed), `/clear` resets history, Ctrl-C interrupts only the current turn. Every turn is cost-gated + fleet-reserved. |
 | `/ambient build <task>` | Native build lane: write a precise brief, run `ambient build "<brief>" --dir <target> [-f context] --json --apply --yes`, read the manifest, review every file, run tests yourself. |
 | `/ambient agent` | Interactive opencode TUI for the user (`ambient agent`); headless one-offs via `ambient agent run "task"`. The key enters opencode's process env — never ask the agent to print its environment. |
 | `/ambient curate ...` | User model curation: `ambient curate` (status) / `hide <id\|glob>` / `show <id>` / `only <ids>` / `note <id> "text"` / `reset`. Curation shapes menus + automatic selection only — explicit `-m` always works. |
 | `/ambient setup` | First-run setup below (key rotation: `setup --force`; removal: `setup --remove`). |
 | `/ambient doctor` | Run `ambient doctor`, relay the PASS/FAIL table + DIAGNOSIS plainly. |
-| `/ambient usage` | Run `ambient usage`, report calls/tokens/actual cost AND the savings vs the frontier reference (per model + total, `$` and `%`; `--json` adds `reference_price`/`frontier_cost`/`saved`). ALWAYS relay its agent-lane disclosure: `ambient agent` spend is billed by Ambient but NOT visible to local metering — never present the totals as complete if the user runs the agent lane. |
+| `/ambient usage` | Run `ambient usage`, report calls/tokens AND the relative savings % vs a frontier reference (per model + total, percentage only — never a plan-specific dollar figure). ALWAYS relay its agent-lane disclosure: `ambient agent` spend is billed by Ambient but NOT visible to local metering — never present the totals as complete if the user runs the agent lane. |
 
 **Natural-language invocation (no slash needed):** when the user says it in plain
 words, route straight to the matching row above and run it — "use ambient to build
@@ -130,7 +130,7 @@ code the user expects from you) when you see:
   `--uninstall-hook` (only ambient's own hook is ever removed). Needs no API key
   to install.
 - **The user mentions cost/tokens/budget** — mention that audits, drafts, and
-  summaries can route to Ambient; `ambient usage` shows what it actually cost.
+  summaries can route to Ambient; `ambient usage` shows token usage + the relative savings %.
 One sentence, at most once per session per pattern — suggest, don't nag.
 
 ## Fan-out: parallel Ambient subagents

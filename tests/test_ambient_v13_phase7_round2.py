@@ -217,7 +217,7 @@ class BestOfMixedServedPricingTests(unittest.TestCase):
                                 self.cache)
         receipt = [ln for ln in err.splitlines() if "tokens" in ln]
         self.assertTrue(receipt)
-        self.assertIn("saved", receipt[-1])          # honest claim survives
+        self.assertIn("cheaper", receipt[-1])        # honest claim survives
         self.assertNotIn("mixed", receipt[-1])
 
 

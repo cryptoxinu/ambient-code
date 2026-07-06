@@ -135,7 +135,7 @@ class TestH1ReceiptPricesServedModel(unittest.TestCase):
                      [{"role": "user", "content": "hi"}], chat_args())
         receipt = err.getvalue()
         self.assertIn("cheap/model", receipt)
-        self.assertIn("saved 93%", receipt)
+        self.assertIn("93% cheaper", receipt)
 
     def test_cmd_ask_receipt_gets_served_model(self):
         """cmd_ask's own render_result call must also pass the SERVED model."""

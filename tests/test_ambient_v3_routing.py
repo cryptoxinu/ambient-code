@@ -131,7 +131,7 @@ class TestAutoPseudoModel(unittest.TestCase):
         self.assertEqual(seen, ["cheap/ready"])
         text = err.getvalue()
         self.assertIn("-m auto -> cheap/ready", text)
-        self.assertIn("$0.80", text)  # the pick's output price is shown
+        self.assertIn("cheapest READY", text)  # the pick reason (no price shown)
 
     def test_auto_cheapest_and_largest_pick_differently(self):
         cat = routing_catalog()
@@ -233,7 +233,7 @@ class TestSacredExplicitModel(unittest.TestCase):
         self.assertIn("cold/cheapest", text)
         self.assertIn("isn't serving right now", text)
         self.assertIn("cheap/ready", text)   # READY alternatives named…
-        self.assertIn("$0.80", text)         # …with their price
+        self.assertIn("cheap/ready", text)   # alternatives named (no price)
 
     def test_preflight_hint_silent_for_healthy_model(self):
         err = io.StringIO()

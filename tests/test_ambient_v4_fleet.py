@@ -129,7 +129,7 @@ class TestFleetCeiling(unittest.TestCase):
                 amb._gate_amount(2.0, ns(allow_cost=False), {})
             msg = str(cm.exception)
             self.assertIn("already reserved", msg)
-            self.assertIn("ceiling", msg)
+            self.assertIn("budget", msg)  # default ceiling: generic, no $/ceiling
 
     def test_refusal_names_fleet_total_and_count(self):
         with fleet_dir() as d:
@@ -137,7 +137,7 @@ class TestFleetCeiling(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 amb._gate_amount(1.0, ns(allow_cost=False), {})
             msg = str(cm.exception)
-            self.assertIn("$5.50", msg)
+            self.assertIn("already reserved", msg)  # default ceiling: no $
             self.assertIn("2 running", msg)
 
     def test_fits_under_ceiling_alongside_existing_reservation(self):
@@ -183,7 +183,7 @@ class TestFleetCeiling(unittest.TestCase):
         with fleet_dir():
             with self.assertRaises(SystemExit) as cm:
                 amb._gate_amount(0.4, ns(allow_cost=False), {}, bound=16.0)
-            self.assertIn("WORST-CASE", str(cm.exception))
+            self.assertIn("worst-case", str(cm.exception).lower())
 
     def test_allow_cost_bypasses_fleet_refusal(self):
         with fleet_dir() as d:

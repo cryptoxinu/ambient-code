@@ -178,20 +178,19 @@ class TestSavingsNote(unittest.TestCase):
             note = self.note(
                 "cheap/model",
                 {"prompt_tokens": 100_000, "completion_tokens": 10_000})
-        # cost = 0.028, frontier = 0.45, saved = 93.77% → floored to 93
-        self.assertIn("$0.028", note)
-        self.assertIn("$0.450", note)
-        self.assertIn("saved 93%", note)
+        # saved = 93.77% → floored to 93; no dollar figure is shown (billing
+        # is plan-dependent), only the relative saving vs the frontier.
+        self.assertIn("93% cheaper", note)
         self.assertIn("frontier", note)
+        self.assertNotIn("$", note)
 
     def test_assumed_pricing_never_fabricates_a_saving(self):
         with env_var("AMBIENT_REFERENCE_PRICE", None):
             note = self.note(
                 "mystery/model",
                 {"prompt_tokens": 100_000, "completion_tokens": 0})
-        self.assertIn("assumed pricing", note)
-        self.assertNotIn("saved", note)
-        self.assertNotIn("frontier", note)
+        # unknown real price → no comparison can be made, so no note at all.
+        self.assertEqual(note, "")
 
     def test_estimated_usage_is_labeled(self):
         with env_var("AMBIENT_REFERENCE_PRICE", None):
@@ -200,7 +199,7 @@ class TestSavingsNote(unittest.TestCase):
                 {"prompt_tokens": 100_000, "completion_tokens": 10_000,
                  "_estimated": True})
         self.assertIn("(est.)", note)
-        self.assertIn("saved 93%", note)
+        self.assertIn("93% cheaper", note)
 
     def test_pricier_than_reference_shows_costlier_not_a_saving(self):
         with env_var("AMBIENT_REFERENCE_PRICE", None):
@@ -230,8 +229,8 @@ class TestSavingsNote(unittest.TestCase):
         receipt = err.getvalue()
         self.assertIn("in=100000", receipt)   # token counts kept
         self.assertIn("out=10000", receipt)
-        self.assertIn("$0.028", receipt)
-        self.assertIn("saved 93%", receipt)
+        self.assertIn("93% cheaper", receipt)
+        self.assertNotIn("$", receipt)
 
 
 class TestLedgerRecords(unittest.TestCase):
@@ -416,12 +415,15 @@ class TestUsageSavings(unittest.TestCase):
         self.assertAlmostEqual(data["frontier_cost"], 0.0)
         self.assertAlmostEqual(data["saved"], 0.0)
         self.assertFalse(data["all_priced"])
-        # Text: lower bound marked as partial.
-        self.assertIn("$0.2000+", text)  # 4dp is the usage-row convention
+        # Text: the row is marked partial (no dollar figure shown).
+        self.assertIn("partial", text)
         self.assertIn("partial — some records unpriced", text)
-        total_line = next(ln for ln in text.splitlines()
-                          if ln.startswith("Total"))
-        self.assertIn("$0.2000", total_line)  # known spend in the total
+        # Text total no longer shows a dollar figure (billing is plan-
+        # dependent); the known-spend accounting is verified via --json above.
+        overall = next(ln for ln in text.splitlines()
+                       if ln.startswith("Overall"))
+        self.assertIn("unpriced", overall)
+        self.assertNotIn("$", overall)
 
     def test_partial_model_does_not_pollute_fully_priced_savings(self):
         """Grand frontier/saved must reflect ONLY fully-priced models; the
@@ -472,9 +474,10 @@ class TestUsageSavings(unittest.TestCase):
                     "cost": 0.028, "ref": [3.0, 15.0]}]
         with usage_env(records, offline=True):
             text = run_usage(usage_args())
-        self.assertIn("saved", text)
+        self.assertIn("cheaper", text)
         self.assertIn("frontier", text)
         self.assertIn("93%", text)
+        self.assertNotIn("$", text)
 
     def test_agent_lane_unmetered_disclosure(self):
         now = int(time.time())

@@ -24,9 +24,8 @@ Commands:
   agent     [args…]    Interactive agentic terminal on Ambient (opencode TUI)
   doctor               Diagnose: bad key vs out-of-funds vs model availability
                        vs your network vs Ambient itself — names the culprit
-  usage     [--days]   Local token/cost summary + savings vs the frontier
-                       reference (AMBIENT_REFERENCE_PRICE, default 3/15
-                       $/Mtok — an approximation you can set yourself)
+  usage     [--days]   Local token-usage summary + a relative savings % vs a
+                       frontier reference (never a plan-specific dollar figure)
   mode      [on|off]   Delegate mode toggle (no arg = status). When ON, Claude
                        routes code writing through Ambient for the session
   link                 Put a stable `ambient` launcher on your PATH
@@ -1182,15 +1181,6 @@ def reference_cost(usage, ref):
     return (tin * ref[0] + tout * ref[1]) / 1e6
 
 
-def _fmt_usd(x):
-    """$ figure with sensible precision for sub-cent run costs."""
-    if x >= 0.9995:
-        return f"${x:.2f}"
-    if x >= 0.01:
-        return f"${x:.3f}"
-    return f"${x:.4f}"
-
-
 def _round_money(x):
     """Display rounding for `ambient usage` figures: 4dp normally, but a
     REAL nonzero figure must never flatten to 0 (sub-microdollar
@@ -1201,41 +1191,32 @@ def _round_money(x):
     return round(x, 4)
 
 
-def _usd_amt(x):
-    """Text form of a usage dollar figure: 4dp, switching to significant
-    digits when 4dp would display a real nonzero spend as 0.0000."""
-    if x and abs(x) < 0.00005:
-        return f"{x:.3g}"
-    return f"{x:.4f}"
-
-
 def savings_note(model, usage, catalog=None, conf=None):
-    """Receipt suffix: ' ≈ $0.013 (vs ~$0.42 frontier — saved 97%)'.
-    Honesty rules (never over-state): assumed pricing shows the worst-case
-    cost and OMITS any savings claim; saved-% is floored; at-or-above the
-    reference reads 'costlier'; estimated token counts carry '(est.)';
-    zero tokens → no claim. Never raises — the receipt is decoration."""
+    """Receipt suffix: ' — ~97% cheaper than a frontier model (est.)'. Reports
+    only the RELATIVE saving vs a frontier reference — never a dollar figure,
+    since actual billing is plan-dependent (a subscription or pay-as-you-go
+    API). Honesty rules (never over-state): assumed/absent pricing OMITS any
+    claim; saved-% is floored; at-or-above the reference reads 'costlier';
+    estimated token counts carry '(est.)'; zero tokens → no note. Never raises."""
     try:
         tin = _as_pos_int(usage.get("prompt_tokens"), 0)
         tout = _as_pos_int(usage.get("completion_tokens"), 0)
         if tin + tout == 0:
             return ""
         cost, assumed = usage_cost(model, usage, catalog)
-        est = " (est.)" if usage.get("_estimated") else ""
         if assumed:
-            return f" ≈ {_fmt_usd(cost)} (assumed pricing){est}"
+            return ""  # unknown real price → no honest comparison to make
         fcost = reference_cost(usage, resolve_reference_price(conf))
-        if fcost <= 0:
-            return f" ≈ {_fmt_usd(cost)}{est}"
+        if fcost <= 0 or cost <= 0:
+            return ""
+        est = " (est.)" if usage.get("_estimated") else ""
         saved = fcost - cost
         if saved <= 0:
-            return (f" ≈ {_fmt_usd(cost)} (vs ~{_fmt_usd(fcost)} frontier — "
-                    f"costlier, no saving){est}")
+            return f" — costlier than a frontier model{est}"
         pct = int(saved / fcost * 100)  # floored: 93.7% claims 93%
         if pct < 1:
-            return f" ≈ {_fmt_usd(cost)} (vs ~{_fmt_usd(fcost)} frontier){est}"
-        return (f" ≈ {_fmt_usd(cost)} (vs ~{_fmt_usd(fcost)} frontier — "
-                f"saved {pct}%){est}")
+            return ""
+        return f" — ~{pct}% cheaper than a frontier model{est}"
     except Exception:  # pragma: no cover — a receipt must never kill a result
         return ""
 
@@ -1269,22 +1250,19 @@ def savings_note_by_served(usage_by_model, catalog=None, conf=None):
         if tot["prompt_tokens"] + tot["completion_tokens"] == 0:
             return ""
         est = " (est.)" if est_any else ""
-        mixed = f"mixed serving, {len(usage_by_model)} models; "
+        mixed = f"mixed serving, {len(usage_by_model)} models — "
         if assumed_any:
-            return f" ≈ {_fmt_usd(cost)} ({mixed}assumed pricing){est}"
+            return ""  # unknown real price on some sample → no honest claim
         fcost = reference_cost(tot, resolve_reference_price(conf))
-        if fcost <= 0:
-            return f" ≈ {_fmt_usd(cost)} ({mixed.rstrip('; ')}){est}"
+        if fcost <= 0 or cost <= 0:
+            return ""
         saved = fcost - cost
         if saved <= 0:
-            return (f" ≈ {_fmt_usd(cost)} ({mixed}vs ~{_fmt_usd(fcost)} "
-                    f"frontier — costlier, no saving){est}")
+            return f" — {mixed}costlier than a frontier model{est}"
         pct = int(saved / fcost * 100)  # floored: 93.7% claims 93%
         if pct < 1:
-            return (f" ≈ {_fmt_usd(cost)} ({mixed}vs ~{_fmt_usd(fcost)} "
-                    f"frontier){est}")
-        return (f" ≈ {_fmt_usd(cost)} ({mixed}vs ~{_fmt_usd(fcost)} "
-                f"frontier — saved {pct}%){est}")
+            return ""
+        return f" — {mixed}~{pct}% cheaper than a frontier model{est}"
     except Exception:  # pragma: no cover — a receipt must never kill a result
         return ""
 
@@ -1603,14 +1581,19 @@ def _fleet_reserve(expected, ceiling, args, conf):
                     _write_reservations(path, records)  # persist the prune
                 except Exception:  # noqa: BLE001 — best-effort only
                     pass
+                _, user_set = _ceiling(conf)
                 _fail_exit(
                     args, _argv_command(), "cost",
-                    f"estimated ~${expected:.2f} plus ${active_total:.2f} "
-                    f"already reserved by {len(siblings)} running ambient "
-                    f"call(s) exceeds the ${ceiling:.2f} fleet spend "
-                    "ceiling — pass --allow-cost, raise AMBIENT_MAX_SPEND, "
-                    "or set AMBIENT_FLEET_BUDGET=off to proceed."
-                )
+                    (f"estimated ~${expected:.2f} plus ${active_total:.2f} "
+                     f"already reserved by {len(siblings)} running ambient "
+                     f"call(s) exceeds your ${ceiling:.2f} fleet spend "
+                     "ceiling — pass --allow-cost, raise AMBIENT_MAX_SPEND, or "
+                     "set AMBIENT_FLEET_BUDGET=off to proceed.") if user_set else
+                    (f"this run, plus the spend already reserved by "
+                     f"{len(siblings)} running ambient call(s), would exceed "
+                     "the shared spend budget — pass --allow-cost, raise "
+                     "AMBIENT_MAX_SPEND, or set AMBIENT_FLEET_BUDGET=off to "
+                     "proceed."))
             rid = own[0]["id"] if own else \
                 f"{os.getpid()}-{time.time_ns()}-{os.urandom(4).hex()}"
             siblings.append({"pid": os.getpid(), "ts": now,
@@ -1642,54 +1625,54 @@ def cost_gate(catalog, model, input_chars, n_calls, args, conf,
     expected, bound, assumed = estimate_cost_fb(
         catalog, model, input_chars, n_calls, args.max_tokens, args, conf,
         per_call_chars=per_call_chars, per_call_tokens=per_call_tokens)
-    note = " — assumed worst-case pricing (model unpriced)" if assumed else ""
-    in_tok = int(input_chars / _cost_cpt(model))
-    print(
-        f"ambient: estimated cost ~${expected:.2f} (hard bound ${bound:.2f}){note} "
-        f"({in_tok:,} input tokens, up to {n_calls} call(s))",
-        file=sys.stderr,
-    )
+    # No routine dollar figure is printed — billing is plan-dependent, so the
+    # gate stays silent unless it actually has to refuse.
     _gate_amount(expected, args, conf, bound=bound)
 
 
-def _gate_amount(expected, args, conf, bound=None):
-    """Ceiling + TTY confirmation on an expected dollar figure — shared by the
-    single-model gate and the per-model-priced consensus gate. The ceiling
-    binds the EXPECTED spend (the bound over-states 10-30x and would over-
-    refuse legitimate jobs), but the worst-case bound gets its own guard at
-    3x the ceiling so the configured limit can never be blown past silently
-."""
-    raw = (os.environ.get("AMBIENT_MAX_SPEND")
-           or conf.get("AMBIENT_MAX_SPEND") or "5")
+def _ceiling(conf):
+    """(effective ceiling, user_set): the spend cap and whether the USER set it.
+    Default is a silent safety cap; a dollar figure is only ever surfaced when
+    the user chose their own AMBIENT_MAX_SPEND."""
+    raw = os.environ.get("AMBIENT_MAX_SPEND") or conf.get("AMBIENT_MAX_SPEND")
     try:
-        ceiling = float(raw)
+        return (float(raw) if raw else 5.0), bool(raw)
     except ValueError:
-        ceiling = 5.0
-    if expected > ceiling and not getattr(args, "allow_cost", False):
+        return 5.0, False
+
+
+def _gate_amount(expected, args, conf, bound=None):
+    """Enforce the spend ceiling on the expected figure, plus a worst-case guard
+    at 3x. The ceiling is a SILENT safety cap by default; a dollar figure is
+    surfaced only when the user set AMBIENT_MAX_SPEND themselves (their number).
+    The bound over-states 10-30x, so the ceiling binds EXPECTED spend."""
+    ceiling, user_set = _ceiling(conf)
+    allow = getattr(args, "allow_cost", False)
+    if expected > ceiling and not allow:
         _fail_exit(
             args, _argv_command(), "cost",
-            f"estimated ~${expected:.2f} exceeds the ${ceiling:.2f} spend "
-            "ceiling — pass --allow-cost, or raise AMBIENT_MAX_SPEND, to proceed."
-        )
-    if bound is not None and bound > ceiling * 3 \
-            and not getattr(args, "allow_cost", False):
+            (f"estimated ~${expected:.2f} exceeds your ${ceiling:.2f} spend "
+             "ceiling — pass --allow-cost, or raise AMBIENT_MAX_SPEND, to "
+             "proceed.") if user_set else
+            ("this run would be unusually large — pass --allow-cost to "
+             "proceed, or set AMBIENT_MAX_SPEND to set your own ceiling."))
+    if bound is not None and bound > ceiling * 3 and not allow:
         _fail_exit(
             args, _argv_command(), "cost",
-            f"the WORST-CASE spend for this run (${bound:.2f}) exceeds "
-            f"3x your ${ceiling:.2f} ceiling — pass --allow-cost, or raise "
-            "AMBIENT_MAX_SPEND, to proceed."
-        )
+            (f"the WORST-CASE spend for this run (${bound:.2f}) exceeds "
+             f"3x your ${ceiling:.2f} ceiling — pass --allow-cost, or raise "
+             "AMBIENT_MAX_SPEND, to proceed.") if user_set else
+            ("the worst-case spend for this run is unusually large — pass "
+             "--allow-cost to proceed, or set AMBIENT_MAX_SPEND."))
     # the same ceiling, enforced as an AGGREGATE across every
     # concurrently-running ambient process (SKILL.md fleet contract) — a
     # 10-wide fan-out shares ONE budget instead of multiplying it by 10.
-    # --allow-cost bypasses the fleet gate exactly like the checks above.
-    if not getattr(args, "allow_cost", False):
+    if not allow:
         _fleet_reserve(expected, ceiling, args, conf)
     if (expected > 0.50 and sys.stdin.isatty()
             and not getattr(args, "yes", False)):
-        # Prompt on STDERR, not stdout: `ambient audit --json > out.json` from an
-        # interactive shell must not write "Proceed?" into the captured JSON.
-        sys.stderr.write(f"Proceed with an estimated ~${expected:.2f}? [y/N] ")
+        # Prompt on STDERR, not stdout, so a captured --json stream stays clean.
+        sys.stderr.write("This is a larger-than-usual run — proceed? [y/N] ")
         sys.stderr.flush()
         try:
             ans = input().strip().lower()
@@ -2095,16 +2078,9 @@ def cost_gate_mr(catalog, model, reduce_model, input_chars, n_chunks, args,
             catalog, model, reduce_model, input_chars, n_chunks,
             args.max_tokens, args, conf, extra_calls=extra_calls,
             synthesis=synthesis, per_call_chars=per_call_chars)
-    note = (" — assumed worst-case pricing (model unpriced)"
-            if assumed else "")
     detail = (f"map={model}, deterministic merge — no synthesis call"
               if not synthesis else f"map={model}, reduce={rmodel}")
-    in_tok = int(input_chars / _cost_cpt(model))
-    print(
-        f"ambient: estimated cost ~${expected:.2f} (hard bound ${bound:.2f})"
-        f"{note} ({in_tok:,} input tokens; {detail})",
-        file=sys.stderr,
-    )
+    print(f"ambient: {detail}", file=sys.stderr)
     _gate_amount(expected, args, conf, bound=bound)
 
 
@@ -2240,16 +2216,14 @@ def resolve_auto_model(spec, catalog, conf, input_chars=0, args=None,
                            -_as_pos_int(m.get("context_length"), 0), m["id"]))
         pick = ranked[0]["id"]
         why = "cheapest READY that fits"
-    price = model_pricing(catalog, pick)
-    tail = f", ${price[1]:.2f}/Mtok out" if price else ""
-    print(f"ambient: {label} {spec} -> {pick} ({why}{tail})", file=sys.stderr)
+    print(f"ambient: {label} {spec} -> {pick} ({why})", file=sys.stderr)
     return pick
 
 
 def preflight_hint(model, catalog, conf, input_chars=0):
     """ADVISORY ONLY. One stderr line when the user's resolved
     CONCRETE model has no live workers, or the whole input cannot fit its
-    context window — naming READY alternatives with their price. It never
+    context window — naming READY alternatives. It never
     changes the model, never blocks, and says so: model choice is SACRED."""
     if not catalog:
         return None  # degraded/offline catalog — nothing trustworthy to say
@@ -2284,8 +2258,7 @@ def preflight_hint(model, catalog, conf, input_chars=0):
     alts.sort()
     line = "ambient: note — " + "; ".join(problems)
     if alts:
-        shown = ", ".join(f"{mid} (${pr:.2f}/Mtok out)"
-                          for pr, mid in alts[:4])
+        shown = ", ".join(mid for _pr, mid in alts[:4])
         line += f" — READY: {shown}; pick with -m or -m auto"
     line += ". (advisory only — your model choice is unchanged)"
     print(line, file=sys.stderr)
@@ -3474,13 +3447,9 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                                 > alt_profile.context_length:
                             alt = None  # can't hold input+output — don't switch
                     if alt and alt_profile:
-                        cur_p = model_pricing(catalog, model)
-                        alt_p = model_pricing(catalog, alt)
-                        delta = (f" (${alt_p[1]:.2f}/M out vs ${cur_p[1]:.2f}/M)"
-                                 if cur_p and alt_p else "")
                         print(
                             f"ambient: '{model}' isn't serving right now — "
-                            f"using '{alt}'{delta} as you allowed (--fallback)",
+                            f"using '{alt}' as you allowed (--fallback)",
                             file=sys.stderr,
                         )
                         if spec._auto_budget:
@@ -3775,7 +3744,7 @@ def read_stdin_if_piped():
     if len(data) > ABS_MAX_CHARS:
         _fail_exit(
             None, _argv_command(), "input",
-            f"stdin exceeds {ABS_MAX_CHARS:,} chars (~$10+ of input tokens) "
+            f"stdin exceeds {ABS_MAX_CHARS:,} chars (too large for one request) "
             "— split the job (e.g. per-directory) as a cost sanity check."
         )
     return data
@@ -3842,7 +3811,7 @@ def read_files(paths):
             _fail_exit(
                 None, _argv_command(), "input",
                 f"input exceeds {ABS_MAX_CHARS:,} chars at {path} "
-                "(~$10+ of input tokens) — split the job as a cost sanity check."
+                "(too large for one request) — split the job into smaller pieces."
             )
         if not text.strip():
             print(f"ambient: skipping {path} (empty)", file=sys.stderr)
@@ -4689,7 +4658,6 @@ def _model_badges(m):
 
 
 def format_model_line(m, chat_default, code_default, note=None, hidden=False):
-    pricing = m.get("pricing") or {}
     # Same vocabulary as `ambient models`' section headers: a model is either
     # serving now (READY) or spins up on demand — never a bare mystery glyph.
     # Both labels render 9 columns wide so every row stays aligned.
@@ -4704,15 +4672,10 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
         marks.append("hidden")
     mark = f"  {','.join(marks)}" if marks else ""
     name = (m.get("name") or "").strip()
-    try:
-        pin = f"${float(pricing.get('input', 0)):>5.2f}"
-        pout = f"${float(pricing.get('output', 0)):>6.2f}"
-    except (TypeError, ValueError):
-        pin, pout = "$   ?", "$    ?"
     badges = _model_badges(m)
     line = (
         f"{flag}  {m['id']:40} {_humanize_ctx(m.get('context_length')):>5}ctx  "
-        f"{pin}/M in {pout}/M out  {badges:<20}{mark}"
+        f"{badges:<20}{mark}"
         + (f"   {name}" if name and name.lower() not in m["id"].lower() else "")
     )
     if note:
@@ -4757,7 +4720,6 @@ def cmd_models(args, api_key, api_url, conf):
             "ready": bool(m.get("is_ready")),
             "context_length": m.get("context_length"),
             "max_output_length": m.get("max_output_length"),
-            "pricing": m.get("pricing"),
             "features": m.get("supported_features") or [],
             "is_chat_default": m["id"] == chat_default,
             "is_code_default": m["id"] == code_default,
@@ -5538,9 +5500,9 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
         exp, bnd, _asm = estimate_cost(catalog, m, len(prompt), 1, budget)
         expected_sum += exp
         bound_sum += bnd
-        parts.append(f"{m.split('/')[-1]} ~${exp:.2f}")
-    print(f"ambient: consensus ask estimated ~${expected_sum:.2f} "
-          f"({' + '.join(parts)})", file=sys.stderr)
+        parts.append(m.split('/')[-1])
+    print(f"ambient: consensus ask across {len(parts)} models "
+          f"({', '.join(parts)})", file=sys.stderr)
     # ONE summed gate for the whole model set — ceiling + fleet reservation
     # + TTY confirmation, before the first call.
     _gate_amount(expected_sum, spec, conf, bound=bound_sum)
@@ -6496,8 +6458,8 @@ def repo_audit_inputs(args, api_key):
             _fail_exit(
                 args, "audit", "cost",
                 f"repo totals ~{total:,}+ chars with line-number gutters — "
-                f"over the {ABS_MAX_CHARS:,}-char input ceiling (~$10+ of "
-                "input tokens). Audit a subdirectory (--repo DIR/sub), or "
+                f"over the {ABS_MAX_CHARS:,}-char input ceiling. "
+                "Audit a subdirectory (--repo DIR/sub), or "
                 "pass --allow-cost or --allow-partial to audit the files "
                 "that fit, with the rest reported as an explicit coverage "
                 "gap.",
@@ -7102,7 +7064,7 @@ def _consensus_estimate(catalog, models, labeled, total,
         expected_sum += exp_m
         bound_sum += bnd_m
         assumed_any = assumed_any or assumed_m
-        parts.append(f"{m.split('/')[-1]} ~${exp_m:.2f}")
+        parts.append(m.split('/')[-1])
         per_model_chunks[m] = n_calls_m
     return expected_sum, bound_sum, parts, per_model_chunks, assumed_any
 
@@ -7243,9 +7205,7 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
         f"{meta['chars']:,} chars "
         f"({'git-tracked' if meta['git'] else 'walked'}"
         + (f"; skipped {skipped_bits}" if skipped_bits else "") + ") → "
-        f"{strategy}, est ~${expected:.2f} "
-        f"(hard bound ${bound:.2f})"
-        + (" — assumed pricing" if assumed else ""),
+        f"{strategy}",
         file=sys.stderr,
     )
     if meta["omitted_over_cap"]:
@@ -7367,8 +7327,6 @@ def cmd_audit(args, api_key, api_url, conf):
                   f"across {len(consensus_models)} model(s) "
                   "(deterministic merge — no synthesis)")
             print(f"  format:       {args.format}")
-            print(f"  est. cost:    ~${expected:.2f} (hard bound ${bound:.2f})"
-                  + (" — assumed pricing" if assumed else ""))
             return
         # Mirror the live path's chunking AND its gate (M2): the shared
         # split helper prices map/reduce lanes exactly like cost_gate_mr
@@ -7398,8 +7356,6 @@ def cmd_audit(args, api_key, api_url, conf):
         print(f"  output budget: {args.max_tokens:,} tokens/call")
         print(f"  strategy:     {'single-shot (one pass)' if one_pass else f'map-reduce → {n_chunks} chunks, up to {min(_resolve_parallel(args), n_chunks)} parallel + synthesis'}")
         print(f"  format:       {args.format}")
-        print(f"  est. cost:    ~${expected:.2f} (hard bound ${bound:.2f})"
-              + (" — assumed pricing" if assumed else ""))
         return
 
     if consensus_models:
@@ -7425,8 +7381,8 @@ def cmd_audit(args, api_key, api_url, conf):
         # each model priced on its own chunking, map-only.
         expected_sum, bound_sum, parts, _per_chunks, _assumed = \
             _consensus_estimate(catalog, models, labeled, total, explicit_mt)
-        print(f"ambient: consensus estimated ~${expected_sum:.2f} "
-              f"({' + '.join(parts)})", file=sys.stderr)
+        print(f"ambient: consensus across {len(parts)} models "
+              f"({', '.join(parts)})", file=sys.stderr)
         # Pass the summed worst-case bound so the 3x-ceiling guard fires for
         # consensus too (a multi-model fan-out at large --max-tokens can be far
         # over the ceiling even when the 'expected' figure is under it).
@@ -7632,9 +7588,8 @@ def cmd_audit(args, api_key, api_url, conf):
                     per_call_chars=sizes_m or None)
                 expected_sum += exp_m
                 bound_sum += bnd_m
-            print(f"ambient: best-of {best_of_k} audit estimated "
-                  f"~${expected_sum:.2f} on {model} (temperature "
-                  f"{args.temperature})"
+            print(f"ambient: best-of {best_of_k} audit on {model} at "
+                  f"temperature {args.temperature}"
                   + (f" — {cached_samples}/{best_of_k} sample(s) fully "
                      "cached, not re-billed" if cached_samples else ""),
                   file=sys.stderr)
@@ -8535,8 +8490,6 @@ def cmd_build(args, api_key, api_url, conf):
               f"({'writes ON (--apply)' if args.apply else 'manifest only'})")
         print(f"  caps:          ≤{args.max_files} files, "
               f"≤{args.max_file_bytes:,} bytes/file")
-        print(f"  est. cost:     ~${expected:.2f} (hard bound ${bound:.2f})"
-              + (" — assumed pricing" if assumed else ""))
         return
 
     # LIVE path only: distill an oversized context now that dry-run is ruled out.
@@ -8726,10 +8679,6 @@ def cmd_build(args, api_key, api_url, conf):
             catalog, model, prompt_chars * max_gen_calls,
             max_gen_calls, args.max_tokens, args, conf,
             per_call_chars=[prompt_chars] * max_gen_calls)
-        print(f"ambient: build estimated ~${expected:.2f} "
-              f"(hard bound ${bound:.2f})"
-              + (" — assumed worst-case pricing" if assumed else ""),
-              file=sys.stderr)
         _gate_amount(expected, args, conf, bound=bound)
     rf_files = response_format_for(profile, BUILD_FILES_SCHEMA)
     gen_extra = ("" if (rf_files and rf_files.get("type") == "json_schema")
@@ -9096,7 +9045,7 @@ def _verify_and_store_key(key, conf, use_file):
     diagnosis + support pointer when the key can't be certified."""
     api_url = resolve_api_url(conf)
     host = urllib.parse.urlsplit(api_url).hostname
-    print(f"Verifying key with {host} (one tiny paid completion, <$0.001)…",
+    print(f"Verifying key with {host} (one tiny paid completion)…",
           file=sys.stderr)
     try:
         status, body = api_request(api_url, key, "/v1/models", timeout=30)
@@ -9511,33 +9460,30 @@ def cmd_usage(args):
         if raw is None:
             tail = "est n/a"
         elif raw[0] == "partial":
-            # Known cost is a lower bound; no frontier/saving is claimed.
-            tail = (f"est ${_usd_amt(raw[1])}+ "
-                    "(partial — some records unpriced)")
+            tail = "(partial — some records unpriced)"
         else:
-            cost, fcost, saved, pct = raw  # RAW math — round only in print
-            tail = (f"est ${_usd_amt(cost)}  "
-                    f"vs frontier ~${_usd_amt(fcost)}")
+            _cost, _fcost, saved, pct = raw  # RAW math
             if pct is not None:
-                tail += f"  saved ${_usd_amt(saved)} ({pct}%)"
+                tail = f"~{pct}% cheaper than frontier"
             elif saved < 0:
-                tail += f"  costlier +${_usd_amt(-saved)}"
+                tail = "costlier than frontier"
+            else:
+                tail = ""
         if r["est_records"]:
             tail += f"  [{r['est_records']} est.]"
         print(
             f"  {r['model']:42} {r['calls']:4} calls  in={r['in']:>9,}  "
             f"out={r['out']:>9,}  {tail}"
         )
-    total_line = f"Total estimated: ${_usd_amt(grand)}"
     if grand_frontier > 0 and grand_saved > 0:
         pct = int(grand_saved / grand_frontier * 100)
-        total_line += (f" (frontier-equivalent ~${_usd_amt(grand_frontier)} — "
-                       f"saved ${_usd_amt(grand_saved)}, {pct}%)")
+        total_line = f"Overall: ~{pct}% cheaper than a frontier-equivalent model"
     elif grand_frontier > 0 and grand_saved < 0:
-        total_line += (f" (frontier-equivalent ~${_usd_amt(grand_frontier)} — "
-                       f"costlier by ${_usd_amt(-grand_saved)})")
+        total_line = "Overall: costlier than a frontier-equivalent model"
+    else:
+        total_line = "Overall usage summary"
     if not priced_all:
-        total_line += " (+ unpriced models)"
+        total_line += " (some models unpriced)"
     print(total_line)
     if est_records:
         print(f"note: {est_records} estimated record(s) — token counts "
@@ -10040,7 +9986,7 @@ def _configure_audit(sub):
         help="audit a whole repository/directory (default .): text source "
              "files via git ls-files (.gitignore respected) or a safe walk; "
              "binaries, lockfiles and vendored dirs skipped; file count, "
-             "size and est. cost reported BEFORE anything is sent",
+             "input size reported BEFORE anything is sent",
     )
     p.add_argument(
         "--deep", dest="deep", action="store_true", default=None,
@@ -10444,7 +10390,7 @@ def shielded_main():
                "full details.")
         # Even the last-resort floor honors the --json contract (redacted).
         _fail_exit(None, _argv_command(), "internal", msg, api_key=key,
-                   prose=f"ambient: {msg}")
+                   prose=f"ambient [internal]: {msg}")
 
 
 if __name__ == "__main__":

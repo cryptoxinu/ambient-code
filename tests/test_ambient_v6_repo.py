@@ -336,7 +336,7 @@ class TestAuditRepo(unittest.TestCase):
         text = err.getvalue()
         self.assertIn("repo audit plan", text)
         self.assertIn("3 files", text)          # binary/lockfile/vendored out
-        self.assertRegex(text, r"est(\.|imated)? ")
+        self.assertIn("chunk", text)            # strategy shown (no dollar cost)
         self.assertEqual(len(mr_calls), 1)
         self.assertTrue(gated)                   # cost gate fired
         call = mr_calls[0]
