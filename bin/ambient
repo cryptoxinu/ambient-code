@@ -118,8 +118,10 @@ ANSI_RE = re.compile(
     r"|[PX^_][^\x1b]*(?:\x1b\\)?"           # DCS/SOS/PM/APC
     r"|[@-Z\\-_=><~])"                      # two-char sequences
 )
-# Strips C0 controls 0x00-0x08 and 0x0b-0x1f (incl. \x0d CR) plus DEL; keeps only \t (0x09) and \n (0x0a).
-CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# Strips C0 controls 0x00-0x08 and 0x0b-0x1f (incl. \x0d CR), DEL (0x7f), and the
+# C1 control block (0x80-0x9f) — keeps only \t (0x09) and \n (0x0a). C1 stripping
+# is defense-in-depth: some terminals in 8-bit mode treat 0x9b/0x9d as CSI/OSC.
+CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x80-\x9f]")
 # Kimi is the default for BOTH lanes; GLM-5.2 stays fully selectable
 # (`ambient use z-ai/glm-5.2 --chat`).
 DEFAULT_MODEL = "moonshotai/kimi-k2.7-code"
@@ -390,6 +392,25 @@ def resolve_key_and_backend(conf):
     return None, None
 
 
+def _is_local_host(host):
+    """True ONLY for a loopback host. The AMBIENT_ALLOW_INSECURE local-dev
+    escape may point the key-bearing endpoint here without a recorded trust
+    decision. Deliberately NOT is_private / is_link_local / 0.0.0.0: an RFC-1918
+    or link-local address can be a REMOTE box on a LAN/VPN, and this must never
+    whitelist a non-local host (a single injected AMBIENT_API_URL would then
+    exfil the key). A non-loopback dev gateway must use `ambient trust-url`.
+    Residual: a rebound `localhost` needs host-file/DNS control — a deeper
+    compromise than the injected-env-var threat this guard addresses."""
+    import ipaddress
+    h = (host or "").lower().strip("[]")   # tolerate [::1]-style IPv6 literals
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
 def resolve_api_url(conf):
     from_env = os.environ.get("AMBIENT_API_URL")
     api_url = (from_env or conf.get("AMBIENT_API_URL") or DEFAULT_API_URL).rstrip("/")
@@ -407,8 +428,12 @@ def resolve_api_url(conf):
     # trust decision (ambient trust-url), and an ENV-sourced override needs a
     # second env var so a single injected variable is never sufficient.
     host = (parts.hostname or "").lower()
+    # AMBIENT_ALLOW_INSECURE bypasses host pinning ONLY for a local host (its
+    # documented local-dev purpose) — never for an arbitrary public host, so a
+    # single injected AMBIENT_API_URL=https://evil.com can't exfil the key.
     if host == "ambient.xyz" or host.endswith(".ambient.xyz") \
-            or os.environ.get("AMBIENT_ALLOW_INSECURE") == "1":
+            or (os.environ.get("AMBIENT_ALLOW_INSECURE") == "1"
+                and _is_local_host(host)):
         return api_url
     if conf.get("AMBIENT_TRUSTED_URL") == api_url and (
             not from_env or os.environ.get("AMBIENT_ALLOW_URL") == "1"):
@@ -510,6 +535,17 @@ def redact(text, api_key):
     if os.environ.get("AMBIENT_NO_SANITIZE") != "1":
         text = CTRL_RE.sub("", ANSI_RE.sub("", text))
     return text
+
+
+def sanitize(text):
+    """Neutralize terminal-escape/control injection in untrusted NETWORK-derived
+    strings (catalog model IDs, probe details) before printing. Same filter as
+    redact() but with no api-key substitution — these are not secrets, just
+    attacker-controllable if the endpoint is compromised/MITM'd. Coerces a
+    non-str (e.g. a malformed catalog value) to str so the filter still runs."""
+    if text is None or isinstance(text, str):
+        return redact(text, "")
+    return redact(str(text), "")
 
 
 def _stderr_is_tty():
@@ -2620,7 +2656,7 @@ def auth_probe(api_url, api_key, models):
         api_url, api_key, "/v1/chat/completions", payload, timeout=60
     )
     if status == 200:
-        return True, "ok", f"live completion on {probe_model} succeeded"
+        return True, "ok", f"live completion on {sanitize(probe_model)} succeeded"
     category, detail = classify_error(status, body, api_key)
     if category == "model":
         # The not-serving 429 is only ever returned after auth succeeds.
@@ -4679,13 +4715,18 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
     mark = f"  {','.join(marks)}" if marks else ""
     name = (m.get("name") or "").strip()
     badges = _model_badges(m)
+    # id + name are catalog (network) data — sanitize before they hit the
+    # terminal (A12); the raw values are still used for the comparisons above.
+    disp_id = sanitize(m["id"])
+    disp_name = sanitize(name)
     line = (
-        f"{flag}  {m['id']:40} {_humanize_ctx(m.get('context_length')):>5}ctx  "
+        f"{flag}  {disp_id:40} {_humanize_ctx(m.get('context_length')):>5}ctx  "
         f"{badges:<20}{mark}"
-        + (f"   {name}" if name and name.lower() not in m["id"].lower() else "")
+        + (f"   {disp_name}" if name and name.lower() not in m["id"].lower()
+           else "")
     )
     if note:
-        line += f"   · {note[:40]}"
+        line += f"   · {sanitize(note[:40])}"
     return line
 
 
