@@ -370,7 +370,7 @@ class EngineVariantTests(unittest.TestCase):
                      _cache_get=lambda key, ttl: None):
             plans = amb._best_of_audit_misses(
                 rich_catalog(), "z-ai/glm-5.2", [("a.py", "print(1)\n")],
-                "SYS", spec, 3, False)
+                "SYS", spec, 3, False, None)
         self.assertEqual(seen_salts,
                          ["best-of:0", "best-of:1", "best-of:2"])
         self.assertEqual(len(plans), 3)

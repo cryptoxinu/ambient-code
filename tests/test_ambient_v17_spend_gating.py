@@ -484,6 +484,7 @@ class TestH3ExactWorkerPricing(unittest.TestCase):
             args = audit_args(paths=[path], allow_cost=True,
                               consensus="tiny/auditor,tiny/second",
                               max_tokens=50_000)
+            requested_mt = args.max_tokens  # capture BEFORE cmd_audit clamps args
             with patched(amb, safe_catalog=lambda *a, **k: catalog,
                          _consensus_estimate=spy,
                          run_one_audit=lambda *a, **k: ([], True),
@@ -494,8 +495,11 @@ class TestH3ExactWorkerPricing(unittest.TestCase):
         self.assertIsNotNone(seen.get("explicit_mt"),
                              "an explicit --max-tokens must reach the "
                              "consensus estimate")
-        # exactly the (clamped) explicit figure the worker specs carry
-        self.assertEqual(seen["explicit_mt"], args.max_tokens)
+        # A5: the RAW user --max-tokens reaches the estimate/workers — NOT the
+        # default-lane clamp (apply_output_budget mutates args.max_tokens down to
+        # the default model's cap, but each consensus member re-derives against
+        # its OWN profile, so the request must survive unclamped).
+        self.assertEqual(seen["explicit_mt"], requested_mt)  # 50_000, unclamped
 
     def test_consensus_auto_budget_keeps_profile_default_for_nonreasoners(self):
         catalog = h3_catalog()
@@ -524,7 +528,8 @@ class TestH3ExactWorkerPricing(unittest.TestCase):
             cns(max_tokens=explicit, _auto_budget=False))
         with patched(amb, _cache_get=lambda key, ttl: None):
             plans = amb._best_of_audit_misses(
-                catalog, "tiny/auditor", labeled, "SYS", spec, 3, True)
+                catalog, "tiny/auditor", labeled, "SYS", spec, 3, True,
+                spec.max_tokens)
         self.assertEqual(len(plans), 3)
         total = sum(len(t) for _, t in labeled)
         want = spec.with_output_budget(prof, total).max_tokens

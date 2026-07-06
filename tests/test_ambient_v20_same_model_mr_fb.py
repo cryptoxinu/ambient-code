@@ -451,7 +451,7 @@ class TestCallSiteWiring(unittest.TestCase):
                 labeled = [(p, fh.read())]
             args = ns(fallback=False, max_tokens=None, format="json")
             plans = amb._best_of_audit_misses(
-                cat, "reduce/tiny", labeled, "audit this", args, 2, False)
+                cat, "reduce/tiny", labeled, "audit this", args, 2, False, None)
         self.assertEqual(len(plans), 2)
         for plan in plans:
             self.assertEqual(len(plan), 4)

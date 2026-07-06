@@ -10,6 +10,8 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import os
+import subprocess
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -122,6 +124,71 @@ class TestA8SingleCallGateIsFallbackAware(unittest.TestCase):
                         "_single_call_gate must call estimate_cost_fb")
         self.assertFalse(called["plain"],
                          "_single_call_gate must NOT call plain estimate_cost")
+
+
+# ------------------------------------------------------ Phase 3: audit/build
+
+class TestA1ReadFilesMultibyte(unittest.TestCase):
+    """A1 (CRITICAL): a multibyte file within the CHAR budget must be read in
+    FULL — sizing the read by the char count in BYTES truncated UTF-8 files
+    mid-content (N bytes decode to fewer than N chars, so the cap never tripped
+    and the tail was silently dropped)."""
+
+    def test_multibyte_file_read_in_full_within_budget(self):
+        content = "配" * 50   # 50 chars, 150 UTF-8 bytes
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "cjk.txt")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            # cap = 100 chars: 50 < 100 so the file FITS; the old byte-sized
+            # read(100+1)=101 bytes would truncate it to ~33 chars.
+            with _patch_attr(amb, "ABS_MAX_CHARS", 100):
+                chunks = amb.read_files([p])
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0][1], content)   # all 50 chars, not truncated
+
+    def test_genuinely_over_cap_still_fails_loud(self):
+        content = "配" * 200   # 200 chars > cap 100
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "big.txt")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            with _patch_attr(amb, "ABS_MAX_CHARS", 100):
+                with self.assertRaises(SystemExit):
+                    amb.read_files([p])
+
+
+class TestA9GitDiffFromSubdirectory(unittest.TestCase):
+    """A9: `git diff` audit must read changed-file CONTENT even when invoked
+    from a subdirectory — git emits repo-root-relative paths, so CWD-relative
+    resolution silently dropped every file."""
+
+    def _git(self, *a, cwd):
+        subprocess.run(["git", *a], cwd=cwd, check=True,
+                       capture_output=True, text=True)
+
+    def test_staged_diff_from_subdir_includes_file_content(self):
+        with tempfile.TemporaryDirectory() as repo:
+            self._git("init", cwd=repo)
+            self._git("config", "user.email", "t@t.t", cwd=repo)
+            self._git("config", "user.name", "t", cwd=repo)
+            sub = os.path.join(repo, "src")
+            os.makedirs(sub)
+            fpath = os.path.join(sub, "main.py")
+            with open(fpath, "w") as fh:
+                fh.write("def f():\n    return 1  # UNIQUEMARKER\n")
+            self._git("add", "src/main.py", cwd=repo)
+            # run git_diff_inputs from the SUBDIR
+            cwd0 = os.getcwd()
+            try:
+                os.chdir(sub)
+                labeled = amb.git_diff_inputs(staged=True, ref=None)
+            finally:
+                os.chdir(cwd0)
+        blob = "\n".join(text for _lbl, text in labeled)
+        self.assertIn("UNIQUEMARKER", blob)   # full file content present
+        # and the changed file is a labeled input, not just the diff text
+        self.assertTrue(any("main.py" in lbl for lbl, _t in labeled))
 
 
 if __name__ == "__main__":

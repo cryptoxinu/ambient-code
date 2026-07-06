@@ -3840,8 +3840,16 @@ def read_files(paths):
             continue
         try:
             with open(path, "rb") as fh:
-                # Bounded read: a file that grows during read can't blow the cap.
-                raw = fh.read(ABS_MAX_CHARS - total + 1)
+                # Bounded read sized in BYTES to cover the remaining CHAR budget:
+                # UTF-8 is <=4 bytes/char, so (remaining_chars)*4 + 1 bytes
+                # captures every char up to the cap AND one extra so a genuinely
+                # over-cap file still trips the guard below. Sizing the read by
+                # the char count directly (read(ABS_MAX_CHARS - total + 1))
+                # truncated multibyte files mid-content — N bytes decode to
+                # fewer than N chars, so `total` stayed under the cap and the
+                # tail was silently dropped. A file that grows during read still
+                # can't blow the cap because the guard runs on decoded `total`.
+                raw = fh.read((ABS_MAX_CHARS - total) * 4 + 1)
         except OSError as err:
             print(f"ambient: skipping {path} ({err})", file=sys.stderr)
             continue
@@ -6725,11 +6733,31 @@ def git_diff_inputs(staged, ref):
     if not diff.strip():
         _fail_exit(None, "audit", "usage", "no changes to audit (empty diff).",
                    exit_code=EXIT_USAGE)
+    # git emits repo-root-relative paths; resolve them against the toplevel so
+    # the audit reads full file content from ANY subdirectory. Probing the raw
+    # (CWD-relative) path silently dropped every changed file when run outside
+    # the repo root, degrading the audit to diff-text-only with no warning.
+    root = git("rev-parse", "--show-toplevel").stdout.strip()
+    real_root = os.path.realpath(root) if root else None
     labeled = [("DIFF (git)", diff)]
     for path in git(*name_args).stdout.splitlines():
         path = path.strip()
-        if path and os.path.isfile(path):
-            labeled.extend(with_line_gutters(read_files([path])))
+        if not path:
+            continue
+        full = os.path.join(root, path) if root else path
+        # Defense-in-depth: never read outside the repo root, even if git ever
+        # emits an absolute or ..-traversing path from an unusual/malicious tree.
+        if real_root is not None:
+            real_full = os.path.realpath(full)
+            if real_full != real_root \
+                    and not real_full.startswith(real_root + os.sep):
+                print(f"ambient: skipping {path} (outside repo root)",
+                      file=sys.stderr)
+                continue
+        # read_files does its own lstat/S_ISREG/binary/empty guards (incl. the
+        # symlink block); keep the repo-relative label on the finding output.
+        for _p, text in read_files([full]):
+            labeled.extend(with_line_gutters([(path, text)]))
     return labeled
 
 
@@ -7139,7 +7167,7 @@ def _consensus_estimate(catalog, models, labeled, total,
 
 
 def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
-                          explicit_max_tokens):
+                          explicit_max_tokens, original_max_tokens):
     """[(miss_calls, miss_input_chars, sample_max_tokens, miss_call_chars)]
     per best-of sample — the salted cache entries the live run will NOT
     find, so the cost gate can price ONLY what will actually be billed
@@ -7160,9 +7188,11 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
     plans = []
     for i in range(k):
         # mirror _one_sample exactly — per-sample salt lane via replace
+        # A5: mirror _one_sample — RAW original_max_tokens, not the clamped
+        # spec.max_tokens — so this predicted cache key equals the live one.
         sa = dataclasses.replace(
             spec, _cache_salt=f"best-of:{i}",
-            max_tokens=spec.max_tokens if explicit_max_tokens else None)
+            max_tokens=original_max_tokens if explicit_max_tokens else None)
         a, sp, single, chunk, total = _audit_sample_prep(
             model, catalog, labeled, sys_prompt, sa)
         if total <= single:
@@ -7352,13 +7382,20 @@ def cmd_audit(args, api_key, api_url, conf):
     # resolves it for the DEFAULT model — consensus workers must not mistake
     # that derived number for an explicit choice and inherit it (R4).
     explicit_max_tokens = getattr(args, "max_tokens", None) is not None
+    # A5: capture the user's RAW --max-tokens BEFORE apply_output_budget clamps
+    # args.max_tokens to the DEFAULT-lane model's profile. Reading it back AFTER
+    # the clamp (the old `explicit_mt = args.max_tokens`) handed every
+    # consensus/best-of worker the default model's clamped number instead of the
+    # user's value — and under --consensus the clamping model may not even be a
+    # member of the set. Each worker must re-derive against its OWN profile.
+    original_max_tokens = getattr(args, "max_tokens", None)
     # Right-size the output budget to the actual work (A1): whole input if it
     # fits single-shot, else a chunk's worth.
     apply_output_budget(args, profile, total if eff_total <= single else chunk)
-    # what the consensus/best-of worker specs will carry as
-    # max_tokens (the user's explicit budget, or None = per-model auto) —
-    # threaded into the shared estimates so plan == gate == live.
-    explicit_mt = args.max_tokens if explicit_max_tokens else None
+    # what the consensus/best-of worker specs will carry as max_tokens (the
+    # user's explicit RAW budget, or None = per-model auto) — threaded into the
+    # shared estimates so plan == gate == live.
+    explicit_mt = original_max_tokens if explicit_max_tokens else None
 
     consensus_models = None
     if getattr(args, "consensus", None):
@@ -7492,9 +7529,13 @@ def cmd_audit(args, api_key, api_url, conf):
         # --fallback/AMBIENT_FALLBACK must never substitute a member. A
         # workerless model is reported as ITS OWN failure below. The worker
         # spec is a frozen REPLACE, never a mutated args copy.
+        # A5: the RAW user --max-tokens (original_max_tokens), NOT the
+        # apply_output_budget-clamped args.max_tokens — each worker re-derives
+        # against its OWN profile via with_output_budget, so a larger consensus
+        # member can use its bigger budget instead of the default model's clamp.
         worker_spec = dataclasses.replace(
             RequestSpec.from_args(args), _no_fallback=True,
-            max_tokens=args.max_tokens if explicit_max_tokens else None)
+            max_tokens=original_max_tokens if explicit_max_tokens else None)
         # ONE shared gate caps TOTAL concurrent network calls across every
         # model's inner fan-out at the resolved width — without it N models ×
         # N chunks each = width² simultaneous calls (bounded).
@@ -7668,7 +7709,7 @@ def cmd_audit(args, api_key, api_url, conf):
         # showed; on a warm one it prices strictly less — never more.
         miss_plans = _best_of_audit_misses(
             catalog, model, labeled, AUDIT_SYSTEM_PROMPT + focus, args,
-            best_of_k, explicit_max_tokens)
+            best_of_k, explicit_max_tokens, original_max_tokens)
         miss_calls_total = sum(c for c, _, _, _ in miss_plans)
         cached_samples = sum(1 for c, _, _, _ in miss_plans if c == 0)
         if miss_calls_total:
@@ -7710,10 +7751,12 @@ def cmd_audit(args, api_key, api_url, conf):
             # run_one_audit re-derives the budget per profile when auto.
             # gate_fallback=False: FAN-OUT worker — the batch gate above
             # reserved any --fallback swap exposure up front.
+            # A5: RAW --max-tokens (original_max_tokens), not the clamped
+            # args.max_tokens — each sample re-derives against the model profile.
             sa = dataclasses.replace(
                 RequestSpec.from_args(args), _cache_salt=f"best-of:{i}",
                 gate_fallback=False,
-                max_tokens=args.max_tokens if explicit_max_tokens else None)
+                max_tokens=original_max_tokens if explicit_max_tokens else None)
             return run_one_audit(model, catalog, labeled,
                                  AUDIT_SYSTEM_PROMPT + focus, sa, api_key,
                                  api_url, conf, gate=gate,
@@ -8523,15 +8566,30 @@ def cmd_build(args, api_key, api_url, conf):
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
     session = Session(api_url=api_url, api_key=api_key, conf=conf)
-    catalog = session.catalog()  # memoized: ONE fetch for the whole command
+    # DRY RUN must egress NOTHING — skip the live /v1/models fetch that the
+    # non-dry-run path memoizes here. route_model / model_profile tolerate an
+    # empty catalog (they fall back to the requested model spec + assumed
+    # sizing), so the preview stays fully functional with zero network egress.
+    # (Previously the fetch ran before the dry-run guard, sending a probe +
+    # Authorization header despite the "nothing sent" contract.)
+    catalog = [] if getattr(args, "dry_run", False) else session.catalog()
     ctx_probe = 0  # cheap size probe (stat only) for routing
     for p in (args.context or []):
         try:
             ctx_probe += os.path.getsize(p)
         except OSError:
             pass
-    model = route_model(args, conf, "code", catalog,
-                        input_chars=len(task) + ctx_probe)
+    if getattr(args, "dry_run", False):
+        # No catalog was fetched (zero egress), so an `auto` spec cannot resolve
+        # to a concrete READY pick — resolve_auto_model would exit "no model is
+        # serving". Name the concrete -m model, or the lane default for `auto`,
+        # so the plan (and model_profile sizing below) has a real model.
+        model = resolve_model(args, conf, "code")
+        if is_auto_model(model):
+            model = DEFAULT_CODE_MODEL
+    else:
+        model = route_model(args, conf, "code", catalog,
+                            input_chars=len(task) + ctx_probe)
     reduce_model = resolve_reduce_model(args, conf, model, catalog=catalog)
     profile = model_profile(catalog, model)
     single = profile.single_shot_chars
