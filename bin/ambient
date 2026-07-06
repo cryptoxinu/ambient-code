@@ -8631,14 +8631,27 @@ def _save_build_state(root, state):
               file=sys.stderr)
 
 
-def _load_build_state(root, task_sha):
+def _load_build_state(root, task_sha, max_plan=512, max_file_bytes=None):
     """Resume state is UNTRUSTED data (any process could have written it):
     every path re-fires through the firewall and every record's hash is
     re-verified, or the state is discarded — a poisoned state file must not
-    become a --dir escape on the next --apply."""
+    become a --dir escape on the next --apply. task_sha matching is cache
+    IDENTITY, not integrity, so the user's own caps are re-enforced against the
+    loaded state: `max_plan` (= --max-files) bounds BOTH the accepted plan items
+    AND the resumed `done` files, and `max_file_bytes` (= --max-file-bytes)
+    drops any over-cap resumed file — a same-hash poisoned state cannot apply
+    more or bigger files than the current invocation allows."""
+    # Bound parse-time allocation from the untrusted state to a PLAUSIBLE size
+    # for the current caps (max_plan files × max_file_bytes, ×6 for worst-case
+    # JSON escaping, + overhead) — big enough for any legit state, small enough
+    # to refuse a bloated poisoned one.
+    read_cap = max(max_plan, 1) * max(max_file_bytes or 200_000, 1) * 6 + 2_000_000
     try:
         with open(_build_state_path(root), encoding="utf-8") as fh:
-            st = json.load(fh)
+            raw = fh.read(read_cap + 1)
+            if len(raw) > read_cap:
+                return None            # implausibly large state → discard
+            st = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return None
     if not (isinstance(st, dict) and st.get("version") == 1
@@ -8648,18 +8661,27 @@ def _load_build_state(root, task_sha):
         return None
     try:
         plan = []
-        for item in st["plan"][:512]:
+        for item in st["plan"][:max_plan]:
             if not isinstance(item, dict):
                 return None
             item = dict(item)
             item["path"] = safe_relpath(str(item.get("path", "")), root)
             plan.append(item)
+        plan_paths = {item["path"] for item in plan}
         done = {}
         for k, rec in st["done"].items():
             rel = safe_relpath(str(k), root)
+            # A resumed `done` file MUST be a completed item of the (capped)
+            # plan — else a poisoned state with a disjoint done set could apply
+            # files beyond --max-files / unplanned paths.
+            if rel not in plan_paths:
+                continue
             if not (isinstance(rec, dict)
                     and isinstance(rec.get("content"), str)):
                 return None
+            if max_file_bytes is not None and \
+                    len(rec["content"].encode()) > max_file_bytes:
+                continue                # respect --max-file-bytes on resumed files
             digest = hashlib.sha256(rec["content"].encode()).hexdigest()
             if rec.get("sha256") != digest:
                 return None  # tampered or torn — start fresh
@@ -8669,8 +8691,14 @@ def _load_build_state(root, task_sha):
               "ignoring it and starting fresh", file=sys.stderr)
         return None
     st["plan"], st["done"] = plan, done
-    if not isinstance(st.get("failed"), list):
-        st["failed"] = []
+    # M22/L6: `failed` items are dereferenced later (f["path"], f.get("reason"))
+    # — a torn/poisoned non-dict entry crashed the next build. Keep only
+    # well-formed records; drop the rest rather than crash.
+    failed = st.get("failed")
+    st["failed"] = ([f for f in failed
+                     if isinstance(f, dict) and isinstance(f.get("path"), str)
+                     and isinstance(f.get("reason"), str)]
+                    if isinstance(failed, list) else [])
     return st
 
 
@@ -8688,7 +8716,7 @@ def cmd_build(args, api_key, api_url, conf):
     warn_if_stdin_ignored("`build` does not read stdin — pass context with -f FILE")
     refuse_if_secrets([("task", task)], args.allow_secrets)
     root = os.path.abspath(os.path.expanduser(args.dir or "."))
-    headless = not sys.stdin.isatty()
+    headless = not _stdin_is_tty()   # M24: a closed stdin must not crash isatty()
     if args.apply and headless:
         if not args.dir:
             usage_exit("headless --apply requires an explicit --dir "
@@ -8827,11 +8855,17 @@ def cmd_build(args, api_key, api_url, conf):
                        api_key=api_key)
         context = context[:max(1000, single // 2)]
 
+    # M21: fold the caps into the identity so lowering --max-files/--max-file-
+    # bytes invalidates a cached larger plan instead of resuming it verbatim.
     task_sha = hashlib.sha256(
         (f"{task}\0{model}\0{','.join(sorted(args.context or []))}"
-         f"\0{raw_context_sha}").encode()
+         f"\0{raw_context_sha}\0{args.max_files}\0{args.max_file_bytes}").encode()
     ).hexdigest()
-    state = None if args.no_resume else _load_build_state(root, task_sha)
+    # max_plan = the user's OWN --max-files: task_sha matching is cache identity,
+    # not integrity, so a poisoned same-hash state must not exceed the cap.
+    state = None if args.no_resume else _load_build_state(
+        root, task_sha, max_plan=args.max_files,
+        max_file_bytes=args.max_file_bytes)
     if state:
         print(f"ambient: previous run found for this exact task — resuming "
               f"({len(state['done'])} file(s) already generated; "
@@ -9005,15 +9039,46 @@ def cmd_build(args, api_key, api_url, conf):
                                              "resume where this stopped"})
             continue
         want = [p["path"] for p in batch]
+
+        def _mk_user(overview, already_blk, ctx):
+            u = (f"TASK: {task}\n\nFULL PLAN (for cross-file consistency):\n"
+                 f"{overview}\n\nALREADY GENERATED (do not repeat):\n"
+                 f"{already_blk}\n\nGENERATE NOW — complete content for exactly "
+                 "these files:\n"
+                 + "\n".join(f"  {p['path']} — {p.get('purpose', '')}"
+                             for p in batch))
+            return u + (f"\n\nContext:\n{ctx}" if ctx else "")
+
         already = "\n".join(f"  {k}" for k in done) or "  (none yet)"
-        user = (f"TASK: {task}\n\nFULL PLAN (for cross-file consistency):\n"
-                f"{plan_overview}\n\nALREADY GENERATED (do not repeat):\n"
-                f"{already}\n\nGENERATE NOW — complete content for exactly "
-                "these files:\n"
-                + "\n".join(f"  {p['path']} — {p.get('purpose', '')}"
-                            for p in batch))
-        if context:
-            user += f"\n\nContext:\n{context}"
+        user = _mk_user(plan_overview, already, context)
+        # M44: keep the generation prompt within the model's single-shot window.
+        # Splitting the BATCH can't help (task/plan/already/context are
+        # batch-independent), so shrink the INPUT: drop the already-list, then
+        # truncate context, then condense the plan to paths only.
+        head = len(BUILD_GEN_PROMPT + gen_extra) + 2000   # scaffold + margin
+        if head + len(user) > single:
+            user = _mk_user(plan_overview, "  (omitted to fit the window)", context)
+        if head + len(user) > single and context:
+            room = max(0, single - head
+                       - len(_mk_user(plan_overview, "  (omitted)", "")))
+            user = _mk_user(plan_overview, "  (omitted)", context[:room])
+        if head + len(user) > single:
+            user = _mk_user("\n".join(f"  {p['path']}" for p in plan),
+                            "  (omitted)", "")
+        if head + len(user) > single:
+            # Still over even minimized. Split a multi-file batch BEFORE the API
+            # call (avoids a doomed 400 round-trip); a single-file batch that
+            # can't fit is an honest, non-splittable failure.
+            if len(batch) > 1:
+                mid = len(batch) // 2
+                queue.insert(0, batch[mid:])
+                queue.insert(0, batch[:mid])
+                continue
+            failed.append({"path": want[0],
+                           "reason": "prompt exceeds the model's context window "
+                                     "even minimized — split the task or use a "
+                                     "larger-context -m model"})
+            continue
         ga, _x = _ns_with(rf_files)
         gen_calls += 1
         try:

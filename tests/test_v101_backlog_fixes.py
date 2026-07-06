@@ -177,5 +177,48 @@ def _mk_usage_ledger(body):
     return p
 
 
+# ------------------------------------------------------- Phase 4: build lane
+
+class TestPhase4Build(unittest.TestCase):
+    def _write_state(self, root, st):
+        with open(amb._build_state_path(root), "w", encoding="utf-8") as fh:
+            fh.write(__import__("json").dumps(st))
+
+    def _base_state(self, **over):
+        st = {"version": 1, "task_sha": "SHA", "plan": [{"path": "a.py"}],
+              "done": {}, "failed": []}
+        st.update(over)
+        return st
+
+    def test_M22_poisoned_failed_entries_dropped_not_crash(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            self._write_state(root, self._base_state(
+                failed=[None, "x", {"path": "ok.py", "reason": "boom"},
+                        {"path": 5, "reason": "y"}]))
+            st = amb._load_build_state(root, "SHA")
+            self.assertIsNotNone(st)
+            # only the well-formed dict survives
+            self.assertEqual(st["failed"], [{"path": "ok.py", "reason": "boom"}])
+
+    def test_M10_max_plan_honors_caller_bound(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            big = [{"path": f"f{i}.py"} for i in range(700)]
+            self._write_state(root, self._base_state(plan=big))
+            # default 512 truncates...
+            self.assertEqual(len(amb._load_build_state(root, "SHA")["plan"]), 512)
+            # ...but a larger caller bound keeps the whole plan
+            self.assertEqual(
+                len(amb._load_build_state(root, "SHA", max_plan=1000)["plan"]),
+                700)
+
+    def test_M24_stdin_is_tty_survives_closed_stdin(self):
+        import io
+        import sys
+        with _patch(sys, "stdin", io.StringIO()):  # StringIO.isatty()==False, ok
+            self.assertFalse(amb._stdin_is_tty())
+
+
 if __name__ == "__main__":
     unittest.main()
