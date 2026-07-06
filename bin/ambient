@@ -1697,8 +1697,11 @@ def _gate_amount(expected, args, conf, bound=None):
     # the same ceiling, enforced as an AGGREGATE across every
     # concurrently-running ambient process (SKILL.md fleet contract) — a
     # 10-wide fan-out shares ONE budget instead of multiplying it by 10.
-    if not allow:
-        _fleet_reserve(expected, ceiling, args, conf)
+    # ALWAYS record the reservation, even under --allow-cost: _fleet_reserve
+    # skips only the REFUSAL on the allow path (still persisting the spend), so
+    # concurrent siblings still see this run's spend. Guarding this with
+    # `if not allow` let an --allow-cost run silently defeat the aggregate cap.
+    _fleet_reserve(expected, ceiling, args, conf)
     if (expected > 0.50 and sys.stdin.isatty()
             and not getattr(args, "yes", False)):
         # Prompt on STDERR, not stdout, so a captured --json stream stays clean.
@@ -1753,8 +1756,12 @@ def _single_call_gate(catalog, model, input_chars, args, conf):
     if max_tokens is None:  # defensive: caller skipped apply_output_budget
         max_tokens = spec.with_output_budget(
             model_profile(catalog, model), input_chars).max_tokens
-    expected, bound, _assumed = estimate_cost(
-        catalog, model, input_chars, 1, max_tokens)
+    # Fallback-aware, exactly like the batch gates: with --fallback live this
+    # single call may be re-served by a pricier candidate, so the reserve must
+    # cover the swap (estimate_cost_fb = base + max(0, alt - requested)). Byte-
+    # identical to estimate_cost when fallback is off / no pricier candidate.
+    expected, bound, _assumed = estimate_cost_fb(
+        catalog, model, input_chars, 1, max_tokens, args, conf)
     _gate_amount(expected, spec, conf, bound=bound)
 
 

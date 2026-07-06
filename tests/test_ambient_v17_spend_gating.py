@@ -270,13 +270,17 @@ class TestH1SingleAskFleetGate(unittest.TestCase):
                 self.assertNotIn(banned, err)
                 self.assertNotIn(banned, out)
 
-    def test_allow_cost_bypasses_the_single_call_fleet_gate(self):
+    def test_allow_cost_skips_refusal_but_still_reserves(self):
+        # A7: --allow-cost bypasses the REFUSAL, not the RESERVATION. The run
+        # must still be fleet-accounted so concurrent siblings see its spend —
+        # guarding the reservation behind `if not allow` let an --allow-cost run
+        # silently defeat the aggregate ceiling.
         with fleet_dir() as d:
             seed(d, [rec(4.99)])
             with env_var("AMBIENT_MAX_SPEND", "5"):
                 out, _err = self._run_ask(ask_args(allow_cost=True))
-            self.assertIn("hi", out)
-            self.assertEqual(len(store(d)), 1)  # only the seeded sibling
+            self.assertIn("hi", out)             # not refused (allow bypass)
+            self.assertEqual(len(store(d)), 2)   # seeded sibling + THIS run's reservation
 
 
 class TestH1CodeAndAuditLanes(unittest.TestCase):

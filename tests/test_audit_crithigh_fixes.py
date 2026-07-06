@@ -5,6 +5,8 @@ the best-of-3 self-audit. Phases are appended as they land.
 
 No network, no live API. Run: python3 -m pytest tests/test_audit_crithigh_fixes.py
 """
+import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
 import os
@@ -12,6 +14,16 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "bin", "ambient")
+
+
+@contextlib.contextmanager
+def _patch_attr(obj, name, value):
+    old = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, old)
 
 
 def load_module():
@@ -73,6 +85,43 @@ class TestA2InsecureBypassLoopbackOnly(unittest.TestCase):
         for h in ("192.168.1.5", "10.0.0.1", "169.254.1.1", "0.0.0.0",
                   "172.16.0.1", "evil.com", "api.ambient.xyz.evil.com", ""):
             self.assertFalse(amb._is_local_host(h), h)
+
+
+# ------------------------------------------------------- Phase 2: spend gate
+
+class TestA8SingleCallGateIsFallbackAware(unittest.TestCase):
+    """A8: _single_call_gate must price through the FALLBACK-AWARE estimator
+    (estimate_cost_fb), not the plain estimate_cost, so a --fallback swap is
+    reserved up front like the batch gates."""
+
+    def test_single_call_gate_uses_estimate_cost_fb(self):
+        called = {"fb": False, "plain": False}
+
+        # spy_fb returns a stub WITHOUT delegating to the real estimate_cost_fb
+        # (which itself calls estimate_cost internally) — so `plain` is set only
+        # if _single_call_gate calls the plain estimator DIRECTLY, which is the
+        # bug A8 fixes.
+        def spy_fb(*a, **k):
+            called["fb"] = True
+            return (0.0, 0.0, False)
+
+        def spy_plain(*a, **k):
+            called["plain"] = True
+            return (0.0, 0.0, False)
+
+        cat = [{"id": "m/x", "is_ready": True, "context_length": 128000,
+                "max_output_length": 32000, "supported_features": [],
+                "output_modalities": ["text"],
+                "pricing": {"input": 0.2, "output": 0.8}}]
+        args = argparse.Namespace(max_tokens=256, temperature=0.1, timeout=30,
+                                  fallback=False, allow_cost=True, yes=True)
+        with _patch_attr(amb, "estimate_cost_fb", spy_fb), \
+                _patch_attr(amb, "estimate_cost", spy_plain):
+            amb._single_call_gate(cat, "m/x", 4000, args, {})
+        self.assertTrue(called["fb"],
+                        "_single_call_gate must call estimate_cost_fb")
+        self.assertFalse(called["plain"],
+                         "_single_call_gate must NOT call plain estimate_cost")
 
 
 if __name__ == "__main__":
