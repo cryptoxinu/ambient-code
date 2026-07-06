@@ -235,7 +235,7 @@ run and compares it to a frontier reference — `[ambient <model> | in=X out=Y
 tokens — ~97% cheaper than a frontier model]` — relay the relative saving when
 the user asks what Ambient is worth. The reference is
 `AMBIENT_REFERENCE_PRICE` (env or config, like `AMBIENT_MAX_SPEND`): an
-`in/out` per-million-token pair (`3/15`) or one blended figure; the default `3/15` is a
+`in/out` per-million-token pair or one blended figure; the default is a
 representative frontier list price and explicitly an APPROXIMATION — offer to
 set it to the user's real baseline. The figures are deliberately
 conservative: unknown catalog pricing → worst-case cost shown as "(assumed

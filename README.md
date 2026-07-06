@@ -132,8 +132,8 @@ the same tokens would have cost at a frontier price:
 ```
 
 The frontier comparison uses `AMBIENT_REFERENCE_PRICE` (env or config):
-either an `in/out` per-million-token pair like `3/15` or a single blended figure like
-`10`. The default is `3/15` — a *representative frontier list price*
+either an `in/out` per-million-token pair or a single blended figure. The
+default is a representative frontier-model rate
 (approximation; set it to whatever baseline you actually compare against).
 The receipt never over-states savings: if a model's pricing is missing from
 the catalog the cost is shown at assumed worst-case rates with **no** savings

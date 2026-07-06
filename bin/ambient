@@ -921,11 +921,11 @@ def api_request(api_url, api_key, path, payload=None, timeout=DEFAULT_TIMEOUT_S)
             last_err = NetworkError(f"cannot reach {url} ({err.reason})")
         except (OSError, http.client.IncompleteRead) as err:
             # A dropped/incomplete read is a transient network fault, not a crash
-            # (Ambient self-audit #4) — treat like URLError so it retries/wraps.
+            # — treat like URLError so it retries/wraps.
             last_err = NetworkError(f"read from {url} failed ({err})")
         except json.JSONDecodeError:
             # Garbled body: retryable GETs try again; otherwise report cleanly
-            # instead of a hard sys.exit (Ambient self-audit #3).
+            # instead of a hard sys.exit.
             last_err = NetworkError(f"{url} returned malformed JSON")
         if attempt == 1 and retryable:
             print("ambient: network blip, retrying once...", file=sys.stderr)
@@ -3030,7 +3030,7 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                 raw_body = resp.read()
             except (OSError, http.client.IncompleteRead) as err:
                 # A reset/timeout mid-body is a transient network fault, not a
-                # crash — mirror api_request's hardening (Ambient self-audit #4).
+                # crash — mirror api_request's hardening.
                 raise NetworkError(
                     f"connection dropped reading response from {url} "
                     f"({err})") from err
@@ -4407,7 +4407,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     overhead = len(synth_system) + len(gap) + 200 * max(1, len(texts))
     # No 20k floor: a small-window model (e.g. gemma, single≈17.6k) would then
     # get a merge budget above its own window → doomed, re-billed synthesis
-    # calls (Ambient self-audit #1). Respect the model's real budget.
+    # calls. Respect the model's real budget.
     effective_budget = max(1_000, reduce_budget - overhead)
     # Budget-aware hierarchical reduce: pack partials into groups that each fit
     # the reduce budget (by CHARS, not by count), collapsing tier by tier.
@@ -8740,7 +8740,7 @@ def cmd_build(args, api_key, api_url, conf):
     gen_calls = 0
     if batches:
         prompt_chars = len(task) + len(context) + len(plan_overview) + 2000
-        # Fallback-aware (final-audit HIGH): under --fallback a generation call
+        # Fallback-aware (): under --fallback a generation call
         # may be re-served by a pricier candidate, so the up-front reserve must
         # cover that exposure across the batch/retry-cap set (byte-identical to
         # estimate_cost when fallback is off / SACRED / no costlier candidate).
@@ -9740,7 +9740,7 @@ def ensure_opencode_config(api_url, model):
         }
     try:
         # Atomic write so a mid-write failure can't destroy the user's existing
-        # opencode config with its custom providers (Ambient self-audit #2).
+        # opencode config with its custom providers.
         # This file may hold OTHER providers' literal API keys, so preserve its
         # restrictive mode across the rewrite: a fresh tmp defaults to the umask
         # (often 0644), and os.replace would hand that mode to the destination,
@@ -10482,7 +10482,7 @@ def shielded_main():
             raise
         # Resolve the REAL key (env > Keychain > file) so redaction works even
         # when the key is in the macOS Keychain and absent from the env file
-        # (Ambient self-audit #2: a conf-only lookup redacted with "" = no-op).
+        #.
         key = ""
         try:
             key = resolve_key_and_backend(read_config_file())[0] or ""

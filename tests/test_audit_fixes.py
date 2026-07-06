@@ -1,7 +1,7 @@
-"""Regression tests for the verified-audit remediation batch.
+"""Regression tests for an earlier remediation batch.
 
 Each test locks in a fix for a finding that was CONFIRMED by independent
-verification against the source (the Ambient self-audit of 2026-07-06):
+verification against the source (an internal review):
 
   F1  redact() strips carriage returns (terminal line-overwrite spoofing)
   F5  _finding_sig keys on the full path, not the basename (dedupe collision)

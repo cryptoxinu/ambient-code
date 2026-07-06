@@ -534,7 +534,7 @@ class TestM2DryRunParity(unittest.TestCase):
         self.assertEqual(k.get("extra_calls", 0), 1)
 
     def test_build_gate_is_fallback_aware(self):
-        # Final-audit HIGH: the build generation gate + dry-run must price the
+        # the build generation gate + dry-run must price the
         # generation calls via the fallback-aware helper so a --fallback swap to
         # a pricier candidate is reserved up front (byte-identical when off).
         catalog = fix_catalog()

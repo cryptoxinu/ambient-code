@@ -214,7 +214,7 @@ class TestSessionStartSelfHeal(unittest.TestCase):
         self.assertEqual(os.readlink(self.link), foreign)
 
     def test_foreign_symlink_named_ambient_is_never_repointed(self):
-        # The exact H2 gap the final audit flagged: a DIFFERENT tool literally
+        # The exact H2 gap the gap found was: a DIFFERENT tool literally
         # named `ambient` (target BASENAME is `ambient`, but its path has no
         # ambient-code component). The old basename-only guard would clobber it.
         foreign_dir = os.path.join(self.home, "othertool", "bin")
