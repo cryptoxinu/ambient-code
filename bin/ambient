@@ -3587,15 +3587,16 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # ignores it. Far better than recording/emitting a 0.
             filled = dict(usage)
             if not _as_pos_int(usage.get("prompt_tokens"), 0):
-                pt = int(sum(len(m.get("content", "")) for m in messages)
-                         / CHARS_PER_TOKEN)
-                if pt > 0:
-                    filled["prompt_tokens"] = pt
+                in_chars = sum(len(m.get("content", "")) for m in messages)
+                if in_chars > 0:  # min 1: a non-empty prompt is never 0 tokens
+                    filled["prompt_tokens"] = max(
+                        1, int(in_chars / CHARS_PER_TOKEN))
                     filled["_estimated"] = True
             if not _as_pos_int(usage.get("completion_tokens"), 0):
-                ct = int((len(content) + len(reasoning_text)) / CHARS_PER_TOKEN)
-                if ct > 0:
-                    filled["completion_tokens"] = ct
+                out_chars = len(content) + len(reasoning_text)
+                if out_chars > 0:
+                    filled["completion_tokens"] = max(
+                        1, int(out_chars / CHARS_PER_TOKEN))
                     filled["_estimated"] = True
             usage = filled
             # Reflect it in the body too — ask/code --json read body["usage"]
@@ -8951,7 +8952,12 @@ def cmd_build(args, api_key, api_url, conf):
                     actions[rel] = "write-failed"
                     failed.append({"path": rel, "reason": f"write failed: {err}"})
                     partial = True
-            written = True
+            # "written" == at least one file actually landed with the intended
+            # content (freshly created/overwritten, or already-present-and-
+            # matching). If every file skip-exists'd or write-failed, nothing
+            # landed and the header must NOT claim WRITTEN (Codex MED).
+            written = any(a in ("create", "overwrite", "unchanged")
+                          for a in actions.values())
         else:
             print("ambient: not written (declined) — the manifest below is "
                   "cached in .ambient-build.json; re-run with --apply --yes "
@@ -8987,11 +8993,12 @@ def cmd_build(args, api_key, api_url, conf):
     if written:
         target_state = "WRITTEN"
     elif getattr(args, "apply", False):
-        # --apply WAS passed but nothing landed (every planned file failed
-        # validation) — telling the user to "re-run with --apply" they already
-        # passed is nonsense; say WHY nothing was written instead.
-        target_state = (f"nothing written — all {len(failed)} planned file(s) "
-                        "failed" if failed else "nothing written")
+        # --apply WAS passed but nothing landed — telling the user to "re-run
+        # with --apply" they already passed is nonsense; say WHY instead. Files
+        # can be missing because they failed (validation/write) OR were skipped
+        # (already present without --force); the per-file lines below show which.
+        target_state = (f"nothing written — {len(failed)} file(s) failed"
+                        if failed else "nothing written")
     else:
         target_state = "manifest only — re-run with --apply to write"
     print(f"  target: {root} ({target_state})")
