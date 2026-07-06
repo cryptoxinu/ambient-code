@@ -219,8 +219,19 @@ class TestConsensusFailFast(unittest.TestCase):
         self.assertTrue(seen_kwargs["cancel_event"].is_set())
 
     def test_keyboard_interrupt_cancels_queued_models(self):
+        # F6: Ctrl-C during a consensus run must end the PROCESS promptly via
+        # os._exit(130) — non-daemon pool workers are joined by
+        # concurrent.futures' atexit, so merely re-raising would stall exit for
+        # up to --timeout if a sibling is mid-call. Mirrors cmd_map's contract.
         ran = []
         sibling_saw_cancel = []
+        exit_codes = []
+
+        def fake_exit(code):
+            # Halt cmd_audit exactly where a real os._exit would (nothing after
+            # may run), but keep the test process alive.
+            exit_codes.append(code)
+            raise SystemExit(code)
 
         def fake_audit(model, *a, **k):
             ran.append(model)
@@ -237,10 +248,15 @@ class TestConsensusFailFast(unittest.TestCase):
                          "fake/model-a", "fake/model-b"),
                      _gate_amount=lambda *a, **k: None,
                      run_one_audit=fake_audit), \
+                patched(amb.os, _exit=fake_exit), \
                 contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(KeyboardInterrupt):
+            with self.assertRaises(SystemExit) as cm:
                 amb.cmd_audit(args, KEY, "https://x", {})
+        self.assertEqual(exit_codes, [130],
+                         "Ctrl-C must os._exit(130) so non-daemon pool "
+                         "threads cannot stall process exit")
+        self.assertEqual(cm.exception.code, 130)
         self.assertLess(time.monotonic() - start, 3)
         self.assertEqual(ran[0], "fake/model-a")
         self.assertTrue(all(sibling_saw_cancel))

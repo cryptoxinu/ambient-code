@@ -5370,7 +5370,14 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
         except KeyboardInterrupt:
             print("\nambient: cancelling best-of…", file=sys.stderr)
             _abort()
-            raise
+            # Match cmd_map: non-daemon pool workers are joined by
+            # concurrent.futures' atexit at shutdown, so re-raising would stall
+            # exit-130 for up to --timeout if a sibling is mid-call. _abort()
+            # set aborted=True so the finally's blocking shutdown is skipped;
+            # os._exit after flushing both streams.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(130)
         finally:
             if not aborted:
                 pool.shutdown(wait=True)
@@ -5584,7 +5591,13 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
     except KeyboardInterrupt:
         print("\nambient: cancelling consensus ask…", file=sys.stderr)
         _abort()
-        raise
+        # Match cmd_map: non-daemon pool workers are joined by
+        # concurrent.futures' atexit at shutdown, so re-raising would stall
+        # exit-130 for up to --timeout if a sibling is mid-call. os._exit
+        # skips teardown — flush BOTH streams first so nothing is lost.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130)
     pool.shutdown(wait=True)
     answered = [(m, r) for m, r in zip(models, results) if r is not None]
     failed = [(m, e) for m, e in zip(models, failures) if e is not None]
@@ -7511,7 +7524,13 @@ def cmd_audit(args, api_key, api_url, conf):
         except KeyboardInterrupt:
             print("\nambient: cancelling consensus…", file=sys.stderr)
             _abort_consensus()
-            raise
+            # Match cmd_map: non-daemon pool workers are joined by
+            # concurrent.futures' atexit at shutdown, so re-raising would stall
+            # exit-130 for up to --timeout if a sibling is mid-call. os._exit
+            # skips teardown — flush BOTH streams first so nothing is lost.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(130)
         cpool.shutdown(wait=True)
         first_err = next((e for e in worker_errs if e is not None), None)
         if first_err is not None:
@@ -7696,7 +7715,13 @@ def cmd_audit(args, api_key, api_url, conf):
         except KeyboardInterrupt:
             print("\nambient: cancelling best-of…", file=sys.stderr)
             _abort_best_of()
-            raise
+            # Match cmd_map: non-daemon pool workers are joined by
+            # concurrent.futures' atexit at shutdown, so re-raising would stall
+            # exit-130 for up to --timeout if a sibling is mid-call. os._exit
+            # skips teardown — flush BOTH streams first so nothing is lost.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(130)
         bpool.shutdown(wait=True)
         first_err = next((e for e in worker_errs if e is not None), None)
         if first_err is not None:
