@@ -1184,16 +1184,6 @@ def reference_cost(usage, ref):
     return (tin * ref[0] + tout * ref[1]) / 1e6
 
 
-def _round_money(x):
-    """Display rounding for `ambient usage` figures: 4dp normally, but a
-    REAL nonzero figure must never flatten to 0 (sub-microdollar
-    spend rounded to $0 fabricated a ~100% saving). Tiny values keep 6
-    significant digits instead."""
-    if x and abs(x) < 0.0001:
-        return float(f"{x:.6g}")
-    return round(x, 4)
-
-
 def savings_note(model, usage, catalog=None, conf=None):
     """Receipt suffix: ' — ~97% cheaper than a frontier model (est.)'. Reports
     only the RELATIVE saving vs a frontier reference — never a dollar figure,
@@ -1587,11 +1577,11 @@ def _fleet_reserve(expected, ceiling, args, conf):
                 _, user_set = _ceiling(conf)
                 _fail_exit(
                     args, _argv_command(), "cost",
-                    (f"estimated ~${expected:.2f} plus ${active_total:.2f} "
-                     f"already reserved by {len(siblings)} running ambient "
-                     f"call(s) exceeds your ${ceiling:.2f} fleet spend "
-                     "ceiling — pass --allow-cost, raise AMBIENT_MAX_SPEND, or "
-                     "set AMBIENT_FLEET_BUDGET=off to proceed.") if user_set else
+                    (f"this run, plus the spend already reserved by "
+                     f"{len(siblings)} running ambient call(s), exceeds your "
+                     "configured AMBIENT_MAX_SPEND fleet ceiling — pass "
+                     "--allow-cost, raise AMBIENT_MAX_SPEND, or set "
+                     "AMBIENT_FLEET_BUDGET=off to proceed.") if user_set else
                     (f"this run, plus the spend already reserved by "
                      f"{len(siblings)} running ambient call(s), would exceed "
                      "the shared spend budget — pass --allow-cost, raise "
@@ -1635,8 +1625,9 @@ def cost_gate(catalog, model, input_chars, n_calls, args, conf,
 
 def _ceiling(conf):
     """(effective ceiling, user_set): the spend cap and whether the USER set it.
-    Default is a silent safety cap; a dollar figure is only ever surfaced when
-    the user chose their own AMBIENT_MAX_SPEND."""
+    Default is a silent safety cap. NO dollar figure is ever surfaced (founder
+    policy: billing is plan-dependent, so any dollar number misleads); user_set
+    only changes whether a refusal names AMBIENT_MAX_SPEND as the user's own."""
     raw = os.environ.get("AMBIENT_MAX_SPEND") or conf.get("AMBIENT_MAX_SPEND")
     try:
         return (float(raw) if raw else 5.0), bool(raw)
@@ -1646,24 +1637,24 @@ def _ceiling(conf):
 
 def _gate_amount(expected, args, conf, bound=None):
     """Enforce the spend ceiling on the expected figure, plus a worst-case guard
-    at 3x. The ceiling is a SILENT safety cap by default; a dollar figure is
-    surfaced only when the user set AMBIENT_MAX_SPEND themselves (their number).
-    The bound over-states 10-30x, so the ceiling binds EXPECTED spend."""
+    at 3x. The ceiling is a SILENT safety cap; NO dollar figure is ever printed
+    (founder policy) — a refusal names AMBIENT_MAX_SPEND but never a computed
+    cost. The bound over-states 10-30x, so the ceiling binds EXPECTED spend."""
     ceiling, user_set = _ceiling(conf)
     allow = getattr(args, "allow_cost", False)
     if expected > ceiling and not allow:
         _fail_exit(
             args, _argv_command(), "cost",
-            (f"estimated ~${expected:.2f} exceeds your ${ceiling:.2f} spend "
-             "ceiling — pass --allow-cost, or raise AMBIENT_MAX_SPEND, to "
+            ("this run exceeds your configured spend ceiling "
+             "(AMBIENT_MAX_SPEND) — pass --allow-cost, or raise it, to "
              "proceed.") if user_set else
             ("this run would be unusually large — pass --allow-cost to "
              "proceed, or set AMBIENT_MAX_SPEND to set your own ceiling."))
     if bound is not None and bound > ceiling * 3 and not allow:
         _fail_exit(
             args, _argv_command(), "cost",
-            (f"the WORST-CASE spend for this run (${bound:.2f}) exceeds "
-             f"3x your ${ceiling:.2f} ceiling — pass --allow-cost, or raise "
+            ("the worst-case spend for this run exceeds 3x your configured "
+             "AMBIENT_MAX_SPEND ceiling — pass --allow-cost, or raise "
              "AMBIENT_MAX_SPEND, to proceed.") if user_set else
             ("the worst-case spend for this run is unusually large — pass "
              "--allow-cost to proceed, or set AMBIENT_MAX_SPEND."))
@@ -7196,18 +7187,17 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
             and (deep_flag if deep_flag is not None else True)
             and n_chunks > 1)
     if args.format == "json":
+        # No cost fields: billing is plan-dependent, so the machine plan reports
+        # files/chars/chunks only — never a dollar estimate (founder policy).
         plan = {"schema_version": 1, "kind": "audit", "status": "plan",
                 "repo": meta["root"], "files": meta["files"],
                 "chars": meta["chars"], "git": meta["git"],
-                "est_cost": round(expected, 4),
-                "est_bound": round(bound, 4),
                 "skipped": meta["skipped"],
                 "omitted_over_cap": meta["omitted_over_cap"],
                 "model": ("consensus:" + ",".join(consensus_models))
                 if consensus_models else model,
                 "n_chunks": n_chunks,
-                "deep": bool(deep),
-                "assumed_pricing": assumed}
+                "deep": bool(deep)}
         if consensus_models:
             # Additive fields: name the model SET the estimate covers and
             # its per-model chunk split (n_chunks above is their sum — the
@@ -7358,10 +7348,7 @@ def cmd_audit(args, api_key, api_url, conf):
                         "consensus": list(consensus_models),
                         "input_chars": total, "items": len(labeled),
                         "n_chunks": sum(chunks_by.values()),
-                        "n_chunks_by_model": chunks_by,
-                        "est_cost": round(expected, 4),
-                        "est_bound": round(bound, 4),
-                        "assumed_pricing": assumed}
+                        "n_chunks_by_model": chunks_by}
                 print(redact(json.dumps(plan, separators=(",", ":")), api_key))
                 return
             print("ambient audit plan (dry run — nothing sent):")
@@ -7398,10 +7385,7 @@ def cmd_audit(args, api_key, api_url, conf):
                     "input_chars": total, "items": len(labeled),
                     "one_pass": one_pass,
                     "n_chunks": 1 if one_pass else n_chunks,
-                    "output_budget": args.max_tokens,
-                    "est_cost": round(expected, 4),
-                    "est_bound": round(bound, 4),
-                    "assumed_pricing": assumed}
+                    "output_budget": args.max_tokens}
             if best_of_k:
                 plan["best_of"] = best_of_k
             if not one_pass and reduce_model != model:
@@ -9507,10 +9491,7 @@ def cmd_usage(args):
             # frontier comparison against an unknown cost would fabricate a
             # saving. The known cost is reported as a LOWER BOUND, flagged.
             priced_all = False
-            known = _round_money(t["cost"]) if t["cost"] > 0 else None
-            rows.append({**base, "est_cost": known, "cost_partial": True,
-                         "frontier_cost": None, "saved": None,
-                         "saved_pct": None})
+            rows.append({**base, "cost_partial": True, "saved_pct": None})
             raw_rows.append(("partial", t["cost"]) if t["cost"] > 0 else None)
             continue
         # Aggregate and derive the saved-% from RAW totals — rounding first
@@ -9520,11 +9501,7 @@ def cmd_usage(args):
         raw_saved = t["frontier"] - t["cost"]
         pct = (int(raw_saved / t["frontier"] * 100)  # floored
                if t["frontier"] > 0 and raw_saved > 0 else None)
-        rows.append({**base, "est_cost": _round_money(t["cost"]),
-                     "cost_partial": False,
-                     "frontier_cost": _round_money(t["frontier"]),
-                     "saved": _round_money(raw_saved),
-                     "saved_pct": pct})
+        rows.append({**base, "cost_partial": False, "saved_pct": pct})
         raw_rows.append((t["cost"], t["frontier"], raw_saved, pct))
     # Savings compare frontier vs the FULLY-priced subset only — partial
     # models are in `grand` (spend honesty) but never in the saving.
@@ -9533,16 +9510,16 @@ def cmd_usage(args):
                       "visible to local metering — these totals cover only "
                       "ambient CLI calls")
     if getattr(args, "json", False):
+        # Relative % savings only — NO dollar figures and NO per-token
+        # reference prices (founder policy: billing is plan-dependent).
+        overall_pct = (int(grand_saved / grand_frontier * 100)
+                       if grand_frontier > 0 and grand_saved > 0 else None)
         print(json.dumps({
             "schema_version": 1, # contract field
             "days": args.days,
             "models": rows,
-            "total_est_cost": _round_money(grand),
             "all_priced": priced_all,
-            # additive fields (schema unchanged otherwise):
-            "reference_price": [default_ref[0], default_ref[1]],
-            "frontier_cost": _round_money(grand_frontier),
-            "saved": _round_money(grand_saved),
+            "saved_pct": overall_pct,
             "approx_ref_records": approx_ref,
             "est_records": est_records,  # estimated ≠ exact
             "unmetered_lanes": ["agent"],

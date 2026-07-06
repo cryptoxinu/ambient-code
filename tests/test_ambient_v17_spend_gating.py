@@ -258,9 +258,9 @@ class TestH1SingleAskFleetGate(unittest.TestCase):
                         self.assertRaises(SystemExit) as cm:
                     amb.cmd_ask(ask_args(), KEY, "https://x", {})
             msg = str(cm.exception)
-            self.assertIn("already reserved", msg)       # fleet total named
-            self.assertIn("$4.99", msg)
-            self.assertIn("$5.00", msg)                  # the ceiling named
+            self.assertIn("already reserved", msg)       # fleet situation named
+            self.assertIn("AMBIENT_MAX_SPEND", msg)      # the user's own ceiling
+            self.assertNotIn("$", msg)                   # zero dollar figures
 
     def test_single_ask_silent_pass_with_no_ceiling(self):
         with fleet_dir():
@@ -382,7 +382,7 @@ class TestH2FallbackRepriced(unittest.TestCase):
             self._complete_with_fallback(40.0, 4.90)
         msg = str(cm.exception)
         self.assertIn("already reserved", msg)
-        self.assertIn("$5.00", msg)
+        self.assertNotIn("$", msg)                       # zero dollar figures
 
     def test_pricier_fallback_never_sends_the_alt_call_when_refused(self):
         cat = fallback_catalog(40.0)

@@ -229,33 +229,36 @@ class TestM1PlanMatchesConsensusGate(unittest.TestCase):
             amb.cmd_audit(args, KEY, "https://x", {})
         return out.getvalue(), err.getvalue(), seen
 
-    def test_consensus_plan_equals_gated_amount(self):
+    def test_consensus_plan_structure_and_gate_invoked(self):
+        # The plan no longer exposes a dollar estimate (founder policy), but the
+        # gate must STILL be invoked with a real expected amount, and the plan
+        # must carry the consensus structure.
         catalog = consensus_catalog()
         root = big_repo()
         args = audit_args(repo=root, format="json", consensus=CONSENSUS)
         out, _err, seen = self._run(args, catalog)
         plan = json.loads(out.strip().splitlines()[0])
         self.assertEqual(plan["status"], "plan")
-        self.assertEqual(plan["est_cost"], round(seen["expected"], 4))
-        self.assertEqual(plan["est_bound"], round(seen["bound"], 4))
+        self.assertNotIn("est_cost", plan)     # no dollars in the plan
+        self.assertNotIn("est_bound", plan)
+        self.assertGreater(seen["expected"], 0)  # gate still charged internally
         # The model field reflects the consensus SET, not the default model.
         self.assertEqual(plan["consensus"], CONSENSUS.split(","))
         for m in CONSENSUS.split(","):
             self.assertIn(m, plan["model"])
         self.assertIs(plan["deep"], False)
 
-    def test_consensus_plan_uses_summed_multi_model_estimate(self):
+    def test_consensus_plan_uses_summed_multi_model_chunks(self):
         catalog = consensus_catalog()
         root = big_repo()
         labeled, _meta = repo_inputs(root)
         total = sum(len(t) for _, t in labeled)
-        exp, bnd, _p, per_chunks, _a = amb._consensus_estimate(
+        _exp, _bnd, _p, per_chunks, _a = amb._consensus_estimate(
             catalog, CONSENSUS.split(","), labeled, total)
         args = audit_args(repo=root, format="json", consensus=CONSENSUS)
         out, _err, _seen = self._run(args, catalog)
         plan = json.loads(out.strip().splitlines()[0])
-        self.assertEqual(plan["est_cost"], round(exp, 4))
-        self.assertEqual(plan["est_bound"], round(bnd, 4))
+        self.assertNotIn("est_cost", plan)     # no dollars in the plan
         self.assertEqual(plan["n_chunks"], sum(per_chunks.values()))
 
     def test_plain_repo_plan_unchanged(self):
@@ -283,16 +286,15 @@ class TestM1PlanMatchesConsensusGate(unittest.TestCase):
         plan = json.loads(out.getvalue().strip().splitlines()[0])
         self.assertEqual(plan["model"], "tiny/auditor")
         self.assertNotIn("consensus", plan)
+        self.assertNotIn("est_cost", plan)     # no dollars in the plan
         dens = amb.density_factor(
             "".join(t for _, t in labeled[:8])[:200_000])
         profile = amb.model_profile(catalog, "tiny/auditor")
-        n_chunks, expected, bound, _assumed = amb._audit_split_estimate(
+        n_chunks, _expected, _bound, _assumed = amb._audit_split_estimate(
             catalog, "tiny/auditor", "tiny/auditor", labeled, total,
             int(total * dens), profile, dens, plan_max_tokens(profile),
             True)
         self.assertEqual(plan["n_chunks"], n_chunks)
-        self.assertEqual(plan["est_cost"], round(expected, 4))
-        self.assertEqual(plan["est_bound"], round(bound, 4))
 
     def test_invalid_consensus_model_never_yields_misleading_plan(self):
         catalog = consensus_catalog()

@@ -322,7 +322,8 @@ def run_usage(args):
 class TestUsageSavings(unittest.TestCase):
     def test_stored_ref_beats_current_default(self):
         """Historical honesty: an old record keeps the reference it was
-        billed against; only ref-less records use the current default."""
+        billed against; only ref-less records use the current default. The
+        RELATIVE % reflects both (no dollar figures — founder policy)."""
         now = int(time.time())
         records = [
             # new-style record with its own stored ref (1/1) + cost
@@ -338,15 +339,15 @@ class TestUsageSavings(unittest.TestCase):
             out = run_usage(usage_args(json=True))
         data = json.loads(out)
         row = data["models"][0]
-        # frontier = 1Mtok@$1 (stored) + 1Mtok@$2 (current default) = $3
-        self.assertAlmostEqual(row["frontier_cost"], 3.0)
-        # cost = stored 0.1 + recomputed 1Mtok@$0.1 = 0.2
-        self.assertAlmostEqual(row["est_cost"], 0.2)
-        self.assertAlmostEqual(row["saved"], 2.8)
+        # frontier = 1Mtok@$1 (stored) + 1Mtok@$2 (current default) = $3;
+        # cost = stored 0.1 + recomputed 1Mtok@$0.1 = 0.2 → saved 2.8 → 93%.
+        self.assertEqual(row["saved_pct"], 93)
         self.assertEqual(data["approx_ref_records"], 1)
-        self.assertEqual(data["reference_price"], [2.0, 2.0])
+        # NO dollar fields, and NO per-token reference price, in --json.
+        for gone in ("frontier_cost", "est_cost", "saved", "reference_price"):
+            self.assertNotIn(gone, {**row, **data}, gone)
 
-    def test_json_gains_additive_savings_fields(self):
+    def test_json_reports_percent_savings_not_dollars(self):
         now = int(time.time())
         records = [{"ts": now, "model": "cheap/model",
                     "in": 100_000, "out": 10_000,
@@ -354,14 +355,20 @@ class TestUsageSavings(unittest.TestCase):
         with usage_env(records, offline=True):
             out = run_usage(usage_args(json=True))
         data = json.loads(out)
-        for key in ("reference_price", "frontier_cost", "saved",
-                    "unmetered_lanes", "total_est_cost", "all_priced"):
+        # KEEPS relative % + structural fields...
+        for key in ("saved_pct", "unmetered_lanes", "all_priced"):
             self.assertIn(key, data, key)
         self.assertEqual(data["unmetered_lanes"], ["agent"])
-        row = data["models"][0]
-        self.assertAlmostEqual(row["est_cost"], 0.028)
-        self.assertAlmostEqual(row["frontier_cost"], 0.45)
-        self.assertAlmostEqual(row["saved"], 0.422)
+        self.assertEqual(data["saved_pct"], 93)
+        self.assertEqual(data["models"][0]["saved_pct"], 93)
+        # ...and NEVER a dollar figure or per-token price (founder policy).
+        # Match JSON key form ("saved": ...) so it doesn't collide with the
+        # kept "saved_pct".
+        blob = json.dumps(data)
+        self.assertNotIn("$", blob)
+        for gone in ("est_cost", "frontier_cost", "total_est_cost",
+                     "reference_price", "saved"):
+            self.assertNotIn(f'"{gone}":', blob, gone)
 
     def test_costlier_model_never_shows_a_fake_saving(self):
         now = int(time.time())
@@ -372,9 +379,10 @@ class TestUsageSavings(unittest.TestCase):
             text = run_usage(usage_args())
             out = run_usage(usage_args(json=True))
         self.assertIn("costlier", text)
-        self.assertNotIn("saved $", text)
-        row = json.loads(out)["models"][0]
-        self.assertLess(row["saved"], 0)  # signed truth in JSON, no fake +
+        self.assertNotIn("$", text)
+        # A pricier-than-frontier model claims NO saving: saved_pct is None,
+        # never a fabricated positive.
+        self.assertIsNone(json.loads(out)["models"][0]["saved_pct"])
 
     def test_unpriced_records_claim_no_saving(self):
         now = int(time.time())
@@ -383,16 +391,15 @@ class TestUsageSavings(unittest.TestCase):
             out = run_usage(usage_args(json=True))
         data = json.loads(out)
         row = data["models"][0]
-        self.assertIsNone(row["est_cost"])
-        self.assertIsNone(row["saved"])
+        self.assertIsNone(row["saved_pct"])
         self.assertIs(row["cost_partial"], True)
         self.assertFalse(data["all_priced"])
-        self.assertAlmostEqual(data["saved"], 0.0)  # totals exclude unknowns
+        self.assertIsNone(data["saved_pct"])  # totals exclude unknowns
 
-    def test_partial_model_known_cost_counts_toward_total(self):
-        """A model with one priced + one unpriced record must still count its
-        KNOWN cost in the total (dropping it under-reports real spend), while
-        claiming NO saving for that model."""
+    def test_partial_model_counts_but_claims_no_saving(self):
+        """A model with one priced + one unpriced record is flagged partial and
+        claims NO saving; known spend still binds the gate internally (verified
+        elsewhere), but no dollar figure is ever surfaced."""
         now = int(time.time())
         records = [
             {"ts": now, "model": "mystery/x", "in": 100_000, "out": 0,
@@ -404,35 +411,25 @@ class TestUsageSavings(unittest.TestCase):
             text = run_usage(usage_args())
         data = json.loads(out)
         row = data["models"][0]
-        # Row: known cost is a LOWER BOUND, flagged partial, no savings math.
-        self.assertAlmostEqual(row["est_cost"], 0.2)
+        # Row: flagged partial, no savings math, no dollar fields.
         self.assertIs(row["cost_partial"], True)
-        self.assertIsNone(row["frontier_cost"])
-        self.assertIsNone(row["saved"])
         self.assertIsNone(row["saved_pct"])
-        # Totals: known spend INCLUDED; no fabricated saving/frontier.
-        self.assertAlmostEqual(data["total_est_cost"], 0.2)
-        self.assertAlmostEqual(data["frontier_cost"], 0.0)
-        self.assertAlmostEqual(data["saved"], 0.0)
         self.assertFalse(data["all_priced"])
-        # Text: the row is marked partial (no dollar figure shown).
+        # Text: marked partial, no dollar figure anywhere.
         self.assertIn("partial", text)
         self.assertIn("partial — some records unpriced", text)
-        # Text total no longer shows a dollar figure (billing is plan-
-        # dependent); the known-spend accounting is verified via --json above.
         overall = next(ln for ln in text.splitlines()
                        if ln.startswith("Overall"))
         self.assertIn("unpriced", overall)
-        self.assertNotIn("$", overall)
+        self.assertNotIn("$", text)
 
     def test_partial_model_does_not_pollute_fully_priced_savings(self):
-        """Grand frontier/saved must reflect ONLY fully-priced models; the
-        partial model contributes its known cost to the total and nothing to
-        the savings comparison."""
+        """The % saving must reflect ONLY fully-priced models; a partial model
+        contributes nothing to the savings comparison."""
         now = int(time.time())
         records = [
             {"ts": now, "model": "cheap/model", "in": 100_000, "out": 10_000,
-             "cost": 0.028, "ref": [3.0, 15.0]},   # fully priced
+             "cost": 0.028, "ref": [3.0, 15.0]},   # fully priced → 93%
             {"ts": now, "model": "mystery/x", "in": 100_000, "out": 0,
              "cost": 0.20, "ref": [3.0, 15.0]},    # priced record...
             {"ts": now, "model": "mystery/x", "in": 500, "out": 500},
@@ -442,16 +439,14 @@ class TestUsageSavings(unittest.TestCase):
         data = json.loads(out)
         rows = {r["model"]: r for r in data["models"]}
         self.assertIs(rows["cheap/model"]["cost_partial"], False)
-        self.assertAlmostEqual(rows["cheap/model"]["saved"], 0.422)
+        self.assertEqual(rows["cheap/model"]["saved_pct"], 93)
         self.assertIs(rows["mystery/x"]["cost_partial"], True)
-        # total = 0.028 (fully priced) + 0.20 (known part of partial model)
-        self.assertAlmostEqual(data["total_est_cost"], 0.228)
-        # savings math over the fully-priced subset ONLY
-        self.assertAlmostEqual(data["frontier_cost"], 0.45)
-        self.assertAlmostEqual(data["saved"], 0.422)
+        self.assertIsNone(rows["mystery/x"]["saved_pct"])
+        # overall % over the fully-priced subset ONLY (0.422 saved / 0.45)
+        self.assertEqual(data["saved_pct"], 93)
         self.assertFalse(data["all_priced"])
 
-    def test_fully_priced_set_unchanged_by_partial_logic(self):
+    def test_fully_priced_set_reports_percent(self):
         now = int(time.time())
         records = [{"ts": now, "model": "cheap/model",
                     "in": 100_000, "out": 10_000,
@@ -461,10 +456,8 @@ class TestUsageSavings(unittest.TestCase):
         data = json.loads(out)
         row = data["models"][0]
         self.assertIs(row["cost_partial"], False)
-        self.assertAlmostEqual(row["est_cost"], 0.028)
-        self.assertAlmostEqual(data["total_est_cost"], 0.028)
-        self.assertAlmostEqual(data["frontier_cost"], 0.45)
-        self.assertAlmostEqual(data["saved"], 0.422)
+        self.assertEqual(row["saved_pct"], 93)
+        self.assertEqual(data["saved_pct"], 93)
         self.assertTrue(data["all_priced"])
 
     def test_text_output_has_savings_column_and_total(self):
@@ -494,7 +487,8 @@ class TestUsageSavings(unittest.TestCase):
             out = run_usage(usage_args(json=True))
         data = json.loads(out)
         self.assertTrue(data["all_priced"])
-        self.assertGreater(data["models"][0]["frontier_cost"], 0)
+        # old record priced online → a real relative saving, no dollar fields
+        self.assertIsNotNone(data["models"][0]["saved_pct"])
 
 
 if __name__ == "__main__":

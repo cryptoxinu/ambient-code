@@ -215,7 +215,7 @@ class TestH3SubMicroCostsNeverVanish(unittest.TestCase):
         self.assertGreater(rec["cost"], 0)
         self.assertAlmostEqual(rec["cost"], 2e-7)
 
-    def test_sub_micro_calls_sum_to_true_total_not_zero(self):
+    def test_sub_micro_calls_sum_to_true_percent_not_100(self):
         now = int(time.time())
         n = 100
         records = [{"ts": now, "model": "cheap/model", "in": 1, "out": 0,
@@ -224,29 +224,13 @@ class TestH3SubMicroCostsNeverVanish(unittest.TestCase):
             out = run_usage(usage_args(json=True))
             text = run_usage(usage_args())
         data = json.loads(out)
-        # spend is the true 100 × $2e-7 = $2e-5, NOT $0
-        self.assertGreater(data["total_est_cost"], 0)
-        self.assertAlmostEqual(data["total_est_cost"], 2e-5)
-        row = data["models"][0]
-        self.assertGreater(row["est_cost"], 0)
-        # true saving: frontier 100×$3e-6=$3e-4 vs $2e-5 → 93%, NOT ~100%
+        # The % is derived from RAW (never-rounded) totals, so sub-micro spend
+        # can't fabricate a ~100% saving: 100×$2e-7 vs frontier 100×$3e-6 → 93%.
+        self.assertEqual(data["saved_pct"], 93)
         self.assertNotIn("100%", text)
         self.assertNotIn("(99%)", text)
         self.assertIn("93%", text)
-        # the text total must not display a real nonzero spend as $0.0000
-        self.assertNotIn("$0.0000 ", text + " ")
-
-    def test_normal_figures_still_display_rounded(self):
-        now = int(time.time())
-        records = [{"ts": now, "model": "cheap/model",
-                    "in": 100_000, "out": 10_000,
-                    "cost": 0.028, "ref": [3.0, 15.0]}]
-        with usage_env(records, offline=True):
-            out = run_usage(usage_args(json=True))
-        row = json.loads(out)["models"][0]
-        self.assertAlmostEqual(row["est_cost"], 0.028)
-        self.assertAlmostEqual(row["frontier_cost"], 0.45)
-        self.assertAlmostEqual(row["saved"], 0.422)
+        self.assertNotIn("$", text)   # no dollar figures at all (founder policy)
 
 
 class TestM1EstimatedRecordsSurfaced(unittest.TestCase):
@@ -290,10 +274,13 @@ class TestM2UsageJsonSchemaVersion(unittest.TestCase):
             out = run_usage(usage_args(json=True))
         data = json.loads(out)
         self.assertEqual(data["schema_version"], 1)
-        for key in ("days", "models", "total_est_cost", "all_priced",
-                    "reference_price", "frontier_cost", "saved",
+        for key in ("days", "models", "all_priced", "saved_pct",
                     "approx_ref_records", "unmetered_lanes", "note"):
             self.assertIn(key, data, key)
+        # dollar + per-token-price fields are GONE (founder policy)
+        for gone in ("total_est_cost", "reference_price", "frontier_cost",
+                     "saved"):
+            self.assertNotIn(gone, data, gone)
 
 
 class TestM3EstimatedUsageInBody(unittest.TestCase):

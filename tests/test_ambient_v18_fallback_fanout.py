@@ -197,7 +197,7 @@ class TestFix1UpfrontFallbackReserve(unittest.TestCase):
                               ns(fallback=True), {})
             msg = str(cm.exception)
             self.assertIn("already reserved", msg)
-            self.assertIn("$5.00", msg)
+            self.assertNotIn("$", msg)                   # zero dollar figures
 
     def test_same_batch_passes_without_fallback(self):
         """Control for the refusal above: the requested model alone is

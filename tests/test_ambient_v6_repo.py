@@ -370,7 +370,7 @@ class TestAuditRepo(unittest.TestCase):
         self.assertEqual(plan["kind"], "audit")
         self.assertEqual(plan["files"], 3)
         self.assertGreater(plan["chars"], 0)
-        self.assertIn("est_cost", plan)
+        self.assertNotIn("est_cost", plan)   # no dollar figures (founder policy)
         env = json.loads("\n".join(lines[1:]))
         self.assertEqual(env["schema_version"], 1)
         self.assertEqual(env["kind"], "audit")
