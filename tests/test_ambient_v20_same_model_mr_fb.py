@@ -1,6 +1,6 @@
 """Hermetic capstone tests: SAME-MODEL map-reduce fallback under-reserve.
 
-Codex final re-audit (the one remaining spend-safety HIGH): with a live
+Final spend-safety fixture: with a live
 --fallback, cost_gate_mr's same-model delegation to cost_gate priced the swap
 exposure on a UNIFORM input/(n_chunks*2+extra) pseudo-call. The live map
 workers each carry their REAL chunk (gate_fallback=False — no later per-call
@@ -97,7 +97,7 @@ def _mdl(mid, ctx, max_out, ready, price_in, price_out):
 
 
 def codex_catalog():
-    """The Codex counterexample fixture: an unready cheap requested model, a
+    """The an unready cheap requested model, a
     CHEAP small-context candidate that fits the 10k-char averaged pseudo-call
     (10_000/3.2 = 3125 tok <= 4000) but NOT a real 20k-char map chunk
     (6250 tok > 4000), and a PRICIER large-context candidate that each real
@@ -121,7 +121,7 @@ def _fb_ctx():
 
 
 # --------------------------------------------------------------------------
-# (a) the Codex counterexample: the reserve must cover the REAL map fallbacks
+# (a) the the reserve must cover the REAL map fallbacks
 # --------------------------------------------------------------------------
 
 class TestCodexCounterexample(unittest.TestCase):
@@ -155,7 +155,7 @@ class TestCodexCounterexample(unittest.TestCase):
                                               1.0)[0] for c in CHUNKS)
         live_maps_bnd = sum(amb._fb_call_cost(cat, "big/alt", c, alt_mt,
                                               1.0)[1] for c in CHUNKS)
-        # Codex's numbers are real on this fixture
+        # the numbers are real on this fixture
         self.assertAlmostEqual(live_maps_exp, 0.77, places=2)
         self.assertAlmostEqual(live_maps_bnd, 1.01, places=2)
         self.assertLess(old[0], 0.10, "the bug: the averaged reserve is a "

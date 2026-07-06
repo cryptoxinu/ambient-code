@@ -252,7 +252,7 @@ class TestCuration(unittest.TestCase):
         self.assertIn("z-ai/glm-5.2", notes)  # built-in ramp-up note
         _a, _h, _s, notes = amb.curation(
             {"AMBIENT_MODEL_NOTES": json.dumps({"z-ai/glm-5.2": ""})})
-        self.assertFalse(notes["z-ai/glm-5.2"])  # founder cleared it
+        self.assertFalse(notes["z-ai/glm-5.2"])  # the user cleared it
 
     def test_malformed_notes_degrade(self):
         err = io.StringIO()

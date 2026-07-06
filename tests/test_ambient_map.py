@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 2 tests: `ambient map` — the bulk per-item inference
+"""Hermetic tests: `ambient map` — the bulk per-item inference
 lane. Every test patches complete()/_cache_*/safe_catalog; no network, no
 live API, no writes outside tempdirs."""
 import argparse
@@ -779,7 +779,7 @@ class TestMapInputCaps(unittest.TestCase):
 
 
 class TestMapDensityBudget(unittest.TestCase):
-    """Fable LOW: the output budget must be sized by the same density-adjusted
+    """the output budget must be sized by the same density-adjusted
     length the oversize refusal uses, so CJK/token-dense items are not
     under-budgeted."""
 

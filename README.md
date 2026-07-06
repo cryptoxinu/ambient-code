@@ -69,10 +69,8 @@ and reasons over it at full quality.
 Ambient scales models up and down with demand — `ambient models` shows what's
 serving (READY) right now. A model that isn't serving at the moment is normal,
 not broken: it spins up when demand arrives, and the CLI names serving
-alternatives whenever you pick one that isn't serving yet. The default for every lane is **`moonshotai/kimi-k2.7-code`** (the
-live probe measured it fastest and most accurate at catching planted bugs — see
-`docs/LIVE_PROBE_REPORT.md`). GLM-5.2 is fully selectable
-(`ambient use z-ai/glm-5.2`) and improving as the network's capacity ramps up. You
+alternatives whenever you pick one that isn't serving yet. The default for every lane is **`moonshotai/kimi-k2.7-code`**. Any other model is fully selectable
+(`ambient use z-ai/glm-5.2`, etc.). You
 can curate which models your menus show: `ambient curate only <ids>` /
 `hide <glob>` / `note <id> "label"` — explicit `-m` always works regardless.
 

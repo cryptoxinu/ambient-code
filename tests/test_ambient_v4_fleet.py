@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 4 tests: cross-process FLEET spend enforcement.
+"""Hermetic tests: cross-process FLEET spend enforcement.
 
 4a) AMBIENT_MAX_SPEND becomes a true AGGREGATE ceiling across concurrent
     ambient processes via a reservations store (~/.config/ambient/
@@ -213,7 +213,7 @@ class TestPruning(unittest.TestCase):
 
     def test_ttl_expired_reservation_is_pruned(self):
         """TTL reclaims records whose liveness is UNKNOWABLE (Windows-style);
-        a provably-alive pid is never TTL-pruned (Codex H1 — see v5 tests)."""
+        a provably-alive pid is never TTL-pruned."""
         with fleet_dir() as d:
             seed(d, [rec(100.0, age=100000.0)])  # way past the default TTL
             with patched(amb, _pid_alive=lambda pid: None):
@@ -355,7 +355,7 @@ class TestFsLock(unittest.TestCase):
             self.assertTrue(os.path.exists(path))  # not ours to remove
 
     def test_windows_fallback_breaks_lock_of_provably_dead_owner(self):
-        """Codex M2: a lock is broken ONLY when its recorded owner pid is
+        """a lock is broken ONLY when its recorded owner pid is
         provably dead — never on mtime age alone (the owner may be alive
         and slow, and breaking in would allow two concurrent store
         rewrites). Unprovable owners fail open (see v5 hardening tests)."""
@@ -403,7 +403,7 @@ class TestLedgerLock(unittest.TestCase):
 
     def test_lock_timeout_spools_instead_of_unlocked_append(self):
         """A sibling holding the ledger lock means WE must not touch the
-        main ledger at all (Codex M1: an unlocked append can be truncated
+        main ledger at all (an unlocked append can be truncated
         away by the sibling's read-trim-write) — the line goes to a per-pid
         SPOOL file and is merged back under the lock on a later write."""
         if amb.fcntl is None:

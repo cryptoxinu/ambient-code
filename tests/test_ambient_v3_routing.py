@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 3 tests: advisory routing. The -m auto pseudo-model
+"""Hermetic tests: advisory routing. The -m auto pseudo-model
 (explicit delegation, printed pick), the pre-flight readiness/price ADVISORY
 hint (never swaps, never blocks), --reduce-model (cheap-map/strong-reduce),
 the AMBIENT_MODEL_MAP per-phase config, and the fit-then-cheapest fallback
@@ -151,7 +151,7 @@ class TestAutoPseudoModel(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             pick = amb.resolve_auto_model("auto", cat, conf, input_chars=1000)
         # cold/cheapest (not ready), embed/ready (no text), tiny (hidden by
-        # the founder's curation) are all skipped.
+        # the user's curation) are all skipped.
         self.assertEqual(pick, "cheap/ready")
 
     def test_auto_nothing_ready_fails_model_category(self):
@@ -305,7 +305,7 @@ class TestReduceModel(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             amb.cost_gate_mr(cat, "cheap/ready", "big/ready", 100_000, 4,
                              args, {})
-        # Explicit split formula (Codex M1 fix — the old sum of two 1.3x
+        # Explicit split formula (the old sum of two 1.3x
         # single-model estimates double-counted the synthesis re-read):
         # map input 1.0x at map prices + synth input 0.3x at reduce prices
         # + each lane's own output calls at its own price.

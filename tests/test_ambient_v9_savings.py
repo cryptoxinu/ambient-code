@@ -1,8 +1,8 @@
-"""Hermetic v3 Phase 6 tests — savings receipts.
+"""Hermetic tests — savings receipts.
 
 The tool's core value proposition (10-40x cheaper than frontier) was invisible
 in daily use: no dollar figure on the post-run receipt, no savings column in
-`ambient usage`, and the agent lane silently under-counted. Phase 6 adds all
+`ambient usage`, and the agent lane silently under-counted. adds all
 three, HONESTLY:
 
 - per-run receipt: run cost from catalog pricing + a frontier-equivalent
@@ -393,7 +393,7 @@ class TestUsageSavings(unittest.TestCase):
     def test_partial_model_known_cost_counts_toward_total(self):
         """A model with one priced + one unpriced record must still count its
         KNOWN cost in the total (dropping it under-reports real spend), while
-        claiming NO saving for that model (Codex MED)."""
+        claiming NO saving for that model."""
         now = int(time.time())
         records = [
             {"ts": now, "model": "mystery/x", "in": 100_000, "out": 0,

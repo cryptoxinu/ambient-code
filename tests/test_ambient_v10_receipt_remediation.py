@@ -1,6 +1,6 @@
-"""Hermetic v3 Phase 6 REMEDIATION tests — savings-receipt honesty fixes.
+"""Hermetic REMEDIATION tests — savings-receipt honesty fixes.
 
-Codex+Fable findings on the Phase 6 savings receipts, each one an honesty
+Review findings on the savings receipts, each one an honesty
 violation (over-stated saving or under-counted spend):
 
 - H1: under --fallback the receipt priced the REQUESTED model, not the model

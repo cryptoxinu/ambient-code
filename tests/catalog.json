@@ -3,17 +3,13 @@
  "data": [
   {
    "id": "zai-org/GLM-5.1-FP8",
-   "object": "model",
    "name": "GLM 5.1",
-   "created": 1775520000,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": "fp8",
    "context_length": 202752,
    "max_output_length": 131072,
    "pricing": {
@@ -26,12 +22,6 @@
     "input_cache_read": "0",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "max_tokens",
-    "temperature",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -39,26 +29,17 @@
     "reasoning"
    ],
    "description": null,
-   "hugging_face_id": "zai-org/GLM-5.1-FP8",
-   "openrouter": {
-    "slug": "z-ai/glm-5.1"
-   },
-   "datacenters": null,
    "is_ready": false
   },
   {
    "id": "z-ai/glm-5.2",
-   "object": "model",
    "name": "GLM 5.2",
-   "created": 1781631930,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": "fp8",
    "context_length": 202752,
    "max_output_length": 202752,
    "pricing": {
@@ -71,19 +52,6 @@
     "input_cache_read": "0.000000179",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -92,30 +60,17 @@
     "logprobs"
    ],
    "description": "Z.ai GLM-5.2.",
-   "hugging_face_id": "zai-org/GLM-5.2-FP8",
-   "openrouter": {
-    "slug": "z-ai/glm-5.2"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": true
   },
   {
    "id": "z-ai/glm-4.5-air",
-   "object": "model",
    "name": "GLM 4.5 Air",
-   "created": 1753471258,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 131072,
    "max_output_length": 131072,
    "pricing": {
@@ -128,17 +83,6 @@
     "input_cache_read": "0.00000006",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "max_tokens",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -147,23 +91,11 @@
     "logprobs"
    ],
    "description": "Z.ai GLM-4.5-Air.",
-   "hugging_face_id": "zai-org/GLM-4.5-Air",
-   "openrouter": {
-    "slug": "z-ai/glm-4.5-air"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "google/gemma-4-26b-a4b-it",
-   "object": "model",
    "name": "Gemma 4 26B A4B",
-   "created": 1775227989,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image",
@@ -172,7 +104,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -185,19 +116,6 @@
     "input_cache_read": "0.00000002",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -206,23 +124,11 @@
     "logprobs"
    ],
    "description": "Google Gemma 4 26B A4B.",
-   "hugging_face_id": "google/gemma-4-26B-A4B-it",
-   "openrouter": {
-    "slug": "google/gemma-4-26b-a4b-it"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "google/gemma-4-31b-it",
-   "object": "model",
    "name": "Gemma 4 31B",
-   "created": 1775148486,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image"
@@ -230,7 +136,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 65536,
    "max_output_length": 16384,
    "pricing": {
@@ -243,19 +148,6 @@
     "input_cache_read": "0.000000065",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -264,30 +156,17 @@
     "logprobs"
    ],
    "description": "Google Gemma 4 31B.",
-   "hugging_face_id": "google/gemma-4-31B-it",
-   "openrouter": {
-    "slug": "google/gemma-4-31b-it"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "openai/gpt-oss-120b",
-   "object": "model",
    "name": "gpt-oss-120b",
-   "created": 1754414231,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 131072,
    "max_output_length": 131072,
    "pricing": {
@@ -300,19 +179,6 @@
     "input_cache_read": "0.000000075",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "structured_outputs",
@@ -320,30 +186,17 @@
     "logprobs"
    ],
    "description": "OpenAI gpt-oss-120b.",
-   "hugging_face_id": "openai/gpt-oss-120b",
-   "openrouter": {
-    "slug": "openai/gpt-oss-120b"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "openai/gpt-oss-20b",
-   "object": "model",
    "name": "gpt-oss-20b",
-   "created": 1754414229,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 131072,
    "max_output_length": 131072,
    "pricing": {
@@ -356,19 +209,6 @@
     "input_cache_read": "0",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -376,23 +216,11 @@
     "reasoning"
    ],
    "description": "OpenAI gpt-oss-20b.",
-   "hugging_face_id": "openai/gpt-oss-20b",
-   "openrouter": {
-    "slug": "openai/gpt-oss-20b"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "moonshotai/kimi-k2.5",
-   "object": "model",
    "name": "Kimi K2.5",
-   "created": 1774051200,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image"
@@ -400,7 +228,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -413,12 +240,6 @@
     "input_cache_read": "0.00000005",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "max_tokens",
-    "temperature",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -427,23 +248,11 @@
     "logprobs"
    ],
    "description": "MoonshotAI Kimi K2.5.",
-   "hugging_face_id": "moonshotai/Kimi-K2.5",
-   "openrouter": {
-    "slug": "moonshotai/kimi-k2.5"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "moonshotai/kimi-k2.6",
-   "object": "model",
    "name": "Kimi K2.6",
-   "created": 1776643200,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image"
@@ -451,7 +260,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": "int4",
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -464,12 +272,6 @@
     "input_cache_read": "0.00000011",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "max_tokens",
-    "temperature",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -478,23 +280,11 @@
     "logprobs"
    ],
    "description": "MoonshotAI Kimi K2.6.",
-   "hugging_face_id": "moonshotai/Kimi-K2.6",
-   "openrouter": {
-    "slug": "moonshotai/kimi-k2.6"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "moonshotai/kimi-k2.7-code",
-   "object": "model",
    "name": "Kimi K2.7 Code",
-   "created": 1781136000,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image",
@@ -503,7 +293,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": "int4",
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -516,12 +305,6 @@
     "input_cache_read": "0.00000017",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "max_tokens",
-    "temperature",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -530,26 +313,17 @@
     "logprobs"
    ],
    "description": "MoonshotAI Kimi K2.7 Code.",
-   "hugging_face_id": "moonshotai/Kimi-K2.7-Code",
-   "openrouter": {
-    "slug": "moonshotai/kimi-k2.7-code"
-   },
-   "datacenters": null,
    "is_ready": true
   },
   {
    "id": "nvidia/nemotron-3-nano-30b-a3b",
-   "object": "model",
    "name": "Nemotron 3 Nano 30B A3B",
-   "created": 1765731275,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": "fp4",
    "context_length": 262144,
    "max_output_length": 228000,
    "pricing": {
@@ -562,48 +336,22 @@
     "input_cache_read": "0.00000001",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "reasoning"
    ],
    "description": "NVIDIA Nemotron 3 Nano 30B A3B.",
-   "hugging_face_id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-   "openrouter": {
-    "slug": "nvidia/nemotron-3-nano-30b-a3b"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "qwen/qwen3-coder-30b-a3b-instruct",
-   "object": "model",
    "name": "Qwen3 Coder 30B A3B Instruct",
-   "created": 1753972379,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 160000,
    "max_output_length": 32768,
    "pricing": {
@@ -616,47 +364,23 @@
     "input_cache_read": "0",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "max_tokens",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
     "structured_outputs"
    ],
    "description": "Qwen3 Coder 30B A3B Instruct.",
-   "hugging_face_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-   "openrouter": {
-    "slug": "qwen/qwen3-coder-30b-a3b-instruct"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "qwen/qwen3-next-80b-a3b-instruct",
-   "object": "model",
    "name": "Qwen3 Next 80B A3B Instruct",
-   "created": 1757612213,
-   "owned_by": "ambient",
    "input_modalities": [
     "text"
    ],
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -669,19 +393,6 @@
     "input_cache_read": "0.00000003",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -689,23 +400,11 @@
     "logprobs"
    ],
    "description": "Qwen3 Next 80B A3B Instruct.",
-   "hugging_face_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
-   "openrouter": {
-    "slug": "qwen/qwen3-next-80b-a3b-instruct"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "qwen/qwen3.5-35b-a3b",
-   "object": "model",
    "name": "Qwen3.5 35B A3B",
-   "created": 1771977600,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image",
@@ -714,7 +413,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -727,19 +425,6 @@
     "input_cache_read": "0.00000005",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -748,23 +433,11 @@
     "logprobs"
    ],
    "description": "Qwen3.5 35B A3B.",
-   "hugging_face_id": "Qwen/Qwen3.5-35B-A3B",
-   "openrouter": {
-    "slug": "qwen/qwen3.5-35b-a3b"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "qwen/qwen3.6-27b",
-   "object": "model",
    "name": "Qwen3.6 27B",
-   "created": 1777248000,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image",
@@ -773,7 +446,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 262144,
    "max_output_length": 81920,
    "pricing": {
@@ -786,19 +458,6 @@
     "input_cache_read": "0.00000016",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -807,23 +466,11 @@
     "logprobs"
    ],
    "description": "Qwen3.6 27B.",
-   "hugging_face_id": "Qwen/Qwen3.6-27B",
-   "openrouter": {
-    "slug": "qwen/qwen3.6-27b"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "qwen/qwen3.6-35b-a3b",
-   "object": "model",
    "name": "Qwen3.6 35B A3B",
-   "created": 1777260255,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image",
@@ -832,7 +479,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": null,
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -845,19 +491,6 @@
     "input_cache_read": "0.00000005",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "logit_bias",
-    "max_tokens",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_k",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -866,23 +499,11 @@
     "logprobs"
    ],
    "description": "Qwen3.6 35B A3B.",
-   "hugging_face_id": "Qwen/Qwen3.6-35B-A3B",
-   "openrouter": {
-    "slug": "qwen/qwen3.6-35b-a3b"
-   },
-   "datacenters": [
-    {
-     "country_code": "US"
-    }
-   ],
    "is_ready": false
   },
   {
    "id": "ambient/large",
-   "object": "model",
    "name": "Kimi K2.7 Code",
-   "created": 1781136000,
-   "owned_by": "ambient",
    "input_modalities": [
     "text",
     "image",
@@ -891,7 +512,6 @@
    "output_modalities": [
     "text"
    ],
-   "quantization": "int4",
    "context_length": 262144,
    "max_output_length": 262144,
    "pricing": {
@@ -904,12 +524,6 @@
     "input_cache_read": "0.00000017",
     "input_cache_write": "0"
    },
-   "supported_sampling_parameters": [
-    "frequency_penalty",
-    "max_tokens",
-    "temperature",
-    "top_p"
-   ],
    "supported_features": [
     "tools",
     "json_mode",
@@ -918,11 +532,6 @@
     "logprobs"
    ],
    "description": "MoonshotAI Kimi K2.7 Code.",
-   "hugging_face_id": "moonshotai/Kimi-K2.7-Code",
-   "openrouter": {
-    "slug": "moonshotai/kimi-k2.7-code"
-   },
-   "datacenters": null,
    "is_ready": true
   }
  ],

@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 7 tests — quality-from-cheapness.
+"""Hermetic tests — quality-from-cheapness.
 
 7a  --best-of K (ask/code/audit): K independent salted samples over the
     shared pool, ONE up-front cost gate for the K calls, cache-resume via

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ambient-code model × command matrix. Complements tools/stress_test.sh:
 #   1. EVERY catalog model gets exercised — READY models must complete real
-#      work; cold models must fail with the clean [model] diagnosis (never a
+#      work; non-serving models must fail with the clean [model] diagnosis (never a
 #      traceback, never a hang).
 #   2. Command surfaces the battery doesn't reach live: use/mode/usage/curate
 #      cycles, cache clear, link idempotency, trust-url refusal, plan-only
@@ -37,7 +37,7 @@ python3 - "$OUT" > "$WORK/ids.txt" <<'PY'
 import json,sys
 d=json.loads(open(sys.argv[1]).read()[open(sys.argv[1]).read().index("{"):])
 for m in d["models"]:
-    print(("READY " if m["ready"] else "cold  ") + m["id"])
+    print(("READY " if m["ready"] else "idle  ") + m["id"])
 PY
 N_MODELS=$(wc -l < "$WORK/ids.txt" | tr -d ' ')
 echo "--- per-model behavior ($N_MODELS catalog models) ---"
@@ -50,7 +50,7 @@ while read -r state mid; do
       || fail "READY $mid" "no MDL-OK (rc=$RC): $(tail -c 120 "$OUT")"
   else
     if [ $RC -eq 1 ] && grep -qiE "\[model\]|no workers|READY now" "$OUT"; then
-      pass "cold  $mid fails clean ([model] diagnosis)"
+      pass "idle  $mid fails clean ([model] diagnosis)"
     else
       fail "cold  $mid" "rc=$RC: $(tail -c 120 "$OUT")"
     fi

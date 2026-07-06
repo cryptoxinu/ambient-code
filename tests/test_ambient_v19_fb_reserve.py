@@ -2,7 +2,7 @@
 
 The up-front batch gates reserve the PER-CALL SUM-OF-MAXIMA —
 Sum_i max(cost_requested(call_i), cost_alt(call_i)) — which dominates EVERY
-requested/fallback mixture across the batch. Three Codex findings closed:
+requested/fallback mixture across the batch. Three findings closed:
 
 H1: cost_alt prices the ALT at the ALT's own resolved output budget (the
     exact alt_tokens re-derivation live complete() performs: auto-budget ->

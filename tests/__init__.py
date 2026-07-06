@@ -1,4 +1,4 @@
-"""Test-suite hermeticity guard (v3 Phase 8a).
+"""Test-suite hermeticity guard.
 
 The telemetry-EWMA routing learns each model's observed chars-per-token from
 the REAL user ledger (~/.config/ambient/usage.jsonl). Exact-value estimation

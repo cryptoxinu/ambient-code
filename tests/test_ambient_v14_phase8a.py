@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 8a tests: (1) the declarative command registry that
+"""Hermetic tests: (1) the declarative command registry that
 replaces main()'s dual dispatch (pre-credential if-chain + post-credential
 handlers dict) with ONE table, and (2) telemetry-EWMA routing — per-model
 observed chars-per-token from the usage ledger blended into model_profile /
@@ -409,7 +409,7 @@ class TestTelemetryBlending(unittest.TestCase):
     def test_seeded_history_only_tightens_the_cost_gate(self):
         # Telemetry may make the COST estimate MORE conservative, never less: a
         # higher observed cpt (fewer tokens/char) must NOT lower the gate, or a
-        # run the static gate would block could slip through (Codex 8a HIGH).
+        # run the static gate would block could slip through.
         args = (CATALOG, "m-reason", 200_000, 3, 20000)
         with temp_ledger(records=None):
             base = amb.estimate_cost(*args)
@@ -450,7 +450,7 @@ class TestTelemetryBlending(unittest.TestCase):
 
     def test_cost_cpt_clamped_to_default_while_sizing_cpt_is_not(self):
         # The spend-gate cpt can only tighten (<= default); the SIZING cpt is
-        # free to grow so budgets right-size (Codex 8a HIGH — gate must never
+        # free to grow so budgets right-size (gate must never
         # under-price even when a model observes fewer tokens per char).
         with temp_ledger([rec(model="m-reason", chars=6400, in_tok=1000)] * 3):
             self.assertLessEqual(amb._cost_cpt("m-reason"), amb.CHARS_PER_TOKEN)

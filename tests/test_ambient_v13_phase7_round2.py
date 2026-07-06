@@ -1,4 +1,4 @@
-"""Phase 7 remediation round 2 (Codex findings H1/H2/M1/M2 + Fable LOW).
+"""remediation round 2.
 
 - H1: ask/code --best-of must never OVER-STATE a saving when samples were
   served by DIFFERENT models (--fallback): the true cost prices EACH

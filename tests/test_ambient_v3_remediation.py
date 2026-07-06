@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 1 REMEDIATION tests (Codex+Fable findings R1-R5):
+"""Hermetic REMEDIATION tests:
 the global fan-out gate (consensus width² → one shared cap), consensus
 fail-fast on fatal errors / Ctrl-C via cancel_event, the machine-readable
 --json error envelope from INSIDE the real task handlers (ask/code/audit/
@@ -400,7 +400,7 @@ class TestJsonFailFromHandlers(unittest.TestCase):
 
 
 class TestUsageErrorJsonEnvelope(unittest.TestCase):
-    """Codex round-3: usage errors under --json must also be machine-readable
+    """usage errors under --json must also be machine-readable
     (exit 64), and the non-json prose path must stay byte-identical."""
 
     def test_usage_exit_emits_envelope_under_json(self):
@@ -446,7 +446,7 @@ def _tiny_profile(model="fake/model-a"):
 
 
 class TestTotalJsonFailureContract(unittest.TestCase):
-    """Phase 1c (Codex round-3): the --json failure contract is TOTAL — every
+    """the --json failure contract is TOTAL — every
     exit path reachable from ask/code/audit/build emits the machine envelope
     under --json (exit 1 runtime / 64 usage), while the NON-json prose +
     exit codes stay byte-identical."""

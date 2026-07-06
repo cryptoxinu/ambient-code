@@ -39,8 +39,7 @@ X" / "have ambient build X" → `/ambient build <task>`; "use ambient to audit X
 row). Don't make the user learn the commands.
 
 **Plain-language status (MANDATORY user-facing wording):** when showing model
-status to the user — the panel, the model list, or any narration — NEVER mention
-miners/mining/429/workers/"cold"/HTTP codes or other network mechanics. The
+status to the user — the panel, the model list, or any narration — NEVER mention internal network mechanics or jargon. The
 vocabulary is exactly this: a model is **"serving"** (READY), or it **"isn't
 serving right now — it spins up on demand"**. Ambient is an on-demand-scaling
 network: a model that isn't serving at this moment is NORMAL, not broken — never
@@ -160,7 +159,7 @@ just work. Patterns, cheapest first:
   on ONE model is fine (it load-balances). Availability shifts with demand, so
   check `ambient models` right before a big fan-out or before spreading across
   models.
-- **Quality from cheapness (v3 Phase 7)** — on a 10-40x-cheaper network, MORE
+- **Quality from cheapness** — on a 10-40x-cheaper network, MORE
   SAMPLES often beats a bigger model. `--best-of K` (ask/code/audit, K=2-8)
   draws K independent samples behind ONE up-front gate that prices all K;
   samples cache per-index (salted), so re-runs resume and re-bill only missing
@@ -216,7 +215,7 @@ models run at once. Spend is gated:
 estimates print up front, the default ceiling is $5 (`AMBIENT_MAX_SPEND`), jobs over
 $0.50 confirm on a TTY (`--yes` skips), `--allow-cost` overrides, and a worst-case
 guard blocks runs whose hard bound exceeds 3x the ceiling. The ceiling is a **fleet
-aggregate** (v3 Phase 4): every gated ambient process records a spend reservation in
+aggregate**: every gated ambient process records a spend reservation in
 `~/.config/ambient/reservations.jsonl`, so a 10-wide fan-out shares ONE `$5` budget
 instead of multiplying it by 10 — a call whose estimate plus the live siblings'
 reservations would blow the ceiling is refused with the fleet total named.
@@ -231,7 +230,7 @@ config, like `AMBIENT_MAX_SPEND`) restores per-invocation-only gating. Relay the
 printed estimate to the user on big jobs. `--max-tokens` is only an override; leave
 it unset for the tuned default.
 
-**Savings receipts (v3 Phase 6):** every run's stderr receipt now prices the
+**Savings receipts:** every run's stderr receipt now prices the
 run and compares it to a frontier reference — `[ambient <model> | in=X out=Y
 tokens ≈ $0.013 (vs ~$0.42 frontier — saved 97%)]` — so relay the saving when
 the user asks what Ambient is worth. The reference is
@@ -246,7 +245,7 @@ usage record stores the run cost + the reference in force, so `ambient
 usage` computes historical savings against what was true at call time. Never
 quote a savings figure the CLI itself did not print.
 
-**Self-calibrating token math (v3 Phase 8a):** budget sizing and cost
+**Self-calibrating token math:** budget sizing and cost
 estimates convert chars→tokens with a per-model OBSERVED chars-per-token
 learned from the local usage ledger (recent-weighted EWMA over real API
 usage records, clamped to 1.0–8.0) — the tool gets smarter with use. With no

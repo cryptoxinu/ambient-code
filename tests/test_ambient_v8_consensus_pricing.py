@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 5 remediation round-2 tests (Codex M1/M2 + SKILL.md LOW).
+"""Hermetic remediation round-2 tests.
 
 - M2: a chunked consensus model is priced MAP-ONLY (n_chunks calls per
   model, not n_chunks*2) — consensus reduces with the deterministic
@@ -346,7 +346,7 @@ class TestSkillMdConsensusDeepDrift(unittest.TestCase):
 
 
 class TestConsensusDryRunPlan(unittest.TestCase):
-    """Codex final gate: --consensus --dry-run must validate the model set and
+    """--consensus --dry-run must validate the model set and
     price CONSENSUS (map-only), never the lone default model."""
 
     def test_dry_run_prices_consensus_map_only(self):

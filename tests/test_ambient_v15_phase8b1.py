@@ -1,4 +1,4 @@
-"""v3 Phase 8b-1 tests: complete()'s bounded attempt-loop (formerly recursive
+"""tests: complete()'s bounded attempt-loop (formerly recursive
 retry frames) and the frozen Session transport context.
 
 Hermetic — every test fakes the transport (module-global stream_completion or

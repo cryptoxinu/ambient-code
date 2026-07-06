@@ -1,4 +1,4 @@
-"""v3 Phase 8b-2 tests: the frozen RequestSpec engine request-knob carrier.
+"""tests: the frozen RequestSpec engine request-knob carrier.
 
 Hermetic — every test fakes the transport; no network, no live API. Focus:
 (1) RequestSpec is frozen and from_args captures EVERY engine knob with a

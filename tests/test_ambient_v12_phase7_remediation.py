@@ -1,4 +1,4 @@
-"""Hermetic Phase 7 remediation tests (Codex findings H1-H4, M1-M3 + LOW).
+"""Hermetic remediation tests.
 
 H1  ask/code --best-of with failed samples is PARTIAL (exit 2), the
     coverage reason names the failed samples, --allow-partial accepts.

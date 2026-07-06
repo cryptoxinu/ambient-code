@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 1 tests: the --parallel/AMBIENT_MAX_PARALLEL fan-out
+"""Hermetic tests: the --parallel/AMBIENT_MAX_PARALLEL fan-out
 knob, the concurrent consensus lane (order-preserving), and the machine-
 readable JSON error envelope on --json failures. No network, no live API."""
 import argparse

@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 3 REMEDIATION tests (Codex findings H1/H2/M1/M2/M3):
+"""Hermetic REMEDIATION tests:
 - H1: an unknown --reduce-model / stale AMBIENT_MODEL_MAP reduce= entry fails
   with the clean [model] diagnosis BEFORE any map chunk is billed (zero
   complete() calls), prose AND --json envelope; a reduce=auto spec resolves

@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 5 REMEDIATION tests (Codex findings C1/H1/H2/H3/M1/M2).
+"""Hermetic REMEDIATION tests.
 
 - C1: the multi-language signature regexes must be backtracking-safe — a
   400k-char pathological C line or a 100k all-spaces line must never hang

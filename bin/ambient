@@ -90,7 +90,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "2.1.1"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "1.0.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -106,7 +106,7 @@ SUPPORT_LINE = ("If this keeps happening, contact Ambient support with the "
 EXIT_PARTIAL = 2
 EXIT_UNCONFIGURED = 3
 EXIT_USAGE = 64
-# Terminal-injection guard: model output comes from anonymous miners on a
+# Terminal-injection guard: model output comes from anonymous, untrusted remote nodes on a
 # decentralized network. Strip ANSI/OSC/DCS escapes and stray C0 controls
 # (keeping \n and \t) before anything model-derived reaches a terminal —
 # otherwise a poisoned reply can rewrite verdicts, spoof the PARTIAL banner,
@@ -118,9 +118,7 @@ ANSI_RE = re.compile(
     r"|[@-Z\\-_=><~])"                      # two-char sequences
 )
 CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-# Kimi is the default for BOTH lanes: the live probe (docs/LIVE_PROBE_REPORT.md)
-# measured it ~2-3x faster and catching planted bugs 3/3 where GLM-5.2 caught
-# 1/3 — GLM is still being built up network-side and stays fully selectable
+# Kimi is the default for BOTH lanes; GLM-5.2 stays fully selectable
 # (`ambient use z-ai/glm-5.2 --chat`).
 DEFAULT_MODEL = "moonshotai/kimi-k2.7-code"
 DEFAULT_CODE_MODEL = "moonshotai/kimi-k2.7-code"
@@ -161,7 +159,7 @@ CHUNK_CHARS = 300_000         # default per-chunk budget (overridden per model)
 CHARS_PER_TOKEN = 3.2                  # aligns with estimate_cost/cost_gate
 REASONING_EXPANSION = 1.5              # reasoning chars produced per input char on
                                        # dense code (empirical ~1.43, rounded up)
-# --- Telemetry-EWMA routing (v3 Phase 8a) ------------------------------------
+# --- Telemetry-EWMA routing ------------------------------------
 # The tool gets SMARTER WITH USE: every real usage object the API returns is
 # already metered in the local ledger; observed_cpt() turns that history into
 # a per-model observed chars-per-token EWMA. model_profile SIZING uses it
@@ -191,12 +189,12 @@ FALLBACK_CONTEXT = 200_000             # offline/unknown-model context assumptio
 # exceeding a strict model's real cap (escalation grows it if the model has more).
 FALLBACK_MAX_OUTPUT = 16_384
 ABS_MAX_CHARS = 20_000_000    # sanity ceiling (~$8-25 of input) — cost guard, not a limit
-MAX_PARALLEL_CHUNKS = 3       # concurrent chunk calls (be kind to miners)
-# --- Repo intelligence (Phase 5) ---------------------------------------------
+MAX_PARALLEL_CHUNKS = 3       # concurrent chunk calls (bounded to not overload the network)
+# --- Repo intelligence ---------------------------------------------
 CODE_MAP_BUDGET_DEFAULT = 4_000   # repo-map chars when the model window is unknown
 CODE_MAP_BUDGET_MAX = 40_000      # hard cap — the map must never crowd out code
 CODE_MAP_SIGS_PER_FILE = 40       # signature cap per file in the repo map
-SIG_SCAN_LINE_MAX = 4_096         # never regex-scan a longer line (Codex C1:
+SIG_SCAN_LINE_MAX = 4_096         # never regex-scan a longer line (
 #   a minified/pathological line has no useful column-0 signature, and long
 #   single-class runs are exactly where regex backtracking blows up)
 REPO_FILE_MAX_BYTES = 1_000_000   # audit --repo skips any single file above this
@@ -277,7 +275,7 @@ def read_config_file():
         pass
     except UnicodeDecodeError:
         # Disk corruption / wrong-encoding edit must degrade, not crash to the
-        # [internal] shield (QA sweep: verified repro on non-UTF8 bytes).
+        # shield.
         print(
             f"ambient: {CONFIG_PATH} is corrupt (not valid UTF-8) — ignoring it. "
             "Re-run: ambient setup",
@@ -356,7 +354,7 @@ def keychain_delete():
     """Remove the stored key from the OS secret store. Returns True when the
     key is gone (deleted or was absent) and False on a real failure — a locked
     Keychain must not let `setup --remove` claim success while the key still
-    resolves (Codex W2/3 MED)."""
+    resolves."""
     b = secret_backend()
     try:
         if b == "keychain":
@@ -466,7 +464,7 @@ def load_config():
         return api_key, api_url, conf
     # stdout.isatty matters too: `ambient ask --json > out.json` on a first
     # run must NOT interleave the setup preamble/welcome panel into the
-    # captured file (Codex W2/3 HIGH) — a redirected first run gets exit 3.
+    # captured file — a redirected first run gets exit 3.
     interactive = (
         sys.stdin.isatty() and sys.stderr.isatty() and sys.stdout.isatty()
         and os.environ.get("AMBIENT_NO_ONBOARD") != "1"
@@ -500,7 +498,7 @@ def load_config():
 def redact(text, api_key):
     """Make model-derived text safe to print: strip the API key (endpoints
     echoing auth back must never land it in terminal output or transcripts)
-    AND neutralize terminal-escape injection from untrusted miner output.
+    AND neutralize terminal-escape injection from untrusted model output.
     Keys shorter than 8 chars are not redacted: substring collisions would
     mangle ordinary text (real keys are far longer)."""
     if not text:
@@ -574,7 +572,7 @@ def _config_lock(conf_dir):
                 pass
             if waited >= 10.0:
                 # NEVER enter the critical section unlocked — that loses updates
-                # or corrupts the key (Codex A+B HIGH). Fail loudly instead.
+                # or corrupts the key. Fail loudly instead.
                 sys.exit(
                     "ambient: config is locked by another ambient process "
                     "(waited 10s). Retry in a moment."
@@ -594,7 +592,7 @@ def _config_lock(conf_dir):
 def _private_dir(path):
     """Create/heal a directory as owner-only. Cache entries quote the user's
     proprietary code and usage records their activity — the 0600 discipline of
-    the env file applies to everything under ~/.config/ambient (security sweep:
+    the env file applies to everything under ~/.config/ambient (
     cache/usage were world-readable)."""
     try:
         os.makedirs(path, mode=0o700, exist_ok=True)
@@ -613,7 +611,7 @@ def save_config_values(updates):
     `updates` may be a CALLABLE taking the freshly-parsed config dict and
     returning the updates dict — list-merge writers (curation) must compute
     their merge INSIDE the lock or two terminals lose each other's entries
-    (Codex W2/3 MED)."""
+."""
     conf_dir = os.path.dirname(CONFIG_PATH)
     try:
         os.makedirs(conf_dir, mode=0o700, exist_ok=True)
@@ -673,7 +671,7 @@ def save_config_values(updates):
         os.chmod(CONFIG_PATH, 0o600)
 
 
-# Founder-verified guidance shown wherever models are chosen; a founder-set
+# Guidance shown wherever models are chosen; a user-set
 # note for the same id (ambient curate note) overrides, and an explicitly
 # cleared note stays cleared. Local config only — nothing fetched or sent.
 DEFAULT_MODEL_NOTES = {
@@ -686,10 +684,10 @@ def _split_csv(raw):
 
 
 def curation(conf):
-    """Founder model-curation state from env/config: (allow, hide, show,
+    """Model-curation state from env/config: (allow, hide, show,
     notes). allow/hide are lists of ids or fnmatch globs; show is a list of
     EXACT ids that override everything (so `curate show qwen/foo` can surface
-    one model out of a hidden glob — Codex W2/3 MED: without it, a glob hide
+    one model out of a hidden glob — without it, a glob hide
     was un-overridable); notes maps id -> label. Curation affects SURFACING
     and AUTOMATIC selection only — explicit -m/`use <id>` always works (model
     choice is SACRED). Parses defensively: junk config can never crash."""
@@ -707,7 +705,7 @@ def curation(conf):
             if isinstance(parsed, dict):
                 for k, v in parsed.items():
                     if isinstance(k, str) and isinstance(v, str):
-                        notes[k] = v  # "" = founder cleared a default note
+                        notes[k] = v  # "" = the user cleared a default note
         except json.JSONDecodeError:
             print("ambient: AMBIENT_MODEL_NOTES in config is malformed — "
                   "ignoring it (reset: ambient curate reset)", file=sys.stderr)
@@ -727,7 +725,7 @@ def is_hidden(model_id, allow, hide, show=()):
 
 def note_if_hidden(model_id, conf, source="-m"):
     """One stderr line when an explicitly chosen model is curated out —
-    explicit choice always wins, but silently ignoring the founder's curation
+    explicit choice always wins, but silently ignoring the user's curation
     would look like a bug."""
     if is_auto_model(model_id):
         return  # a pseudo-spec, not a catalog id — nothing to note
@@ -824,7 +822,7 @@ def print_welcome_panel(models, where, probe_detail, conf, funds_issue=False):
 def key_paste_problem(key):
     """Local sanity check of a pasted key BEFORE any network call. Malformed
     pastes (smart quotes, embedded whitespace, shell fragments) must produce a
-    human message — not a UnicodeEncodeError [internal] crash in urllib header
+    human message — not a UnicodeEncodeError crash in urllib header
     encoding, and never a late, misleading 'Keychain write failed' (the
     keychain writer rejects quotes/backslashes). Returns None when plausible."""
     if not key:
@@ -849,7 +847,7 @@ def model_map(conf):
     "map=z-ai/glm-5.2,reduce=moonshotai/kimi-k2.7-code,chat=…" — into
     {phase: model_id}. Phases: chat, code, map (the bulk lane), reduce (the
     map-reduce synthesis step). Explicit -m / --reduce-model on the CLI always
-    override it (Phase 3d). Defensive: junk config can never crash."""
+    override it. Defensive: junk config can never crash."""
     raw = (os.environ.get("AMBIENT_MODEL_MAP")
            or conf.get("AMBIENT_MODEL_MAP") or "")
     out = {}
@@ -943,7 +941,7 @@ def fetch_models(api_url, api_key):
             f"(HTTP {status}): {redact(error_message(body), api_key)}"
         )
     # Normalize ONCE at the choke point: every catalog consumer downstream may
-    # assume dict entries with a string id (Codex W1 MED — a bare-string or
+    # assume dict entries with a string id (a bare-string or
     # id-less entry crashed _dedupe_catalog/auth_probe). Field VALUES are still
     # coerced at use (_as_pos_int etc.).
     data = body.get("data")
@@ -963,7 +961,7 @@ def _as_pos_int(v, default):
     """Coerce an untrusted catalog field to a positive int, else `default`.
     The catalog is network data from a decentralized API — one drifted field
     type (string context_length, bool, dict) must never crash every command
-    (QA sweep: verified repro)."""
+."""
     try:
         if isinstance(v, bool):  # bool is an int subclass; True==1 is nonsense here
             return default
@@ -987,7 +985,7 @@ def safe_catalog(api_url, api_key):
 
 
 # Above every price observed in the live catalog — used when pricing is
-# unknown so the spend gate can NEVER fail open (arch sweep: cost_gate used to
+# unknown so the spend gate can NEVER fail open (cost_gate used to
 # skip the ceiling exactly when the catalog was unreachable).
 ASSUMED_MAX_INPUT_PRICE = 2.0    # $/Mtok
 ASSUMED_MAX_OUTPUT_PRICE = 8.0   # $/Mtok
@@ -996,8 +994,8 @@ ASSUMED_MAX_OUTPUT_PRICE = 8.0   # $/Mtok
 def model_pricing(catalog, model):
     """(input $/Mtok, output $/Mtok) from the catalog, or None if unpriced.
     Zero/absent/NaN pricing is UNPRICED, not free — treating it as $0 would
-    disable the spend gate exactly when the catalog is degraded (Codex W1
-    HIGH). Unpriced models fall to assumed worst-case pricing."""
+    disable the spend gate exactly when the catalog is degraded.
+    Unpriced models fall to assumed worst-case pricing."""
     for m in catalog or []:
         if isinstance(m, dict) and m.get("id") == model:
             p = m.get("pricing")
@@ -1094,7 +1092,7 @@ def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     figure that over-refused big legitimate jobs); `expected` uses a realistic
     per-call output. Unpriced model / missing catalog → worst-case ASSUMED
     prices with assumed=True, so the ceiling still applies. Input tokens use
-    the CONSERVATIVE cost cpt (_cost_cpt = min(observed, static) — Phase 8a
+    the CONSERVATIVE cost cpt (_cost_cpt = min(observed, static) —
     telemetry may only tighten the gate, never under-price)."""
     price = model_pricing(catalog, model)
     assumed = price is None
@@ -1110,7 +1108,7 @@ def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     return expected, bound, assumed
 
 
-# --- Savings receipts (v3 Phase 6) --------------------------------------------
+# --- Savings receipts --------------------------------------------
 # The 10-40x-cheaper value proposition was invisible: no run ever showed a
 # dollar figure or a vs-frontier comparison. These helpers price a finished
 # run from the catalog and compare it against a FRONTIER REFERENCE price
@@ -1195,7 +1193,7 @@ def _fmt_usd(x):
 
 def _round_money(x):
     """Display rounding for `ambient usage` figures: 4dp normally, but a
-    REAL nonzero figure must never flatten to 0 (Codex H3 — sub-microdollar
+    REAL nonzero figure must never flatten to 0 (sub-microdollar
     spend rounded to $0 fabricated a ~100% saving). Tiny values keep 6
     significant digits instead."""
     if x and abs(x) < 0.0001:
@@ -1246,7 +1244,7 @@ def savings_note_by_served(usage_by_model, catalog=None, conf=None):
     """Receipt suffix for a run whose samples may have been SERVED by
     DIFFERENT models (best-of under --fallback). Pricing the token
     aggregate at the selected sample's model would OVER-state the saving
-    whenever a pricier fallback served part of the tokens (Codex H1), so
+    whenever a pricier fallback served part of the tokens, so
     the true cost prices EACH model's OWN tokens and sums; the frontier
     reference prices the total. Same honesty rules as savings_note — a
     single serving model delegates to it outright, assumed pricing claims
@@ -1291,7 +1289,7 @@ def savings_note_by_served(usage_by_model, catalog=None, conf=None):
         return ""
 
 
-# --- Fleet spend budget (v3 Phase 4a) ----------------------------------------
+# --- Fleet spend budget ----------------------------------------
 # AMBIENT_MAX_SPEND used to gate each invocation in ISOLATION, so the
 # documented 10-wide fan-out (SKILL.md) could spend up to 10x the ceiling.
 # These helpers make it a true AGGREGATE ceiling: every gated invocation
@@ -1305,7 +1303,7 @@ def savings_note_by_served(usage_by_model, catalog=None, conf=None):
 # or crash a legitimate call. Opt out with AMBIENT_FLEET_BUDGET=off.
 
 # Default reservation lifetime. Deliberately generous (1h): on POSIX a
-# provably-ALIVE holder is never TTL-pruned (Codex H1), but on Windows pid
+# provably-ALIVE holder is never TTL-pruned, but on Windows pid
 # liveness is unknowable, so a single long job that never re-gates relies on
 # this TTL not expiring under it — accepted best-effort (see _load_reservations).
 RESERVATION_TTL_S = 3600.0    # default lifetime of a spend reservation
@@ -1319,7 +1317,7 @@ def _lock_owner_dead(lock_path):
     """True ONLY when the lock file's recorded owner pid is PROVABLY dead.
     Garbage/unreadable token or unknowable liveness (Windows,
     PermissionError) → False: breaking a possibly-live owner's lock would
-    let two processes rewrite the store concurrently (Codex M2), so the
+    let two processes rewrite the store concurrently, so the
     caller must fail open instead. Read again right before any unlink to
     shrink the replace-race window."""
     try:
@@ -1340,7 +1338,7 @@ def _fs_lock(lock_path, wait_s):
     or raises: after a bounded wait it yields False so the caller degrades
     to per-invocation behavior instead of blocking a legitimate call (no
     deadlock, ever). The no-fcntl path breaks a leftover lock ONLY when its
-    recorded owner is provably dead (Codex M2) — a live-but-slow owner is
+    recorded owner is provably dead — a live-but-slow owner is
     never broken into, because every caller guards a read-modify-rewrite
     critical section; on real Windows liveness is unknowable, so a crashed
     process's lock degrades every later call to fail-open per-invocation
@@ -1453,7 +1451,7 @@ def _pid_alive(pid):
         # SOMETHING owns that pid, but not us — it may be the reserving
         # ambient re-run under sudo, or a recycled pid owned by another
         # user. Unknowable → None, so the TTL backstop still applies
-        # instead of the record being pinned alive forever (Codex H1).
+        # instead of the record being pinned alive forever.
         return None
     except OSError:
         return None
@@ -1465,7 +1463,7 @@ def _reservations_path():
 
 def _load_reservations(path, ttl, now):
     """Parse + prune the reservations store. Returns (records, saw_corrupt).
-    Pruning is LIVENESS-FIRST (Codex H1): a provably-ALIVE pid is KEPT no
+    Pruning is LIVENESS-FIRST: a provably-ALIVE pid is KEPT no
     matter how old its record is — a slow long call (map-reduce, high
     --timeout, stalled TTY prompt) can still spend, so pruning it would let
     a sibling breach the aggregate ceiling. A definitively-dead pid is
@@ -1534,8 +1532,8 @@ def _fleet_warn(reason):
 def _fleet_release_all():
     """Drop every reservation this process holds — called on EVERY exit path
     (atexit covers sys.exit/normal return; a hard kill is covered by the
-    dead-pid/TTL prune). Idempotent, best-effort, never raises. Codex M3:
-    ids are cleared ONLY after the rewrite that removes them lands — a
+    dead-pid/TTL prune). Idempotent, best-effort, never raises.
+    IDs are cleared ONLY after the rewrite that removes them lands — a
     lock/write failure keeps them so a later release (or atexit) can retry,
     with the dead-pid/TTL prune as the ultimate backstop."""
     if not _FLEET_RES_IDS:
@@ -1559,15 +1557,15 @@ def _fleet_release_all():
 
 
 def _fleet_reserve(expected, ceiling, args, conf):
-    """The Phase 4a aggregate gate: under the cross-process lock, prune stale
+    """The aggregate gate: under the cross-process lock, prune stale
     reservations, refuse when live sibling reservations + this call would
     blow the ceiling, else record this call's reservation (released on every
     exit path). A re-gate by the SAME process (multi-gate job: map then
     reduce) REFRESHES its existing reservation — fresh ts, amount = max of
-    the concurrent gates — instead of double-counting (Codex H1). Any
+    the concurrent gates — instead of double-counting. Any
     machinery failure fails OPEN to the per-invocation gate with a one-line
     warning — but ONLY on the allow path: once the numbers say over-budget,
-    the refusal always fires (Codex H2)."""
+    the refusal always fires."""
     global _FLEET_ATEXIT_ARMED
     if not _fleet_enabled(conf) or expected <= 0:
         return
@@ -1660,7 +1658,7 @@ def _gate_amount(expected, args, conf, bound=None):
     binds the EXPECTED spend (the bound over-states 10-30x and would over-
     refuse legitimate jobs), but the worst-case bound gets its own guard at
     3x the ceiling so the configured limit can never be blown past silently
-    (Codex W1 HIGH)."""
+."""
     raw = (os.environ.get("AMBIENT_MAX_SPEND")
            or conf.get("AMBIENT_MAX_SPEND") or "5")
     try:
@@ -1681,7 +1679,7 @@ def _gate_amount(expected, args, conf, bound=None):
             f"3x your ${ceiling:.2f} ceiling — pass --allow-cost, or raise "
             "AMBIENT_MAX_SPEND, to proceed."
         )
-    # Phase 4a: the same ceiling, enforced as an AGGREGATE across every
+    # the same ceiling, enforced as an AGGREGATE across every
     # concurrently-running ambient process (SKILL.md fleet contract) — a
     # 10-wide fan-out shares ONE budget instead of multiplying it by 10.
     # --allow-cost bypasses the fleet gate exactly like the checks above.
@@ -1703,7 +1701,7 @@ def _gate_amount(expected, args, conf, bound=None):
 
 def cost_gate_soft(catalog, model, input_chars, n_calls, args, conf):
     """Non-fatal twin of cost_gate for OPTIONAL extra passes (the repo deep
-    pass, Codex H1): same estimate / ceiling / fleet-reservation / TTY
+    pass): same estimate / ceiling / fleet-reservation / TTY
     semantics, but a refusal returns False instead of exiting — the caller
     SKIPS the optional call and the already-paid pass-1 result must survive
     untouched. Anything the underlying gate would print to STDOUT on refusal
@@ -2021,11 +2019,11 @@ def estimate_cost_mr(catalog, model, reduce_model, input_chars, n_chunks,
     map input ~1.0x at map prices + synthesis input ~0.3x (the partials the
     reduce step re-reads) at REDUCE prices + each lane's own output calls at
     its own price. Reusing the 1.3x single-model helper for both lanes
-    double-counted the synthesis re-read (Codex M1). When map == reduce this
+    double-counted the synthesis re-read. When map == reduce this
     is byte-identical to estimate_cost(n_chunks*2 + extra_calls). With
     synthesis=False (deterministic reducer — findings_reducer does a pure
     Python merge) there is NO synthesis LLM call at all: only the map lane
-    is priced, input billed once (Codex M3)."""
+    is priced, input billed once."""
     if not synthesis:
         price, assumed = _lane_pricing(catalog, model)
         in_tok = input_chars / _cost_cpt(model)
@@ -2056,13 +2054,13 @@ def estimate_cost_mr(catalog, model, reduce_model, input_chars, n_chunks,
 def cost_gate_mr(catalog, model, reduce_model, input_chars, n_chunks, args,
                  conf, extra_calls=0, synthesis=True, per_call_chars=None):
     """Cost gate for a map-reduce run whose REDUCE model may differ from the
-    map model (--reduce-model / AMBIENT_MODEL_MAP, Phase 3c): map chunks are
+    map model (--reduce-model / AMBIENT_MODEL_MAP): map chunks are
     priced at the map model, synthesis calls at the reduce model. Same
     ceiling / worst-case / TTY-confirm semantics as cost_gate; identical to
     it when the models match, so existing estimates don't shift.
     synthesis=False (deterministic reducer, e.g. the structured-audit
     findings merge) prices ONLY the map lane — there is no synthesis LLM
-    call to bill (Codex M3). `per_call_chars` (final spend-safety HIGH) is
+    call to bill. `per_call_chars` (final spend-safety HIGH) is
     each MAP chunk's REAL billed size — callers holding the packed chunk
     list thread it so a live --fallback swap is reserved at each chunk's
     OWN candidate, exactly like cmd_map's uneven items. SAME-MODEL runs
@@ -2115,11 +2113,11 @@ def pick_fallback_model(catalog, current, min_context=0, conf=None):
     not an embedding/vision-only model — so opt-in fallback never silently
     switches to a model that would produce nonsense. Requires context_length >=
     min_context so the alt can hold the chunk that was already sized for the
-    original model (Codex fix: a non-reasoner's huge chunk must not land on a
+    original model (a non-reasoner's huge chunk must not land on a
     small-window model). Curation-aware: never auto-switch INTO a model the
-    founder curated out while any visible candidate exists, prefer the user's
+    user curated out while any visible candidate exists, prefer the user's
     other configured lane default, then the CHEAPEST fitting model by output
-    $/Mtok, tie-broken by bigger context (v3 Phase 3e: fit-then-cheapest —
+    $/Mtok, tie-broken by bigger context (fit-then-cheapest
     the old biggest-context-first ranking paid frontier prices for headroom
     the chunk never needed). Returns None if none fit."""
     conf = conf if conf is not None else {}
@@ -2161,7 +2159,7 @@ def pick_fallback_model(catalog, current, min_context=0, conf=None):
     return best[4]
 
 
-# --- Advisory routing (v3 Phase 3) ------------------------------------------
+# --- Advisory routing ------------------------------------------
 # Everything here is either the user EXPLICITLY delegating selection (they
 # typed `-m auto…` / saved it with `ambient use auto`), purely ADVISORY (a
 # stderr hint that changes nothing), or the user's own explicit config
@@ -2249,7 +2247,7 @@ def resolve_auto_model(spec, catalog, conf, input_chars=0, args=None,
 
 
 def preflight_hint(model, catalog, conf, input_chars=0):
-    """Phase 3b: ADVISORY ONLY. One stderr line when the user's resolved
+    """ADVISORY ONLY. One stderr line when the user's resolved
     CONCRETE model has no live workers, or the whole input cannot fit its
     context window — naming READY alternatives with their price. It never
     changes the model, never blocks, and says so: model choice is SACRED."""
@@ -2325,7 +2323,7 @@ def _validate_reduce_id(chosen, catalog, args, source):
 
 
 def resolve_reduce_model(args, conf, map_model, catalog=None):
-    """Model for the map-reduce SYNTHESIS step (Phase 3c cheap-map /
+    """Model for the map-reduce SYNTHESIS step (cheap-map /
     strong-reduce): --reduce-model flag > AMBIENT_MODEL_MAP 'reduce' phase >
     the map model itself. An explicit concrete -m pins the WHOLE run — the
     config map must never reroute the synthesis behind the user's back.
@@ -2386,7 +2384,7 @@ def _reasoning_output_budget(input_chars, cpt=None):
     """Tokens needed to REASON over `input_chars` of dense code AND still emit a
     real answer: reasoning_tokens + a fixed answer reserve, times a safety
     factor. `cpt` lets model_profile pass the model's OBSERVED chars-per-token
-    (Phase 8a telemetry); default = the static constant, byte-identical."""
+; default = the static constant, byte-identical."""
     cpt = cpt or CHARS_PER_TOKEN
     reasoning_tokens = input_chars * REASONING_EXPANSION / cpt
     return int((reasoning_tokens + ANSWER_TOKENS_RESERVE) * OUTPUT_SAFETY)
@@ -2406,7 +2404,7 @@ def single_shot_max_chars():
 def _reasoning_single_shot_target(ctx, max_out, cpt=None):
     """Largest input a reasoning model can take in ONE pass and still fit both
     its output cap and its context window. Bounded by the cost knob. `cpt` =
-    observed chars-per-token when history exists (Phase 8a); default static."""
+    observed chars-per-token when history exists; default static."""
     cpt = cpt or CHARS_PER_TOKEN
     # Output constraint: _reasoning_output_budget(single) <= max_out
     by_output = ((max_out / OUTPUT_SAFETY - ANSWER_TOKENS_RESERVE)
@@ -2427,7 +2425,7 @@ def model_profile(catalog, model):
     An unknown/offline model falls back to conservative REASONING defaults — the
     safer failure mode (over-budget, under-chunk). Char↔token conversion uses
     the model's OBSERVED chars-per-token when the local ledger has real usage
-    history (Phase 8a telemetry-EWMA; AMBIENT_TELEMETRY=off opts out), else
+    history (AMBIENT_TELEMETRY=off opts out), else
     the static CHARS_PER_TOKEN — a no-history profile is byte-identical."""
     cpt = _effective_cpt(model)
     meta = next((m for m in (catalog or [])
@@ -2436,10 +2434,10 @@ def model_profile(catalog, model):
         ctx, max_out, feats = FALLBACK_CONTEXT, FALLBACK_MAX_OUTPUT, ["reasoning"]
     else:
         # Coerce untrusted catalog types — a string "202752" or junk must
-        # degrade to the fallback, never TypeError every command (QA sweep).
+        # degrade to the fallback, never TypeError every command.
         # Only substitute the fallback when the field is absent/invalid — a
         # real but small cap (e.g. 1024) is respected, not inflated past the
-        # API limit (Codex round-3 LOW).
+        # API limit.
         ctx = _as_pos_int(meta.get("context_length"), FALLBACK_CONTEXT)
         max_out = _as_pos_int(meta.get("max_output_length"), FALLBACK_MAX_OUTPUT)
         raw_feats = meta.get("supported_features")
@@ -2459,7 +2457,7 @@ def model_profile(catalog, model):
             # Hard output cap (e.g. gemma-4-31b = 16384) can't hold
             # reasoning+answer for the target single-shot. INVERT
             # _reasoning_output_budget INCLUDING OUTPUT_SAFETY so the shrunk
-            # input's derived budget actually fits the cap (Codex fix): solve
+            # input's derived budget actually fits the cap: solve
             # out = (reasoning_tok + reserve) * safety = max_out.
             out = max_out
             reasoning_tok = max(256, max_out / OUTPUT_SAFETY - ANSWER_TOKENS_RESERVE)
@@ -2469,13 +2467,13 @@ def model_profile(catalog, model):
     else:
         # Non-reasoning: answers directly. Size input off the context window with a
         # 15% margin, but CLAMP output+input to stay within context even for a
-        # degenerate tiny-context model where max_output ≈ context (Codex fix).
+        # degenerate tiny-context model where max_output ≈ context.
         out = min(NONREASONING_OUTPUT_BUDGET, max_out, max(MIN_OUTPUT_TOKENS, ctx // 2))
         input_tokens = int(ctx * NONREASONING_CONTEXT_MARGIN) - out
         input_tokens = max(1000, min(input_tokens, ctx - out - 1000))
         single = int(input_tokens * cpt)
         chunk = int(single * REASONING_CHUNK_FACTOR)
-    # REASONING INVARIANT (Codex round-3 MED): after all caps/floors, guarantee
+    # REASONING INVARIANT: after all caps/floors, guarantee
     # the derived budget actually holds reasoning over `single` + the answer.
     # A small output cap (e.g. 8000) with the MIN_REASONING_CHUNK floor could
     # otherwise leave _reasoning_output_budget(single) > out. Shrink until it
@@ -2484,7 +2482,7 @@ def model_profile(catalog, model):
         while single > 500 and _reasoning_output_budget(single, cpt) > out:
             single = int(single * 0.85)
         chunk = min(chunk, single)
-    # FINAL context-fit clamp (Codex): guarantee single-shot input + output fit
+    # FINAL context-fit clamp: guarantee single-shot input + output fit
     # the context window with overhead, for ANY model (incl. hypothetical tiny-
     # context reasoners). Shrink the input if needed; if even a floor input
     # won't fit, also trim the output budget so a call can still complete.
@@ -2494,7 +2492,7 @@ def model_profile(catalog, model):
     max_input_tok = ctx - out - overhead_tok
     if max_input_tok < 1000:
         # Give input room by trimming output — but NEVER above the model's real
-        # output cap (fuzz-caught: a tiny max_out could be exceeded here).
+        # output cap.
         out = min(max_out, max(256, ctx - 1000 - overhead_tok))
         max_input_tok = ctx - out - overhead_tok
     single_tok = -(-single // cpt)  # ceil, conservative
@@ -2517,7 +2515,7 @@ def _resolve_output_budget(max_tokens, profile, input_chars=None):
     """Pure core of the output-budget derivation: (max_tokens, auto_budget)
     for this profile. Shared by apply_output_budget (mutable Namespace, kept
     for the cmd_* boundary) and RequestSpec.with_output_budget (frozen engine
-    spec, Phase 8b-2) — ONE implementation so the two carriers can never
+    spec) — ONE implementation so the two carriers can never
     drift. When `input_chars` is given, RIGHT-SIZE a reasoning model's budget
     to the actual input (A1) — so a small prompt gets a sane ceiling, not the
     worst-case one."""
@@ -2527,17 +2525,17 @@ def _resolve_output_budget(max_tokens, profile, input_chars=None):
             want = _reasoning_output_budget(input_chars,
                                             _effective_cpt(profile.model))
             # Floor gives room to think+answer, but must never exceed the
-            # profile's already context-safe budget (Codex A+B MED).
+            # profile's already context-safe budget.
             floor = min(8192, profile.output_budget)
             return max(floor, min(want, profile.output_budget)), True
         # let --fallback re-derive (True) vs. respect a user value (False)
         return profile.output_budget, True
     # explicit --max-tokens: respect it, but keep it sane for THIS model — clamp
     # to BOTH the output cap AND what leaves room for the input in context, so a
-    # big --max-tokens on a big-context model can't overflow (Codex round-3 HIGH).
+    # big --max-tokens on a big-context model can't overflow.
     single_tok = int(profile.single_shot_chars / _effective_cpt(profile.model))
     context_safe = profile.context_length - single_tok - 2500
-    # The floor must never exceed the model's real output cap (fuzz-caught: a
+    # The floor must never exceed the model's real output cap (a
     # 500-token-cap model must not be forced up to the 2048 floor).
     floor = min(MIN_OUTPUT_TOKENS, profile.max_output_length)
     resolved = max(floor,
@@ -2632,7 +2630,7 @@ def classify_error(status, body, api_key):
         if any(w in lower for w in budget_words):
             # A too-large max_tokens is NOT a context overflow: splitting the
             # input resends the same doomed budget and every chunk fails the
-            # same way (resilience sweep LOW). Handled by halving the budget.
+            # same way. Handled by halving the budget.
             return "budget", (
                 f"the requested output budget exceeds this model's limit "
                 f"(HTTP {status}: {msg})."
@@ -2643,7 +2641,7 @@ def classify_error(status, body, api_key):
 def auth_probe(api_url, api_key, models):
     """Verify a key with a minimal real completion (the models endpoint is
     unauthenticated, so it proves nothing about the key). Returns
-    (ok, category, detail). A 429 'no workers' still proves auth passed."""
+    (ok, category, detail). A not-serving 429 still proves auth passed."""
     ready = ready_model_ids(models)
     probe_model = ready[0] if ready else (models[0]["id"] if models else DEFAULT_MODEL)
     payload = {
@@ -2658,7 +2656,7 @@ def auth_probe(api_url, api_key, models):
         return True, "ok", f"live completion on {probe_model} succeeded"
     category, detail = classify_error(status, body, api_key)
     if category == "model":
-        # "No workers" is only ever returned after auth succeeds.
+        # The not-serving 429 is only ever returned after auth succeeds.
         return True, category, (
             "authentication passed (verified even while the probe model isn't "
             "serving — that response only comes after a valid key)"
@@ -2689,10 +2687,10 @@ SECRET_PATTERNS = [
 ]
 # Kept OUT of SECRET_PATTERNS: this pattern backtracks quadratically on long
 # lowercase-alnum runs (measured 129s on a 400k-char line — an effective hang
-# on minified/hex blobs, resilience sweep HIGH). _line_has_secret gates it on
+# on minified/hex blobs). _line_has_secret gates it on
 # the literal '://' and scans only a bounded window around each occurrence.
 CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{6,}@")
-# Credential-named files refused regardless of content (security sweep: the
+# Credential-named files refused regardless of content (the
 # old check missed .envrc/.netrc/.npmrc/.pgpass/id_rsa/*.pem/credentials.json).
 SECRET_NAMES_RE = re.compile(
     r"(^|\.)env(\.|$)|^\.envrc$|^\.netrc$|^\.npmrc$|^\.pgpass$"
@@ -2706,7 +2704,7 @@ def _line_has_secret(line):
     if "://" not in line:
         return False
     # Overlapping fixed windows (4k window / 2k step): total work stays linear
-    # in the line length with NO occurrence cap (Codex W1 MED: a cap let a
+    # in the line length with NO occurrence cap (a cap let a
     # credential after 20 benign URLs through), and a cred URL spanning up to
     # ~2k chars can never straddle past both windows that contain it.
     step, win = 2048, 4096
@@ -2748,7 +2746,7 @@ USAGE_TRIM_KEEP_LINES = 20_000  # how many newest ledger lines a trim keeps
 
 def _retry_delay(base, headers=None):
     """Backoff with random jitter, honoring a Retry-After header (clamped to 60s)
-    when present (D3). Jitter breaks the lockstep that makes 3 fan-out workers
+    when present. Jitter breaks the lockstep that makes 3 fan-out workers
     re-hit the limiter together (thundering herd)."""
     hint = 0.0
     if headers is not None:
@@ -2769,11 +2767,11 @@ CACHE_TTL_DEFAULT = 7 * 86400     # a cached chunk older than this is ignored
 
 def _cache_key(model, system, chunk, max_tokens, temperature,
                response_format=None, salt=None):
-    """Content address for one chunk call (D7). MUST include model + max_tokens
+    """Content address for one chunk call. MUST include model + max_tokens
     (per-model budgets differ) AND response_format — a strict-schema model shares
     the same system prompt for prose vs --json, so omitting it would serve cached
-    prose into the JSON reducer or vice-versa (Codex Wave D MED). `salt`
-    (Phase 7a) namespaces otherwise-identical calls — each --best-of sample
+    prose into the JSON reducer or vice-versa. `salt`
+ namespaces otherwise-identical calls — each --best-of sample
     index gets its OWN cache entry so re-runs resume per sample; salt=None is
     byte-identical to the pre-salt key."""
     h = hashlib.sha256()
@@ -2813,7 +2811,7 @@ def _cache_put(key, text):
                 except OSError:
                     pass
         # mkstemp: unique name (two processes caching the same key can't tear
-        # one shared tmp inode — QA sweep MED) and 0600 (entries quote the
+        # one shared tmp inode) and 0600 (entries quote the
         # user's code — owner-only like the env file).
         fd, tmp = tempfile.mkstemp(dir=CACHE_DIR, prefix=".tmp-")
         try:
@@ -2833,7 +2831,7 @@ _USAGE_LOCK = threading.Lock()  # serialize the read-rewrite trim across chunk w
 
 
 def _spool_usage_line(line):
-    """Codex M1: a metering line that can't take the ledger lock goes to a
+    """A metering line that can't take the ledger lock goes to a
     per-pid SPOOL file instead of an UNLOCKED append the lock holder's
     read-trim-write could truncate away. Only this process writes its own
     spool (no lock needed); it is merged back under the lock on a later
@@ -2890,10 +2888,10 @@ def log_usage(model, usage, input_chars=None):
     file so it can't grow without bound over a long-lived install. The trim is
     a read-modify-rewrite, so it must be exclusive across BOTH in-process
     chunk workers (_USAGE_LOCK) and concurrent ambient PROCESSES (the
-    cross-platform _fs_lock, v3 Phase 4b) — two interleaved trims tear the
-    ledger, the only spend signal we have (D4). If the file lock can't be
+    cross-platform _fs_lock) — two interleaved trims tear the
+    ledger, the only spend signal we have. If the file lock can't be
     taken, the line goes to a per-pid spool merged back under the lock later
-    (Codex M1) — never an unlocked append the lock holder's trim could
+ — never an unlocked append the lock holder's trim could
     truncate away. Losing a trim costs nothing, losing metering does."""
     try:
         record = {
@@ -2902,7 +2900,7 @@ def log_usage(model, usage, input_chars=None):
             "in": usage.get("prompt_tokens", 0),
             "out": usage.get("completion_tokens", 0),
         }
-        # Phase 8a telemetry (additive): store the observed input CHAR count
+        # telemetry (additive): store the observed input CHAR count
         # alongside REAL token usage so observed_cpt() can learn each model's
         # true chars-per-token. Estimated usage is skipped — its token counts
         # were themselves derived from chars via the static constant, so the
@@ -2912,7 +2910,7 @@ def log_usage(model, usage, input_chars=None):
                 and isinstance(record["in"], (int, float))
                 and record["in"] > 0):
             record["chars"] = int(input_chars)
-        # Phase 6 (additive; old records without these fields still parse):
+        # (additive; old records without these fields still parse):
         # price the run NOW and pin the frontier reference in force, so
         # `ambient usage` computes historical savings against what was true
         # at call time even if the default/env changes later. Estimated
@@ -2924,7 +2922,7 @@ def log_usage(model, usage, input_chars=None):
             if not assumed:  # an ASSUMED worst-case figure is not a real cost
                 # FULL precision — round(…,6) flattened sub-microdollar calls
                 # to $0, and thousands of them aggregated as free (a
-                # fabricated ~100% saving). Round only at display (Codex H3).
+                # fabricated ~100% saving). Round only at display.
                 record["cost"] = cost
             ref = resolve_reference_price()
             record["ref"] = [ref[0], ref[1]]
@@ -3024,8 +3022,8 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
             parsed = json.loads(body)
         except json.JSONDecodeError:
             parsed = {"error": {"message": body[:2000]}}
-        # Preserve a server-requested cooldown so the fan-out can honor it (D3/
-        # Codex Wave D LOW) instead of re-hitting the limiter on jitter alone.
+        # Preserve a server-requested cooldown so the fan-out can honor it
+        # instead of re-hitting the limiter on jitter alone.
         ra = err.headers.get("Retry-After") if err.headers else None
         if ra and isinstance(parsed, dict):
             parsed["_retry_after"] = ra
@@ -3038,7 +3036,7 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
         # urlopen can also raise a bare OSError out of getresponse() — a
         # RemoteDisconnected/ConnectionReset before the headers arrive, or (on
         # py<=3.9) a socket.timeout that is NOT TimeoutError. Categorize it as
-        # a network fault instead of letting it surface as [internal].
+        # a network fault instead of letting it surface as.
         raise NetworkError(f"cannot reach {url} ({err})") from err
     with resp:
         ctype = resp.headers.get("Content-Type", "")
@@ -3193,7 +3191,7 @@ _SESSION_CATALOG = weakref.WeakKeyDictionary()
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Session:
-    """Transport context for the engine (Phase 8b-1): ONE frozen object in
+    """Transport context for the engine: ONE frozen object in
     place of the (api_key, api_url, conf) triple threaded loose through every
     engine call. `transport` is an injectable stream_completion-compatible
     callable — None means "resolve the module-level stream_completion at call
@@ -3224,7 +3222,7 @@ class Session:
 
 def _session_or(session, api_key, api_url, conf=None):
     """Normalize the loose (api_key, api_url[, conf]) triple to ONE Session.
-    Engine functions accept either form (Phase 8b-1 compatibility): callers
+    Engine functions accept either form: callers
     that already hold a Session pass it through; legacy positional callers
     get an equivalent Session built on the spot."""
     if session is not None:
@@ -3234,7 +3232,7 @@ def _session_or(session, api_key, api_url, conf=None):
 
 @dataclasses.dataclass(frozen=True)
 class RequestSpec:
-    """The ENGINE's frozen request-knob carrier (Phase 8b-2): every knob the
+    """The ENGINE's frozen request-knob carrier: every knob the
     engine (complete/chat/run_map_reduce/run_one_audit/_best_of_chat/
     _ask_consensus/run_cross_file_pass + the helpers they call) reads off the
     request. Built ONCE from the parsed argparse.Namespace at the cmd_*
@@ -3303,7 +3301,7 @@ class RequestSpec:
 
 @dataclasses.dataclass(frozen=True)
 class AttemptState:
-    """ONE attempt of complete()'s retry/fallback ladder (Phase 8b-1).
+    """ONE attempt of complete()'s retry/fallback ladder.
     Immutable: every guard (stall retry, budget shrink, model fallback,
     budget escalation) computes the NEXT attempt via dataclasses.replace —
     never by mutating shared state. The four flags are INDEPENDENT and only
@@ -3335,10 +3333,10 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
     escalation -> labeled best-effort reasoning draft -> diagnosed error
     (callers may then split the work across the SAME model). The stall-retry,
     budget-escalation, and (opt-in) fallback guards are INDEPENDENT so one
-    firing never disables another. Phase 8b-1: the retry/fallback ladder is an
+    firing never disables another. The retry/fallback ladder is an
     explicit bounded loop over an immutable AttemptState (formerly recursive
     `return complete(...)` frames) — each guard computes the NEXT attempt via
-    dataclasses.replace; observable behavior is identical. Phase 8b-2: the
+    dataclasses.replace; observable behavior is identical. The
     request knobs ride a frozen RequestSpec (args is normalized at this
     boundary) — every retry variant is a dataclasses.replace of the spec,
     never a mutated/copied argparse.Namespace."""
@@ -3365,13 +3363,13 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 else stream_completion)
         try:
             # Stream to stdout only on the FIRST attempt — a stall-retry/
-            # escalation restart would double-print the tail (D1).
+            # escalation restart would double-print the tail.
             status, body = send(
                 api_url, api_key, payload, spec.timeout,
                 on_delta=(on_delta if state.attempt_no == 0
                           and not state.stall_retried else None))
         except StallError as err:
-            # A DATA-FLOW silence may be a flaky worker → retry once fresh. A
+            # A DATA-FLOW silence may be a transient upstream hiccup → retry once fresh. A
             # HARD-WALL hit means the generation is simply too long to finish
             # → do NOT restart from scratch (it would re-bill and re-hit the
             # wall); salvage immediately.
@@ -3398,7 +3396,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 )
                 # The partial output was PAID FOR: meter it as an estimated
                 # record instead of returning empty usage — spend must never
-                # under-count (Codex H2). Same char-based estimate as the
+                # under-count. Same char-based estimate as the
                 # missing-usage path below; reasoning counts as output.
                 in_tok = int(sum(len(m.get("content", "")) for m in messages)
                              / CHARS_PER_TOKEN)
@@ -3426,7 +3424,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 # profile guess above the model's real cap). Splitting the
                 # INPUT can't fix that — every chunk would resend the same
                 # doomed max_tokens — so self-heal by halving the budget once
-                # (resilience sweep LOW).
+                #.
                 shrunk_tokens = max(MIN_OUTPUT_TOKENS, spec.max_tokens // 2)
                 print(
                     f"ambient: server rejected the {spec.max_tokens}-token "
@@ -3448,7 +3446,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 except (NetworkError, SystemExit):
                     catalog = []
                 fb_conf = read_config_file()
-                # SACRED override (Codex H4): callers running a model the user
+                # SACRED override: callers running a model the user
                 # EXPLICITLY chose (a --consensus set member, a chat /model
                 # pick) set _no_fallback — the swap is disabled outright, even
                 # when --fallback/AMBIENT_FALLBACK is on. The model IS the
@@ -3460,7 +3458,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     # to a model whose context can hold the input we're about
                     # to resend PLUS its own output budget + overhead, so the
                     # switch can't overflow context or induce a marathon
-                    # (Codex round-3 HIGH).
+                    #.
                     input_tok = int(sum(len(m.get("content", ""))
                                         for m in messages) / CHARS_PER_TOKEN)
                     alt = pick_fallback_model(catalog, model,
@@ -3492,7 +3490,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                                              alt_profile.max_output_length)
                         # Re-gate structured output for the fallback model —
                         # sending a strict json_schema to a model that lacks
-                        # it 400s (Codex MED).
+                        # it 400s.
                         alt_rf = spec.response_format
                         if alt_rf:
                             afeats = alt_profile.features or []
@@ -3546,7 +3544,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             err_obj = ChatError(category, diagnosis)
             # body may be a valid non-object JSON (str/list/number) on an
             # error response — guard before .get so it never AttributeErrors
-            # to [internal].
+            # to.
             if isinstance(body, dict) and body.get("_retry_after"):
                 err_obj.retry_after = body["_retry_after"]
             raise err_obj
@@ -3662,8 +3660,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             )
         # Record which model ACTUALLY served this result: an opt-in --fallback
         # switch happens in a later attempt, and a --json consumer must not be
-        # told the content came from the model that had no workers (Codex
-        # final MED).
+        # told the content came from a model that wasn't serving.
         if isinstance(body, dict):
             body.setdefault("_served_model", model)
         return content.strip(), usage, body
@@ -3679,7 +3676,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
 
 def chat(api_key, api_url, model, messages, args, kind="ask", session=None):
     """Single-shot completion printed to stdout (CLI convenience wrapper).
-    Live-streams to an interactive terminal (D1)."""
+    Live-streams to an interactive terminal."""
     session = _session_or(session, api_key, api_url)
     api_key, api_url = session.api_key, session.api_url
     spec = RequestSpec.from_args(args)
@@ -3724,7 +3721,7 @@ def chat(api_key, api_url, model, messages, args, kind="ask", session=None):
         "output was salvaged/truncated", spec, api_key, usage,
         # Price the receipt at the model that actually SERVED — an opt-in
         # --fallback switch to a pricier model must not over-state the
-        # saving by pricing the requested model (Codex H1).
+        # saving by pricing the requested model.
         body.get("_served_model", model),
         already_streamed=clean_stream,
     )
@@ -3759,7 +3756,7 @@ def read_stdin_if_piped():
         pass  # select unsupported here — fall through to a plain read
     # Read BYTES and decode lossily: `git diff` on latin-1 sources or log data
     # with stray bytes must degrade, not crash text-mode stdin.read() into the
-    # [internal] shield (resilience sweep HIGH, verified repro). Mirrors
+    # shield. Mirrors
     # read_files' handling.
     buf = getattr(sys.stdin, "buffer", None)
     if buf is not None:
@@ -3787,7 +3784,7 @@ def read_stdin_if_piped():
 def warn_if_stdin_ignored(hint):
     """One stderr note when piped data exists but this invocation will not read
     it — the user pays for a wrong-context answer otherwise, and silence was
-    the bug (resilience sweep MED). Zero-timeout peek; never blocks. EOF is
+    the bug. Zero-timeout peek; never blocks. EOF is
     'readable' with zero bytes (`< /dev/null` from any agent harness), so only
     warn when bytes are ACTUALLY waiting — a false note in front of --json
     output breaks machine consumers (live-battery finding)."""
@@ -3901,7 +3898,7 @@ _C_KEYWORDS = frozenset({
     "if", "for", "while", "switch", "return", "else", "do", "sizeof",
     "catch", "new", "throw", "case", "using", "typedef", "define",
 })
-# Backtracking-safety contract for EVERY pattern below (Codex C1 ReDoS): no
+# Backtracking-safety contract for EVERY pattern below: no
 # character class may mix word chars with \s (each whitespace run must have
 # exactly ONE possible consumer), and every repeated group of "type tokens"
 # is hard-bounded ({1,8} / {0,6}) so a failing match can't explore an
@@ -3988,7 +3985,7 @@ def _sigs_regex(text, lang):
         if len(line) > SIG_SCAN_LINE_MAX:
             # A minified/pathological line carries no useful column-0
             # signature — and it is exactly where regex backtracking blows
-            # up (Codex C1). Brace depth is still tracked (linear count).
+            # up. Brace depth is still tracked (linear count).
             if braces:
                 depth = max(0, depth + line.count("{") - line.count("}"))
             continue
@@ -4077,7 +4074,7 @@ def density_factor(text):
     """How much char-based sizing must SHRINK for token-dense text. All budgets
     assume CHARS_PER_TOKEN=3.2 (code/English); CJK runs ~1-1.5 chars/token, so
     a 120k-char Chinese doc is 2-3x the assumed tokens and would 400 on context
-    at 'correct' char sizing (resilience sweep MED). Sampled, linear blend:
+    at 'correct' char sizing. Sampled, linear blend:
     pure-ASCII → 1.0, heavily-non-ASCII → ~2.6."""
     if not text:
         return 1.0
@@ -4104,7 +4101,7 @@ def pack_chunks(labeled_chunks, chunk_chars=CHUNK_CHARS):
         # for a hard-split minified line, whose offsets can be 8 digits). Reserve
         # the label + a generous 80 for that suffix so header+body <= chunk_chars.
         # The clamp above guarantees this stays positive; do NOT floor it higher
-        # or a tiny budget would overflow (Codex A+B MED).
+        # or a tiny budget would overflow.
         body_budget = max(1, chunk_chars - len(label) - 80)
         if len(text) <= body_budget:
             pieces.append((label, text))
@@ -4151,7 +4148,7 @@ def pack_chunks(labeled_chunks, chunk_chars=CHUNK_CHARS):
 
 def _resolve_parallel(args):
     """Fan-out width: `--parallel` flag > AMBIENT_MAX_PARALLEL env > the
-    MAX_PARALLEL_CHUNKS default. Clamped to 1-16 — be kind to miners; a
+    MAX_PARALLEL_CHUNKS default. Clamped to 1-16 — bounded so a
     typo'd '1000' must not stampede the network. A bad value falls back to
     the next source instead of crashing a paid run."""
     for raw in (getattr(args, "parallel", None),
@@ -4206,10 +4203,9 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     deterministic Python merge (A5: structured findings dedup, no re-billed
     synthesis call). `gate` (a shared threading.Semaphore, consensus lane)
     caps TOTAL concurrent complete() calls ACROSS sibling pools — without it
-    N models × N chunks each = width² simultaneous network calls (be kind to
-    miners). A set `cancel_event` stops chunks from STARTING: once the caller
+    N models × N chunks each = width² simultaneous network calls (bounded). A set `cancel_event` stops chunks from STARTING: once the caller
     is unwinding (fatal sibling error / Ctrl-C), no new work gets billed.
-    `reduce_model` (Phase 3c, explicit --reduce-model/AMBIENT_MODEL_MAP only)
+    `reduce_model` (explicit --reduce-model / AMBIENT_MODEL_MAP only)
     routes the SYNTHESIS calls to a different model — cheap map, strong
     reduce; default = the map model, byte-identical behavior. When it
     differs and a `catalog` is supplied, the synthesis is sized to the
@@ -4277,7 +4273,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
         ]
         # D7: content-addressed cache — a re-run after a Ctrl-C / failed synthesis
         # / PARTIAL exit re-bills only the MISSING chunks, not the whole fan-out.
-        # _cache_salt (Phase 7a) keeps each --best-of sample's chunks in its
+        # _cache_salt keeps each --best-of sample's chunks in its
         # own cache lane so samples stay independent AND resumable.
         key = _cache_key(model, system, chunks[i], spec.max_tokens,
                          spec.temperature, spec.response_format,
@@ -4302,7 +4298,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                         api_key, api_url, model, messages, spec,
                         session=session)
                 # A length-truncated chunk is INCOMPLETE coverage — flag it and
-                # never cache it as a full result (Codex Wave D HIGH).
+                # never cache it as a full result.
                 partial = (bool(body.get("salvaged_partial"))
                            or body.get("finish_reason") == "length")
                 # If the network fell back to a DIFFERENT model, do not cache its
@@ -4352,7 +4348,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                 raise
     except KeyboardInterrupt:
         # Cancel QUEUED chunks so Ctrl-C feels instant instead of waiting on the
-        # whole backlog (D4). in-flight calls still drain in finally.
+        # whole backlog. in-flight calls still drain in finally.
         print("\nambient: cancelling…", file=sys.stderr)
         try:
             pool.shutdown(wait=False, cancel_futures=True)  # py3.9+
@@ -4502,9 +4498,9 @@ def render_result(text, partial, reason, args, api_key, usage=None, model=None,
     """Single place that prints a result and sets the exit code. Partial/
     incomplete results get a loud header and a non-zero exit unless the caller
     passed --allow-partial, so a truncated audit can never masquerade as clean.
-    `already_streamed` = the body was live-streamed to stdout (D1), so don't
+    `already_streamed` = the body was live-streamed to stdout, so don't
     reprint it — just close the line, warn, and set the exit code.
-    `usage_by_model` (Codex H1): per-SERVED-model token split for runs whose
+    `usage_by_model`: per-SERVED-model token split for runs whose
     samples were served by different models — the receipt then prices each
     model's own tokens instead of the aggregate at `model`'s price."""
     if partial:
@@ -4530,11 +4526,11 @@ def render_result(text, partial, reason, args, api_key, usage=None, model=None,
     else:
         print(redact(text, api_key))
     if usage and model:
-        # Phase 6: the receipt now shows what the run COST and what the same
+        # the receipt now shows what the run COST and what the same
         # tokens would have cost at the frontier reference price — the tool's
         # whole value proposition, previously invisible. savings_note() owns
         # the honesty rules (assumed pricing → no savings claim; est. label);
-        # mixed-served runs price per served model (Codex H1).
+        # mixed-served runs price per served model.
         note = (savings_note_by_served(usage_by_model) if usage_by_model
                 else savings_note(model, usage))
         rhint = _reasoning_hint(text, usage.get("completion_tokens"))
@@ -4549,10 +4545,10 @@ def emit_json(kind, *, model, api_key="", content=None, findings=None,
               verdict=None, partial=False, reason=None, usage=None,
               finish_reason=None, extra=None, allow_partial=False,
               exit_now=True):
-    """THE machine-readable sink (D2, unified): every --json surface — ask,
+    """THE machine-readable sink: every --json surface — ask,
     code, audit, consensus, build, single-shot or map-reduce — emits this one
     shape, so an orchestrator never special-cases how a result was computed
-    (arch sweep: three divergent envelopes). schema_version bumps on any
+. schema_version bumps on any
     breaking change. Returns the exit code; exits itself unless exit_now=False."""
     truncated = finish_reason == "length"
     partial = bool(partial or truncated)
@@ -4725,8 +4721,9 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
 
 
 def _dedupe_catalog(models):
-    """Collapse near-duplicate GLM-5.1 aliases (same pricing/window, different
-    ids) into the primary so the storefront isn't cluttered (B6)."""
+    """Collapse a catalog row the API also lists under a second, more verbose
+    id into the primary (branded) row, so the storefront never shows the same
+    model twice. An explicit -m on either id still works."""
     ALIAS_OF = {"zai-org/GLM-5.1-FP8": "ambient/large"}
     seen_alias = {m["id"] for m in models}
     out = []
@@ -4892,7 +4889,7 @@ def cmd_use(args, api_key, api_url, conf):
 
 
 def cmd_curate(args):
-    """Founder model-curation surface: pick which models the plugin shows.
+    """Model-curation surface: pick which models the plugin shows.
     Works pre-key (the catalog endpoint is unauthenticated); all writes go
     through the atomic + locked config writer. Curation shapes menus and
     automatic selection only — explicit -m / `use <id>` always works."""
@@ -4923,10 +4920,10 @@ def cmd_curate(args):
         print(f"curation: allow={','.join(allow2) if allow2 else '(everything)'}"
               f"  hide={','.join(hide2) if hide2 else '(nothing)'}"
               + (f"  show-overrides={','.join(show2)}" if show2 else ""))
-        founder_notes = {k: v for k, v in notes2.items() if v}
-        if founder_notes:
+        user_notes = {k: v for k, v in notes2.items() if v}
+        if user_notes:
             print("notes:")
-            for k, v in sorted(founder_notes.items()):
+            for k, v in sorted(user_notes.items()):
                 print(f"  {k}: {v}")
         known = _catalog_ids()
         if known:
@@ -4945,7 +4942,7 @@ def cmd_curate(args):
         print("curation reset — every catalog model is surfaced again")
         return
     # Every merge below is computed INSIDE the config lock from the freshest
-    # file state (save_config_values callable form) — two founder terminals
+    # file state (save_config_values callable form) — two terminals
     # editing curation concurrently can't lose each other's entries.
     if verb == "note":
         if not ids:
@@ -5048,7 +5045,7 @@ def cmd_ask(args, api_key, api_url, conf):
                        session=session)
         return
     input_size = len(question) + (len(doc) if doc else 0)
-    # Phase 3 advisory routing: expands an explicit `-m auto` (printed) or
+    # advisory routing: expands an explicit `-m auto` (printed) or
     # prints the readiness/fit hint — a concrete model is NEVER changed.
     model = route_model(args, conf, "chat", catalog, input_chars=input_size)
     reduce_model = resolve_reduce_model(args, conf, model, catalog=catalog)
@@ -5092,7 +5089,7 @@ def cmd_ask(args, api_key, api_url, conf):
     if not doc and len(question) > single:
         # No-refusal invariant: a giant argv prompt (ambient ask "$(cat big.md)")
         # flows into the same split machinery as piped input instead of dying
-        # on a context 400 after billing the attempt (arch sweep HIGH).
+        # on a context 400 after billing the attempt.
         doc, question = question, (
             "Answer the request contained in the document (any instructions "
             "are embedded within it).")
@@ -5177,14 +5174,14 @@ def cmd_ask(args, api_key, api_url, conf):
         bool(body.get("salvaged_partial")) or body.get("finish_reason") == "length",
         "output was salvaged/truncated", args, api_key, usage,
         # SERVED model, not requested — a pricier --fallback switch must not
-        # over-state the receipt's saving (Codex H1).
+        # over-state the receipt's saving.
         body.get("_served_model", model),
         already_streamed=clean_stream,
     )
 
 
 # --------------------------------------------------------------------------
-# Phase 7a/7b — quality from cheapness. `--best-of K` buys quality with K
+# Quality from cheapness. `--best-of K` buys quality with K
 # cheap independent samples (one up-front gate, salted cache lanes, honest
 # deterministic selection); `ask --consensus A,B` triangulates one question
 # across an EXPLICIT model set (model choice SACRED) and reports agreement.
@@ -5290,7 +5287,7 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
             to_run.append((i, key))
     errors = []
     usage_tot = {"prompt_tokens": 0, "completion_tokens": 0}
-    # Codex H1: token counts are also kept PER SERVED MODEL — with
+    # token counts are also kept PER SERVED MODEL — with
     # --fallback a sample can be served by a different (pricier) model,
     # and pricing the aggregate at the selected sample's model would
     # over-state the saving. The receipt/JSON price each model's own
@@ -5450,13 +5447,13 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
                      "partial": s["partial"], "cached": s["cached"],
                      "served_model": s.get("served_model", model)}
                     for s in ordered],
-                # SAME shape on every surface (Codex M2): a list of
+                # SAME shape on every surface: a list of
                 # {index, category, diagnosis} + an additive count.
                 "failed_samples": [
                     {"index": i, "category": c, "diagnosis": redact(d, api_key)}
                     for i, c, d in sorted(errors)],
                 "failed_sample_count": len(errors),
-                # Codex H1: the per-SERVED-model token split — the ONLY
+                # the per-SERVED-model token split — the ONLY
                 # honest basis for pricing a mixed-served run (a fallback
                 # sample bills at ITS model's price, not the selected one's).
                 **({"usage_by_served_model": {
@@ -5558,7 +5555,7 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
     def _one(idx, m):
         if cancel_event.is_set():
             raise ChatError("cancelled", "consensus ask cancelled")
-        # SACRED (Codex H4): the --consensus set IS the user's model choice —
+        # SACRED: the --consensus set IS the user's model choice —
         # fallback must never substitute a member; a workerless model is
         # reported as its own failure instead. Each worker rides its own
         # REPLACED spec (never a mutated copy): _no_fallback pinned on, the
@@ -5671,7 +5668,7 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
 
 
 # --------------------------------------------------------------------------
-# `ambient map` — the bulk per-item inference lane (v3 Phase 2). ONE prompt
+# `ambient map` — the bulk per-item inference lane. ONE prompt
 # applied INDEPENDENTLY to MANY items: each file/stdin-line is its own
 # complete() call (NOT map-reduce — no synthesis pass), streamed out as it
 # finishes, resumable via the content-addressed cache, all behind ONE
@@ -6155,14 +6152,14 @@ def extract_json(text):
                 if isinstance(obj, dict):
                     # A repaired object is missing its TAIL (trailing findings
                     # and/or the verdict). Mark it so no caller can present a
-                    # repaired audit as a clean pass (resilience sweep HIGH:
+                    # repaired audit as a clean pass (
                     # truncated audit could previously SHIP).
                     obj["_repaired"] = True
                     return obj
             except json.JSONDecodeError:
                 pass
-    # 3) Prose with a valid object LATER (a non-JSON '{...}' before the real one,
-    # Codex A+B LOW) — scan subsequent '{' positions.
+    # 3) Prose with a valid object LATER (a non-JSON '{...}' before the real one)
+    # scan subsequent '{' positions.
     idx = first + 1
     while True:
         start = t.find("{", idx)
@@ -6206,7 +6203,7 @@ def dedupe_findings(findings):
     """Deterministically dedupe findings across chunks (A5): same file, title
     prefix, and line within ±3 = the same bug. True proximity (not //3 buckets,
     which missed duplicates straddling a bucket edge and false-merged neighbors
-    — resilience sweep LOW). Keep the highest severity + longest scenario."""
+   ). Keep the highest severity + longest scenario."""
     kept = []  # [(sig, finding)]
     for f in findings:
         if not isinstance(f, dict):
@@ -6248,8 +6245,8 @@ def _verdict_from(findings, partial):
 def findings_reducer(texts):
     """Structured reduce (A5): parse each chunk's JSON findings, dedupe in
     Python, recompute the verdict — no re-billed LLM synthesis call. A chunk
-    whose output won't parse is a COVERAGE GAP, not a clean pass (Codex A+B
-    HIGH): it forces a non-SHIP verdict rather than silently dropping to
+    whose output won't parse is a COVERAGE GAP, not a clean pass:
+    it forces a non-SHIP verdict rather than silently dropping to
     {"findings":[], "SHIP"}."""
     collected = []
     parse_fail = 0
@@ -6340,7 +6337,7 @@ def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
         print()
     # The verdict string is MODEL OUTPUT — normalize it to the closed set so a
     # poisoned reply can't smuggle terminal escapes or fake banner text through
-    # the one line users trust most (Codex W1 HIGH).
+    # the one line users trust most.
     if verdict not in ("SHIP", "FIX FIRST", "NEEDS WORK"):
         verdict = _verdict_from(findings, partial)
     print(redact(f"Verdict: {verdict}", api_key))
@@ -6425,7 +6422,7 @@ def repo_walk(root, per_file_cap=REPO_FILE_MAX_BYTES):
         # lstat only checks the LEAF: an INTERMEDIATE symlinked directory
         # (linkdir/file.py where linkdir points OUT of root) would still be
         # opened. Resolve the whole path and require it to stay under the
-        # resolved root — nothing outside --repo may ever be read (Codex H2).
+        # resolved root — nothing outside --repo may ever be read.
         real = os.path.realpath(full)
         if real != real_root and not real.startswith(real_root + os.sep):
             skipped["nonregular"] += 1
@@ -6452,7 +6449,7 @@ def _guttered_size(full, size):
     text: with_line_gutters prefixes every line with '<n>| ' (width = digits
     of the line count, min 2), inflating line-dense sources 15-20%+ — the
     input ceiling must bound what is actually SENT, not the raw bytes
-    (Codex H3). Newlines counted in binary: exact for ASCII, conservative
+. Newlines counted in binary: exact for ASCII, conservative
     (over-counts chars) for multibyte — never under the true sent size by
     more than the decode difference."""
     lines = 1
@@ -6485,7 +6482,7 @@ def repo_audit_inputs(args, api_key):
                    "paths are skipped).",
                    exit_code=EXIT_USAGE, api_key=api_key)
     # The ceiling binds the size actually SENT — raw bytes PLUS the line
-    # gutters with_line_gutters adds below (Codex H3: 15-20%+ on line-dense
+    # gutters with_line_gutters adds below (15-20%+ on line-dense
     # repos). Counting stops at the first provable overflow on the refuse
     # path, so a huge repo isn't fully re-read just to be refused.
     allow_over = (getattr(args, "allow_cost", False)
@@ -6618,7 +6615,7 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
     summary = final[:summary_cap]
     # The extra pass is REAL extra spend — gate it like any other call
     # (ceiling + fleet reservation) before anything is billed. The gate is
-    # NON-FATAL here (Codex H1): pass-1 already ran and was paid for, so a
+    # NON-FATAL here: pass-1 already ran and was paid for, so a
     # ceiling/fleet refusal SKIPS this optional pass and renders pass-1
     # unchanged — it must never discard the result or emit an error envelope.
     if not cost_gate_soft(catalog, model, used + len(summary), 1, spec, conf):
@@ -6677,7 +6674,7 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
 
 def git_diff_inputs(staged, ref):
     """Build audit inputs from a git diff PLUS the full current content of each
-    changed file (D5) — a diff-only audit misses bugs that depend on unchanged
+    changed file — a diff-only audit misses bugs that depend on unchanged
     code. Returns (labeled, diff_text) or exits cleanly outside a repo."""
     def git(*a):
         return subprocess.run(["git", *a], capture_output=True, text=True, timeout=30)
@@ -6690,7 +6687,7 @@ def git_diff_inputs(staged, ref):
     name_args = diff_args + ["--name-only"]
     proc = git(*diff_args)
     if proc.returncode != 0:
-        # A bad ref must not masquerade as "no changes" (Codex final LOW).
+        # A bad ref must not masquerade as "no changes".
         _fail_exit(None, "audit", "input",
                    f"git diff failed: {proc.stderr.strip()[:300]}")
     diff = proc.stdout
@@ -6706,7 +6703,7 @@ def git_diff_inputs(staged, ref):
 
 
 # --------------------------------------------------------------------------
-# `audit --install-hook` (v3 Phase 7d). The hook is a FIXED, compiled-in
+# `audit --install-hook`. The hook is a FIXED, compiled-in
 # shell script: it RUNS `ambient audit` on the staged/outgoing diff and greps
 # the verdict — it never contains, and can never contain, model output (the
 # SKILL trust boundary: model output is data, never code that runs).
@@ -6777,7 +6774,7 @@ def _git_hooks_dir(args):
 
 
 def _hook_is_ours(existing, name):
-    """STRICT ownership check (Codex M3, tightened M1 round 2): a hook is
+    """STRICT ownership check: a hook is
     ambient's only when it is byte-identical to the current generated
     template, OR carries the exact generated header — shebang + the marker
     as the ENTIRE second line + the installed-by template line as the
@@ -6891,10 +6888,10 @@ def _audit_single_key(model, sp, labeled, a):
 
 def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
                   conf, gate=None, cancel_event=None, session=None):
-    """Structured audit on ONE model → (findings, ok) (D8 consensus helper). ok
+    """Structured audit on ONE model → (findings, ok). ok
     is False when the model errored, was unready, or returned unparseable/partial
-    output — so consensus can't present a FAILURE as 'no defects' (Codex Wave D
-    HIGH). Each model gets its OWN profile/budget. `gate`/`cancel_event` flow
+    output — so consensus can't present a FAILURE as 'no defects'.
+    Each model gets its OWN profile/budget. `gate`/`cancel_event` flow
     through to run_map_reduce so the consensus lane's shared cap and fail-fast
     reach every model's inner fan-out. The single-shot path reads/writes the
     same salted cache as the chunked fan-out (H3): a re-run — best-of salted
@@ -6936,7 +6933,7 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
             if obj is None or not isinstance(obj.get("findings"), list):
                 return [], False  # unparseable ≠ clean
             # A cap-truncated or salvaged reply parsed fine but is missing its
-            # tail — consensus must not count it as full coverage (Codex W1 MED).
+            # tail — consensus must not count it as full coverage.
             ok = (not obj.get("_repaired")
                   and _b.get("finish_reason") != "length"
                   and not _b.get("salvaged_partial"))
@@ -6951,7 +6948,7 @@ def run_one_audit(model, catalog, labeled, sys_prompt, args, api_key, api_url,
             if err.category in ("key", "funds"):
                 # Every subsequent call is doomed identically — falling through
                 # to a full map-reduce would burn 2×N failing paid attempts
-                # before reporting the real problem (resilience sweep LOW).
+                # before reporting the real problem.
                 raise
             pass  # fall through to a split across the same model
     chunk_chars = min(chunk if total > single else max(total // 3 + 1000, 20_000),
@@ -6997,7 +6994,7 @@ def _audit_split_estimate(catalog, model, reduce_model, labeled, total,
     n_chunks = len(packed)
     # The repo map is prepended to EVERY chunk's system prompt — that is
     # real billed input (map size x chunk count) the estimate must include
-    # or the printed plan under-states the actual spend (Codex M1).
+    # or the printed plan under-states the actual spend.
     map_chars = len(build_code_map(labeled, budget=code_map_budget(single)))
     if fb_args is not None:
         # per-chunk REAL sizes (chunk + repo map), matching the live gate's
@@ -7018,9 +7015,9 @@ def _audit_split_estimate(catalog, model, reduce_model, labeled, total,
 def _parse_consensus_models(args, catalog, api_key):
     """Parse + validate the --consensus model list. Runs BEFORE the --repo
     plan prints and before ANY spend: a typo'd second model must not be
-    discovered after the first model's full paid audit (model sweep), and
+    discovered after the first model's full paid audit, and
     an invalid set must never yield a plan object that prices something the
-    gate will refuse (Codex M1). Exits on <2 models or unknown ids."""
+    gate will refuse. Exits on <2 models or unknown ids."""
     models = [m.strip() for m in args.consensus.split(",") if m.strip()]
     if len(models) < 2:
         usage_exit("--consensus needs at least two models (comma-separated).")
@@ -7049,14 +7046,14 @@ def _consensus_estimate(catalog, models, labeled, total,
     """(expected_sum, bound_sum, parts, per_model_chunks, assumed_any) — the
     ONE consensus pricing, shared by the --repo upfront plan and the
     consensus cost gate so the printed plan and the gated amount agree BY
-    CONSTRUCTION (Codex M1). Each model is priced on ITS OWN chunking — the
+    CONSTRUCTION. Each model is priced on ITS OWN chunking — the
     old models[0]-priced single-chunk-count estimate was ~30x off on mixed
-    pairs (Codex W2/3 HIGH: a small-window second model runs many more calls
+    pairs (a small-window second model runs many more calls
     than the default model's chunking suggests) — and as MAP-ONLY work:
     consensus audits reduce with the deterministic findings_reducer (NO
     synthesis LLM call), so a chunked model costs n_chunks calls, not
     n_chunks*2, which over-priced every chunked consensus batch 2x into
-    spurious spend/fleet refusals (Codex M2). Capstone H3: each model is
+    spurious spend/fleet refusals. Capstone H3: each model is
     priced at the SAME max_tokens its live worker resolves —
     `explicit_max_tokens` is the user's --max-tokens (as the worker specs
     carry it; None = auto) run through the same with_output_budget core
@@ -7080,7 +7077,7 @@ def _consensus_estimate(catalog, models, labeled, total,
             packed_m = pack_chunks(labeled, min(prof_m.chunk_chars,
                                                 prof_m.single_shot_chars))
             n_calls_m = max(1, len(packed_m))
-            # each chunk also carries this model's repo map (Codex M1)
+            # each chunk also carries this model's repo map
             map_len_m = len(build_code_map(
                 labeled,
                 budget=code_map_budget(prof_m.single_shot_chars)))
@@ -7115,7 +7112,7 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
     """[(miss_calls, miss_input_chars, sample_max_tokens, miss_call_chars)]
     per best-of sample — the salted cache entries the live run will NOT
     find, so the cost gate can price ONLY what will actually be billed
-    (Codex H3: the cache must be resolved BEFORE the gate, exactly like
+    (the cache must be resolved BEFORE the gate, exactly like
     run_map_reduce's own resume lane). Each sample's spec/keys are built
     through the SAME helpers run_one_audit uses (_audit_sample_prep/
     _audit_single_key/_map_note), so a predicted hit here is a real hit
@@ -7176,7 +7173,7 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
         # Under --consensus the plan must state what the CONSENSUS gate will
         # actually charge — the SAME shared estimate the gate uses, summed
         # across the (already validated) model set — never the lone default
-        # model's figure, which is not what gets gated or billed (Codex M1).
+        # model's figure, which is not what gets gated or billed.
         expected, bound, _parts, per_model_chunks, assumed = \
             _consensus_estimate(catalog, consensus_models, labeled, total,
                                 explicit_mt)
@@ -7197,7 +7194,7 @@ def _print_repo_plan(meta, catalog, model, reduce_model, labeled, total,
             dens, args.max_tokens, structured, fb_args=args, fb_conf=conf)
     # Whether the deep cross-file pass will run: default ON for --repo,
     # honoring --deep/--no-deep — but NEVER under --consensus or --best-of,
-    # where corroboration replaces it (Codex M2). Stated in the plan
+    # where corroboration replaces it. Stated in the plan
     # so the printed strategy is honest about the flags' effect.
     deep_flag = getattr(args, "deep", None)
     # Mirror the runtime guard (deep runs only when there is >1 chunk): a
@@ -7340,7 +7337,7 @@ def cmd_audit(args, api_key, api_url, conf):
         # Parse + validate the consensus set BEFORE the --repo plan / dry-run
         # plan prints (and before anything is billed): the plan must price the
         # real, valid model set — never the lone default model, and never a set
-        # the gate would then refuse as unknown (Codex M1). Applies to dry-run
+        # the gate would then refuse as unknown. Applies to dry-run
         # too, so `--consensus bad --dry-run` errors instead of a fake plan.
         consensus_models = _parse_consensus_models(args, catalog, api_key)
 
@@ -7359,7 +7356,7 @@ def cmd_audit(args, api_key, api_url, conf):
         if consensus_models:
             # Consensus dry-run: price the real model set via the SAME shared
             # helper the live gate uses (map-only, per-model chunking) — never
-            # the lone default model (Codex final gate M).
+            # the lone default model.
             expected, bound, _parts, chunks_by, assumed = _consensus_estimate(
                 catalog, consensus_models, labeled, total, explicit_mt)
             print("ambient audit plan (dry run — nothing sent):")
@@ -7416,7 +7413,7 @@ def cmd_audit(args, api_key, api_url, conf):
         # run — multi-model corroboration already cross-checks findings, and
         # a per-model deep pass would multiply the "at most ONE extra call"
         # bound by the model count. Say so instead of silently ignoring the
-        # flags: --deep/--no-deep are documented no-ops here (Codex M2).
+        # flags: --deep/--no-deep are documented no-ops here.
         if getattr(args, "repo", None) is not None \
                 or getattr(args, "deep", None) is not None:
             print("ambient: note — the deep cross-file pass is skipped "
@@ -7425,7 +7422,7 @@ def cmd_audit(args, api_key, api_url, conf):
                   "here", file=sys.stderr)
         # The SAME shared per-model estimate the --repo plan printed
         # (_consensus_estimate), so plan and gate can never disagree
-        # (Codex M1): each model priced on its own chunking, map-only.
+        # each model priced on its own chunking, map-only.
         expected_sum, bound_sum, parts, _per_chunks, _assumed = \
             _consensus_estimate(catalog, models, labeled, total, explicit_mt)
         print(f"ambient: consensus estimated ~${expected_sum:.2f} "
@@ -7440,7 +7437,7 @@ def cmd_audit(args, api_key, api_url, conf):
         # resolved for the DEFAULT model above, and inheriting that number
         # would mis-budget every other model in the set. An explicit
         # --max-tokens from the user still applies to all of them.
-        # SACRED (Codex H4): the --consensus set IS the user's model choice —
+        # SACRED: the --consensus set IS the user's model choice —
         # --fallback/AMBIENT_FALLBACK must never substitute a member. A
         # workerless model is reported as ITS OWN failure below. The worker
         # spec is a frozen REPLACE (8b-2), never a mutated args copy.
@@ -7449,7 +7446,7 @@ def cmd_audit(args, api_key, api_url, conf):
             max_tokens=args.max_tokens if explicit_max_tokens else None)
         # R1: ONE shared gate caps TOTAL concurrent network calls across every
         # model's inner fan-out at the resolved width — without it N models ×
-        # N chunks each = width² simultaneous calls (be kind to miners).
+        # N chunks each = width² simultaneous calls (bounded).
         gate = threading.Semaphore(_resolve_parallel(args))
         # R2: flipped on the first fatal error / Ctrl-C so every sibling's
         # map-reduce stops STARTING chunks — billing must not continue while
@@ -7548,7 +7545,7 @@ def cmd_audit(args, api_key, api_url, conf):
                                        SEVERITY_ORDER.get(s["f"].get("severity"), 9)))
         partial = bool(failed)
         if args.format == "json":
-            # The agentic contract holds on consensus too (arch sweep HIGH:
+            # The agentic contract holds on consensus too (
             # --consensus --json used to print prose and exit 0 on 1-of-2).
             out_findings = [
                 {**s["f"], "corroboration": {"models": sorted(s["models"]),
@@ -7587,8 +7584,8 @@ def cmd_audit(args, api_key, api_url, conf):
             if f.get("scenario"):
                 print(redact(f"    {f['scenario']}", api_key))
         if partial and not getattr(args, "allow_partial", False):
-            # Some models failed: a 1-of-2 audit is NOT a clean pass (arch
-            # sweep HIGH) — exit like every other partial surface.
+            # Some models failed: a 1-of-2 audit is NOT a clean pass
+            # — exit like every other partial surface.
             sys.exit(EXIT_PARTIAL)
         return
 
@@ -7751,7 +7748,7 @@ def cmd_audit(args, api_key, api_url, conf):
                 extra={
                     "best_of": best_of_k,
                     # SAME failed_samples shape as ask/code --best-of
-                    # (Codex M2): a list of {index, category, diagnosis},
+                    # a list of {index, category, diagnosis},
                     # plus the additive count the old int field carried.
                     "failed_samples": [
                         {"index": i, "category": "unusable",
@@ -7845,7 +7842,7 @@ def cmd_audit(args, api_key, api_url, conf):
                 file=sys.stderr,
             )
     # Recovery chunk size: never exceed the single-shot budget (a 20k floor
-    # would top a 16k-output reasoner's ~17.6k single — Codex fix), and shrink
+    # would top a 16k-output reasoner's ~17.6k single), and shrink
     # for token-dense input so chunks can't 400 on context.
     chunk_chars = min(chunk if eff_total > single else max(total // 3 + 1000, 20_000),
                       single)
@@ -7853,8 +7850,8 @@ def cmd_audit(args, api_key, api_url, conf):
     packed = pack_chunks(labeled, chunk_chars)
     # The repo map is injected into EVERY chunk (real billed input) — gate
     # on total + map x chunk-count so the gate matches the actual spend
-    # (Codex M1). A deterministic reducer (structured findings merge) makes
-    # NO synthesis LLM call — price only the map lane (Codex M3).
+    #. A deterministic reducer (structured findings merge) makes
+    # NO synthesis LLM call — price only the map lane.
     code_map = build_code_map(labeled, budget=code_map_budget(single))
     # Each map call really bills its OWN chunk + the repo map — thread the
     # per-chunk sizes so a live --fallback swap is reserved at each chunk's
@@ -7895,11 +7892,11 @@ def cmd_code(args, api_key, api_url, conf):
                    'ambient code "write a rate limiter" -f context.py')
     warn_if_stdin_ignored("`code` does not read stdin — pass context with -f FILE")
     refuse_if_secrets([("task", task)], args.allow_secrets)
-    # 7a validated UP FRONT (Codex H2): an invalid --best-of must fail usage
+    # 7a validated UP FRONT: an invalid --best-of must fail usage
     # (64) BEFORE the catalog fetch and BEFORE any billed task/context
     # distillation pass — zero spend on a doomed invocation. The 0→0.7
     # diversity bump _resolve_best_of applies is for the GENERATION samples
-    # ONLY (Fable LOW): the billed task-brief/context distillation passes
+    # ONLY: the billed task-brief/context distillation passes
     # below keep the user's own temperature (extraction wants determinism,
     # not diversity), so it is restored here and re-applied at the
     # _best_of_chat call.
@@ -7926,7 +7923,7 @@ def cmd_code(args, api_key, api_url, conf):
     profile = model_profile(catalog, model)
     single, chunk = profile.single_shot_chars, profile.chunk_chars
     if len(task) > single:
-        # No-refusal invariant covers the task string too (arch sweep HIGH):
+        # No-refusal invariant covers the task string too:
         # distill an oversized brief down to what generation needs.
         print(
             "ambient: task brief exceeds this model's window — distilling it first",
@@ -8003,7 +8000,7 @@ def cmd_code(args, api_key, api_url, conf):
             if len(context) > room:
                 # A partial distillation can fall back to raw concatenation far
                 # above `single`; proceeding would 400 the paid-for generation
-                # call (resilience sweep LOW). Clamp with an honest marker.
+                # call. Clamp with an honest marker.
                 context = context[:room] + "\n[ambient: context truncated to fit]"
     user_content = task if not context else f"{task}\n\nContext files:\n\n{context}"
     messages = [
@@ -8019,7 +8016,7 @@ def cmd_code(args, api_key, api_url, conf):
     # 7a: --best-of applies to the final GENERATION call only (any brief/
     # context distillation above stays a single pass — sampling diversity
     # buys nothing on extraction). Validated at the TOP of cmd_code (H2);
-    # the diversity temperature applies HERE only (Fable LOW).
+    # the diversity temperature applies HERE only.
     if best_of_k:
         args.temperature = best_of_temp
         _best_of_chat(api_key, api_url, model, messages, args, best_of_k,
@@ -8036,7 +8033,7 @@ def cmd_code(args, api_key, api_url, conf):
 
 
 # --------------------------------------------------------------------------
-# `ambient chat` — native REPL (v3 Phase 7c). A readline loop over the SAME
+# `ambient chat` — native REPL. A readline loop over the SAME
 # complete()/stream/redact/model_profile machinery as `ask`: rolling in-memory
 # history trimmed to the model window, streamed replies, a Phase-6 cost/
 # savings receipt after every turn, and per-turn cost gating + fleet
@@ -8097,7 +8094,7 @@ def cmd_chat(args, api_key, api_url, conf):
     catalog = session.catalog()  # memoized: ONE fetch for the whole command
     model = route_model(args, conf, "chat", catalog)
     explicit_max = getattr(args, "max_tokens", None) is not None
-    # SACRED (Codex H4): True after an explicit CONCRETE /model choice —
+    # SACRED: True after an explicit CONCRETE /model choice —
     # those turns run with --fallback/AMBIENT_FALLBACK disabled so the
     # picked model can never be silently swapped; an `auto` spec is
     # explicit DELEGATION, so fallback stays available there.
@@ -8324,7 +8321,7 @@ BUILD_JSON_INSTRUCTION_FILES = (
 
 
 def safe_relpath(path, root):
-    """Path-traversal firewall for manifest writes (security sweep P0). Model
+    """Path-traversal firewall for manifest writes. Model
     output is UNTRUSTED: any path it names must resolve to a plain relative
     location strictly inside `root`, or be rejected VERBATIM with a reason —
     never 'fixed' (fixing invites smuggling). Blocks the zip-slip family:
@@ -8350,7 +8347,7 @@ def safe_relpath(path, root):
     for seg in parts:
         # Alias-fold BEFORE comparing: Windows strips trailing dots/spaces and
         # default macOS filesystems are case-insensitive, so '.Git ' would hit
-        # the real .git while dodging an exact match (Codex W4/5 MED).
+        # the real.git while dodging an exact match.
         folded = seg.rstrip(". ").lower()
         if seg == ".." or folded == "..":
             raise ValueError("parent-directory escape")
@@ -8400,7 +8397,7 @@ def _load_build_state(root, task_sha):
     """Resume state is UNTRUSTED data (any process could have written it):
     every path re-fires through the firewall and every record's hash is
     re-verified, or the state is discarded — a poisoned state file must not
-    become a --dir escape on the next --apply (Codex W4/5 HIGH)."""
+    become a --dir escape on the next --apply."""
     try:
         with open(_build_state_path(root), encoding="utf-8") as fh:
             st = json.load(fh)
@@ -8440,7 +8437,7 @@ def _load_build_state(root, task_sha):
 
 
 def cmd_build(args, api_key, api_url, conf):
-    """Native agentic build (Codex-parity lane): plan → generate → emit a FILE
+    """Native agentic build: plan → generate → emit a FILE
     MANIFEST. Writes happen ONLY inside --dir, only with --apply (+ --yes when
     headless), through the safe_relpath firewall. NOTHING is ever executed —
     advisory_steps are printed as text. Truncation requeues files in smaller
@@ -8705,7 +8702,7 @@ def cmd_build(args, api_key, api_url, conf):
     # Bounded retry tree: splits + per-file retries can multiply calls far past
     # len(batches), so the gate must price the CAP, and the loop must enforce
     # it — a model that keeps omitting files can't drive unbounded spend
-    # (Codex W4/5 HIGH).
+    #.
     max_gen_calls = 3 * max(1, len(todo)) + 4
     gen_calls = 0
     if batches:
@@ -8875,7 +8872,7 @@ def cmd_build(args, api_key, api_url, conf):
                 # Re-validate the parent BEFORE any lexists/backup touches the
                 # path — a parent swapped to a symlink after generation could
                 # otherwise make the --force backup drag an OUTSIDE file into
-                # .ambient-build.bak (Codex final HIGH, reproduced).
+                #.ambient-build.bak.
                 root_real0 = os.path.realpath(root)
                 parent_real0 = os.path.realpath(os.path.dirname(dest))
                 if parent_real0 != root_real0 and \
@@ -8930,7 +8927,7 @@ def cmd_build(args, api_key, api_url, conf):
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     # Re-validate IMMEDIATELY before writing: a parent dir
                     # could have been swapped for a symlink after the earlier
-                    # firewall check (Codex W4/5 MED TOCTOU).
+                    # firewall check.
                     root_real = os.path.realpath(root)
                     parent_real = os.path.realpath(os.path.dirname(dest))
                     if parent_real != root_real and \
@@ -8955,7 +8952,7 @@ def cmd_build(args, api_key, api_url, conf):
             # "written" == at least one file actually landed with the intended
             # content (freshly created/overwritten, or already-present-and-
             # matching). If every file skip-exists'd or write-failed, nothing
-            # landed and the header must NOT claim WRITTEN (Codex MED).
+            # landed and the header must NOT claim WRITTEN.
             written = any(a in ("create", "overwrite", "unchanged")
                           for a in actions.values())
         else:
@@ -9055,7 +9052,7 @@ def _collect_key_interactive():
     import warnings
     # PREFLIGHT echo control BEFORE any key is typed: by the time getpass's
     # GetPassWarning fires, the key was already read WITH ECHO — visible in
-    # scrollback (Codex W2/3 HIGH). termios probing types nothing.
+    # scrollback. termios probing types nothing.
     if os.name != "nt":
         try:
             import termios
@@ -9123,7 +9120,7 @@ def _verify_and_store_key(key, conf, use_file):
             # A 402/insufficient-credits response PROVES the key authenticated
             # (the account was identified). Refusing to save it would force a
             # full re-run after top-up for no security gain — save it, and
-            # route the user to the console (onboarding sweep MED).
+            # route the user to the console.
             funds_issue = True
         elif category == "key":
             sys.exit(
@@ -9419,7 +9416,7 @@ def cmd_usage(args):
         if r.get("est"):
             t["est"] += 1  # estimated token counts must not read as exact (M1)
         # Corrupt-but-parseable records must be skipped like unparseable ones,
-        # not TypeError into [internal] (Codex final LOW).
+        # not TypeError into.
         tin = _as_pos_int(r.get("in"), 0)
         tout = _as_pos_int(r.get("out"), 0)
         t["in"] += tin
@@ -9460,7 +9457,7 @@ def cmd_usage(args):
         base = {"calls": t["calls"], "in": t["in"], "out": t["out"],
                 "model": model, "est_records": t["est"]}
         # KNOWN spend ALWAYS counts — dropping the priced portion of a
-        # partially-unpriced model under-reported real spend (Codex MED).
+        # partially-unpriced model under-reported real spend.
         grand += t["cost"]
         if t["unpriced"]:
             # Cost not FULLY known → no savings math for this model: a
@@ -9474,7 +9471,7 @@ def cmd_usage(args):
             raw_rows.append(("partial", t["cost"]) if t["cost"] > 0 else None)
             continue
         # Aggregate and derive the saved-% from RAW totals — rounding first
-        # let sub-microdollar spend read as $0/~100% saved (Codex H3).
+        # let sub-microdollar spend read as $0/~100% saved.
         priced_cost += t["cost"]
         grand_frontier += t["frontier"]
         raw_saved = t["frontier"] - t["cost"]
@@ -9494,17 +9491,17 @@ def cmd_usage(args):
                       "ambient CLI calls")
     if getattr(args, "json", False):
         print(json.dumps({
-            "schema_version": 1,  # contract field (Codex M2, additive)
+            "schema_version": 1, # contract field
             "days": args.days,
             "models": rows,
             "total_est_cost": _round_money(grand),
             "all_priced": priced_all,
-            # Phase 6 additive fields (schema unchanged otherwise):
+            # additive fields (schema unchanged otherwise):
             "reference_price": [default_ref[0], default_ref[1]],
             "frontier_cost": _round_money(grand_frontier),
             "saved": _round_money(grand_saved),
             "approx_ref_records": approx_ref,
-            "est_records": est_records,  # Codex M1: estimated ≠ exact
+            "est_records": est_records,  # estimated ≠ exact
             "unmetered_lanes": ["agent"],
             "note": unmetered_note,
         }, indent=2))
@@ -9576,7 +9573,7 @@ def _link_is_ours(dest):
 def cmd_link(args):
     """Put a stable `ambient` launcher on PATH. Marketplace installs live in a
     VERSIONED cache dir that changes on every update — a symlink in
-    ~/.local/bin survives updates (distribution sweep HIGH: no stable path for
+    ~/.local/bin survives updates (no stable path for
     `ambient setup`, which needs the user's own terminal)."""
     target = _this_script()
     dest_dir = os.path.expanduser(getattr(args, "dir", None) or "~/.local/bin")
@@ -9687,7 +9684,7 @@ def ensure_opencode_config(api_url, model):
     providers = cfg.setdefault("provider", {})
     if "ambient" in providers:
         # Non-destructively union the CURRENT model into the provider's model
-        # map (agentic sweep: the map was written once at install, so after
+        # map (the map was written once at install, so after
         # `ambient use <new>` the agent passed a model id opencode didn't
         # know). User-tuned options stay untouched.
         amb = providers["ambient"]
@@ -9872,7 +9869,7 @@ def _add_best_of_flag(parser):
     )
 
 
-# --- Declarative command registry (v3 Phase 8a) -------------------------------
+# --- Declarative command registry -------------------------------
 # ONE table drives BOTH argparse construction and dispatch — replacing the old
 # dual mechanism (a pre-credential if-chain + a post-credential handlers dict).
 # Each entry:
@@ -10327,7 +10324,7 @@ def main():
         _spec["configure"](sub)
 
     # Never accept a key as a command-line argument: argv lands in shell
-    # history and process listings (security sweep). Refuse BEFORE argparse
+    # history and process listings. Refuse BEFORE argparse
     # can echo the token back in an 'unrecognized arguments' error.
     if len(sys.argv) > 2 and sys.argv[1] == "setup":
         for tok in sys.argv[2:]:
@@ -10447,7 +10444,7 @@ def shielded_main():
                "full details.")
         # Even the last-resort floor honors the --json contract (redacted).
         _fail_exit(None, _argv_command(), "internal", msg, api_key=key,
-                   prose=f"ambient [internal]: {msg}")
+                   prose=f"ambient: {msg}")
 
 
 if __name__ == "__main__":

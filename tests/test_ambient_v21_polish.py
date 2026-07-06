@@ -1,4 +1,4 @@
-"""Polish + hardening batch (post-Codex + subagent-design audits).
+"""Polish + hardening batch (post-review hardening).
 
 Pins the two NEW behaviors this batch introduced:
 

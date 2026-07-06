@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 4 REMEDIATION tests (Codex findings H1/H2/M1/M2/M3 + race).
+"""Hermetic REMEDIATION tests.
 
 H1: prune is LIVENESS-FIRST — a provably-alive pid is never TTL-pruned (a
     slow long call must keep its reservation counted); TTL reclaims only

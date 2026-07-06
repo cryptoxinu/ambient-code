@@ -1,4 +1,4 @@
-"""Hermetic v3 Phase 5 tests: repo intelligence.
+"""Hermetic tests: repo intelligence.
 
 - 5a: build_code_map speaks more than Python (JS/TS, Go, Rust, Ruby, C-family
   regex signatures at column-0/brace-depth-0), scales its budget with the map

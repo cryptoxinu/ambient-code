@@ -121,7 +121,7 @@ class TestPackChunks(unittest.TestCase):
             self.assertLessEqual(len(c), 100000)
 
     def test_long_label_never_overflows(self):
-        # Codex A+B MED: a long path + a minified line must not exceed the
+        # a long path + a minified line must not exceed the
         # effective budget (raised to fit the header), never silently overflow.
         label = "very/deep/" * 20 + "module.py"      # ~200-char label
         eff = max(27000, len(label) + 200)
@@ -165,7 +165,7 @@ class TestJSONAndFindings(unittest.TestCase):
         self.assertEqual(amb.response_format_for(glm, {})["type"], "json_schema")
 
     def test_unparseable_chunk_is_a_gap_not_a_ship(self):
-        # Codex A+B HIGH: a chunk whose output won't parse must force non-SHIP,
+        # a chunk whose output won't parse must force non-SHIP,
         # never silently reduce to {"findings":[], "SHIP"}.
         clean = json.dumps({"findings": [], "verdict": "SHIP"})
         prose = "The code looks fine to me, no issues."   # not JSON
@@ -262,7 +262,7 @@ class TestChunkCache(unittest.TestCase):
                 amb._cache_key("kimi", "sys", "body", 8192, 0.1),
                 amb._cache_key("glm", "sys", "body", 4096, 0.1),
                 amb._cache_key("glm", "sys", "other", 8192, 0.1),
-                # Codex Wave D MED: prose vs strict-schema share a prompt but
+                # prose vs strict-schema share a prompt but
                 # must NOT share a cache entry.
                 amb._cache_key("glm", "sys", "body", 8192, 0.1,
                                {"type": "json_schema"}),
@@ -306,8 +306,8 @@ class TestWindowsPortability(unittest.TestCase):
 class TestConsensusFailure(unittest.TestCase):
     def test_all_models_fail_exits_2_not_clean(self):
         # Force every consensus model to fail (ok=False) with no findings; the
-        # command must NOT print a clean result — it must exit 2 (Codex Wave D
-        # HIGH: consensus can't present total failure as "no defects").
+        # command must NOT print a clean result — it must exit 2
+        # (consensus can't present total failure as "no defects").
         d = tempfile.mkdtemp()
         src = os.path.join(d, "x.py")
         with open(src, "w") as fh:
@@ -351,7 +351,7 @@ class TestRetryAfter(unittest.TestCase):
 
     def test_retry_after_reaches_chaterror_for_fanout(self):
         # A 429 whose body carries a server Retry-After must surface on the
-        # ChatError so the fan-out loop can honor it (Codex Wave D LOW).
+        # ChatError so the fan-out loop can honor it.
         orig = amb.stream_completion
         amb.stream_completion = lambda *a, **k: (
             429, {"error": {"message": "rate limited, slow down"},
@@ -396,8 +396,7 @@ class TestUsageMetering(unittest.TestCase):
 
 class TestDefaults(unittest.TestCase):
     def test_default_model_is_kimi_both_lanes(self):
-        # Founder decision 2026-07-03 (docs/LIVE_PROBE_REPORT.md): Kimi measured
-        # best auditor; GLM selectable while the network builds it up.
+        # Kimi is the default auditor; every model stays fully selectable.
         self.assertEqual(amb.DEFAULT_MODEL, "moonshotai/kimi-k2.7-code")
         self.assertEqual(amb.DEFAULT_CODE_MODEL, "moonshotai/kimi-k2.7-code")
 
