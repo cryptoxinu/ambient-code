@@ -526,6 +526,43 @@ class TestFix3WorkerFatalFailFast(unittest.TestCase):
                                reducer=lambda texts: "merged")
         self.assertLessEqual(len(calls), 2)
 
+    def test_map_reduce_keyboard_interrupt_exits_promptly(self):
+        """Ordinary map-reduce Ctrl-C must os._exit(130) + trip cancel_event,
+        NOT stall on the finally's blocking pool.shutdown(wait=True) while an
+        in-flight worker drains to the timeout (mirrors the consensus/best-of
+        Ctrl-C fix). On the old code this hung ~5s and never os._exit'd."""
+        exit_codes = []
+        cancel = threading.Event()
+
+        def fake_exit(code):            # halt where the real os._exit would
+            exit_codes.append(code)
+            raise SystemExit(code)
+
+        def in_flight(api_key, api_url, model, messages, args,
+                      session=None, **kw):
+            cancel.wait(5)              # returns only once cancel is tripped
+            return "x", None, {"finish_reason": "stop"}
+
+        def boom(*a, **k):              # Ctrl-C in the main thread
+            raise KeyboardInterrupt
+
+        start = time.monotonic()
+        with patched(amb, complete=in_flight), \
+                patched(amb.concurrent.futures, as_completed=boom), \
+                patched(amb.os, _exit=fake_exit), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as cm:
+            amb.run_map_reduce("k", "u", "m/x", "SYS",
+                               ["aaa", "bbb", "ccc"], ns(parallel=1),
+                               "SYNTH", 100_000,
+                               reducer=lambda texts: "merged",
+                               cancel_event=cancel)
+        self.assertEqual(exit_codes, [130])
+        self.assertEqual(cm.exception.code, 130)
+        self.assertTrue(cancel.is_set(),
+                        "Ctrl-C must trip cancel_event so in-flight workers bail")
+        self.assertLess(time.monotonic() - start, 3)
+
     def test_best_of_chat_worker_fatal_aborts_the_batch(self):
         release = threading.Event()
         calls = []

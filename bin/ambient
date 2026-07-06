@@ -4325,14 +4325,20 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
                     pool.shutdown(wait=False)                       # py3.8
                 raise
     except KeyboardInterrupt:
-        # Cancel QUEUED chunks so Ctrl-C feels instant instead of waiting on the
-        # whole backlog. in-flight calls still drain in finally.
+        # Cancel QUEUED chunks and exit PROMPTLY. Re-raising would hit the
+        # finally's blocking pool.shutdown(wait=True) and stall exit-130 for up
+        # to --timeout while an in-flight worker drains — so trip cancel and
+        # os._exit(130) after flushing BOTH streams (os._exit skips the blocking
+        # teardown, matching the consensus/best-of Ctrl-C lanes).
         print("\nambient: cancelling…", file=sys.stderr)
+        cancel_event.set()
         try:
             pool.shutdown(wait=False, cancel_futures=True)  # py3.9+
         except TypeError:
             pool.shutdown(wait=False)                       # py3.8
-        raise
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130)
     finally:
         pool.shutdown(wait=True)
     if cache_hits[0]:
