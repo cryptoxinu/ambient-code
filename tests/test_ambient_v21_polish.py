@@ -213,6 +213,32 @@ class TestSessionStartSelfHeal(unittest.TestCase):
         self.assertTrue(os.path.islink(self.link))
         self.assertEqual(os.readlink(self.link), foreign)
 
+    def test_foreign_symlink_named_ambient_is_never_repointed(self):
+        # The exact H2 gap the final audit flagged: a DIFFERENT tool literally
+        # named `ambient` (target BASENAME is `ambient`, but its path has no
+        # ambient-code component). The old basename-only guard would clobber it.
+        foreign_dir = os.path.join(self.home, "othertool", "bin")
+        os.makedirs(foreign_dir)
+        foreign = os.path.join(foreign_dir, "ambient")
+        with open(foreign, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho a totally different ambient\n")
+        os.chmod(foreign, 0o755)
+        os.symlink(foreign, self.link)
+        proc = self._run_hook()
+        self._assert_silent_ok(proc)
+        self.assertTrue(os.path.islink(self.link))
+        self.assertEqual(os.readlink(self.link), foreign)  # untouched
+
+    def test_dangling_foreign_symlink_named_ambient_is_never_relinked(self):
+        # A DANGLING symlink to a foreign `ambient` (no ambient-code component)
+        # must also be left alone — readlink still exposes the stored target.
+        foreign = os.path.join(self.home, "gone-tool", "bin", "ambient")
+        os.symlink(foreign, self.link)
+        self.assertFalse(os.path.exists(self.link))  # dangling
+        proc = self._run_hook()
+        self._assert_silent_ok(proc)
+        self.assertEqual(os.readlink(self.link), foreign)  # untouched
+
     def test_nothing_present_creates_nothing(self):
         self.assertFalse(os.path.lexists(self.link))
         proc = self._run_hook()

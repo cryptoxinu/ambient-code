@@ -10,35 +10,26 @@ set -eu
 if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -x "${CLAUDE_PLUGIN_ROOT}/bin/ambient" ]; then
   link="$HOME/.local/bin/ambient"
   real="${CLAUDE_PLUGIN_ROOT}/bin/ambient"
-  # Heal ONLY this well-known path, and ONLY when it is a SYMLINK that is
-  # ours to fix:
+  # Heal ONLY this well-known path, and ONLY when it is a SYMLINK we OWN:
   #  - dangling (a plugin update GC'd the old versioned dir it pointed at), or
-  #  - a stale ambient launcher (target exists, is named `ambient`, but is not
-  #    the ACTIVE install).
-  # A real (non-symlink) file, or a symlink to some other tool, is NEVER
-  # touched — never clobber a foreign `ambient` the user installed themselves.
+  #  - a stale ambient-code launcher (target exists but is not the ACTIVE
+  #    install).
+  # OWNERSHIP is proven by an `ambient-code` path component in the stored
+  # target (every real install — dev `.../skills/ambient-code/...` or
+  # marketplace `.../ambient-code/<ver>/...` — has it; a DIFFERENT tool merely
+  # named `ambient` does not). A real (non-symlink) file, or a symlink to any
+  # non-ambient-code target, is NEVER touched — never clobber a foreign
+  # `ambient` the user installed themselves. readlink still reports the stored
+  # target of a broken (dangling) symlink, so the same guard covers both cases.
   if [ -L "$link" ]; then
-    if [ ! -e "$link" ]; then
-      # Dangling: recreate quietly — but ONLY if its stored target basename is
-      # `ambient` (readlink still reports the target of a broken symlink), so a
-      # dangling FOREIGN symlink at this path is never replaced. Symmetric with
-      # the stale-symlink guard below.
-      case "$(readlink "$link" 2>/dev/null || true)" in
-        */ambient|ambient)
+    target="$(readlink "$link" 2>/dev/null || true)"
+    case "$target" in
+      */ambient-code/*)
+        if [ ! -e "$link" ] || [ "$target" != "$real" ]; then
           "$real" link >/dev/null 2>&1 || true
-          ;;
-      esac
-    else
-      target="$(readlink "$link" 2>/dev/null || true)"
-      if [ -n "$target" ] && [ "$target" != "$real" ]; then
-        case "$target" in
-          */ambient)
-            # Stale ambient launcher — repoint at the ACTIVE install.
-            "$real" link >/dev/null 2>&1 || true
-            ;;
-        esac
-      fi
-    fi
+        fi
+        ;;
+    esac
   fi
 fi
 

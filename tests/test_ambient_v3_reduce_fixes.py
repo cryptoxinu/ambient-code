@@ -533,6 +533,28 @@ class TestM2DryRunParity(unittest.TestCase):
         self.assertEqual(a[2], "strong/reduce")
         self.assertEqual(k.get("extra_calls", 0), 1)
 
+    def test_build_gate_is_fallback_aware(self):
+        # Final-audit HIGH: the build generation gate + dry-run must price the
+        # generation calls via the fallback-aware helper so a --fallback swap to
+        # a pricier candidate is reserved up front (byte-identical when off).
+        catalog = fix_catalog()
+        root = tempfile.mkdtemp()
+        seen = []
+        real_fb = amb.estimate_cost_fb
+
+        def spy(*a, **k):
+            seen.append(a)
+            return real_fb(*a, **k)
+
+        args = build_args(root, dry_run=True, model="cheap/reason")
+        with patched(amb, safe_catalog=lambda *a, **k: catalog,
+                     estimate_cost_fb=spy), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            amb.cmd_build(args, "key-abcdef123456", "https://x", {})
+        self.assertTrue(
+            seen, "build must price generation via the fallback-aware helper")
+
     def test_dry_run_without_reduce_model_shows_no_reduce_line(self):
         catalog = fix_catalog()
         src = self._big_src()

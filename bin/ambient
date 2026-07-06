@@ -90,7 +90,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "2.0.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "2.1.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -8474,17 +8474,19 @@ def cmd_build(args, api_key, api_url, conf):
             # live cost_gate_mr below uses (M2) — same chunk count, same +1
             # generation call; the remaining generation calls are priced on
             # the task at the map model.
-            expected, bound, assumed = estimate_cost_mr(
+            expected, bound, assumed = estimate_cost_mr_fb(
                 catalog, model, reduce_model, len(context), len(packed),
-                args.max_tokens, extra_calls=1)
-            e_g, b_g, a_g = estimate_cost(
-                catalog, model, len(task), gen_calls - 1, args.max_tokens)
+                args.max_tokens, args, conf, extra_calls=1,
+                per_call_chars=[len(c) for c in packed])
+            e_g, b_g, a_g = estimate_cost_fb(
+                catalog, model, len(task), gen_calls - 1, args.max_tokens,
+                args, conf)
             expected, bound = expected + e_g, bound + b_g
             assumed = assumed or a_g
         else:
-            expected, bound, assumed = estimate_cost(
+            expected, bound, assumed = estimate_cost_fb(
                 catalog, model, len(task) + len(context), gen_calls,
-                args.max_tokens)
+                args.max_tokens, args, conf)
         print("ambient build plan (dry run — nothing sent):")
         print(f"  model:         {model} "
               f"({'reasoning' if profile.is_reasoning else 'direct'})")
@@ -8672,12 +8674,16 @@ def cmd_build(args, api_key, api_url, conf):
     gen_calls = 0
     if batches:
         prompt_chars = len(task) + len(context) + len(plan_overview) + 2000
-        expected, _b1, assumed = estimate_cost(
+        # Fallback-aware (final-audit HIGH): under --fallback a generation call
+        # may be re-served by a pricier candidate, so the up-front reserve must
+        # cover that exposure across the batch/retry-cap set (byte-identical to
+        # estimate_cost when fallback is off / SACRED / no costlier candidate).
+        expected, _b1, assumed = estimate_cost_fb(
             catalog, model, prompt_chars * len(batches),
-            len(batches) + 2, args.max_tokens)
-        _e2, bound, _a2 = estimate_cost(
+            len(batches) + 2, args.max_tokens, args, conf)
+        _e2, bound, _a2 = estimate_cost_fb(
             catalog, model, prompt_chars * max_gen_calls,
-            max_gen_calls, args.max_tokens)
+            max_gen_calls, args.max_tokens, args, conf)
         print(f"ambient: build estimated ~${expected:.2f} "
               f"(hard bound ${bound:.2f} at the retry cap)"
               + (" — assumed worst-case pricing" if assumed else ""),
@@ -9484,6 +9490,22 @@ def _this_script():
     return os.path.realpath(os.path.abspath(sys.argv[0] or __file__))
 
 
+def _link_is_ours(dest):
+    """True only if `dest` is a launcher symlink WE own — its stored target has
+    an `/ambient-code/` path component (every real install: dev
+    `.../skills/ambient-code/...` or marketplace `.../ambient-code/<ver>/...`).
+    A symlink to a DIFFERENT tool merely named `ambient` returns False, so we
+    never clobber a foreign launcher. readlink reports the stored target of a
+    dangling link too, so the same check covers the post-GC case."""
+    if not os.path.islink(dest):
+        return False
+    try:
+        target = os.readlink(dest)
+    except OSError:
+        return False
+    return "/ambient-code/" in target.replace("\\", "/")
+
+
 def cmd_link(args):
     """Put a stable `ambient` launcher on PATH. Marketplace installs live in a
     VERSIONED cache dir that changes on every update — a symlink in
@@ -9494,13 +9516,12 @@ def cmd_link(args):
     dest = os.path.join(dest_dir, "ambient")
     if getattr(args, "remove", False):
         if os.path.islink(dest):
-            points_at = os.path.realpath(dest)
-            if os.path.basename(points_at) == "ambient":
+            if _link_is_ours(dest):
                 os.unlink(dest)
                 print(f"removed: {dest}")
             else:
-                sys.exit(f"ambient: {dest} points at {points_at} — not an "
-                         "ambient launcher, refusing to delete it")
+                sys.exit(f"ambient: {dest} points at {os.readlink(dest)} — not "
+                         "an ambient-code launcher, refusing to delete it")
         elif os.path.exists(dest):
             sys.exit(f"ambient: {dest} is not a symlink — refusing to delete "
                      "a foreign file")
@@ -9511,6 +9532,14 @@ def cmd_link(args):
         sys.exit(
             f"ambient: {dest} exists and is not a symlink — refusing to "
             "overwrite it. Pass --dir DIR to link somewhere else."
+        )
+    if os.path.islink(dest) and not _link_is_ours(dest):
+        # An existing (or dangling) symlink to a NON-ambient-code target is a
+        # foreign `ambient` the user set up — never overwrite it.
+        sys.exit(
+            f"ambient: {dest} is a symlink to another tool "
+            f"({os.readlink(dest)}) — refusing to overwrite it. "
+            "Pass --dir DIR to link somewhere else."
         )
     try:
         os.makedirs(dest_dir, exist_ok=True)
