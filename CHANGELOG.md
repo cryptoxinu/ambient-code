@@ -2,6 +2,32 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 2.1.1 — 2026-07-05
+
+Polish release from an extensive live-API test campaign (a direct battery + a
+4-agent parallel fleet + Codex, all against the real network). No behaviour or
+schema changes; the CLI stays a single stdlib-only file.
+
+- **Accurate reasoning max-tokens hint** — an explicit low `--max-tokens` on a
+  reasoning model no longer warns "over a 120,000-char input" (the model's
+  capacity); it right-sizes the need to the ACTUAL input and only warns when
+  genuinely too low.
+- **`ambient use --yes`** is now accepted (was `exit 64`) so a uniform scripted
+  flow that passes `--yes` everywhere never errors; `use` still never spends.
+- **One message for a non-serving model** — the pre-flight advisory already
+  lists priced alternatives, so the error no longer repeats the serving list
+  back-to-back.
+- **`--json` input tokens** — a partial usage object from the stream (output
+  only) no longer leaves `prompt_tokens: 0` in the envelope/ledger; any
+  missing/zero field is filled from the char estimate and marked `_estimated`.
+- **Receipt clarity** — a short reply on a reasoning model now tags the output
+  count `incl. reasoning`, so `out=43` next to "Yes" no longer looks wrong.
+- **`ambient build` failure copy** — when `--apply` was passed but every file
+  failed validation, the header says why ("nothing written — all N failed")
+  instead of the nonsensical "re-run with --apply"; a single missing file no
+  longer misreports as "output exceeded one response — split this file".
+- Dropped an internal "at the retry cap" phrase from the build cost line.
+
 ## 2.1.0 — 2026-07-05
 
 Additive feature + hardening release (no breaking changes). Everything below is

@@ -90,7 +90,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "2.1.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "2.1.1"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -2543,14 +2543,23 @@ def _resolve_output_budget(max_tokens, profile, input_chars=None):
     resolved = max(floor,
                    min(max_tokens, profile.max_output_length,
                        max(1, context_safe)))
-    if profile.is_reasoning and resolved < profile.output_budget:
-        print(
-            f"ambient: --max-tokens {resolved} is below the "
-            f"~{profile.output_budget} a reasoning model needs to think AND "
-            f"answer over a {profile.single_shot_chars:,}-char input — it may "
-            "stop mid-reasoning (the auto-escalation guard will try to recover).",
-            file=sys.stderr,
-        )
+    # Flag an explicit --max-tokens only when it is genuinely below what THIS
+    # input needs (right-sized from the actual input, not the model's worst-case
+    # capacity — the old message quoted single_shot_chars and false-alarmed on
+    # tiny prompts, e.g. "over a 120,000-char input" for a 5-char question).
+    if profile.is_reasoning:
+        need = (_reasoning_output_budget(input_chars,
+                                         _effective_cpt(profile.model))
+                if input_chars is not None else profile.output_budget)
+        need = min(need, profile.output_budget)
+        if resolved < need:
+            print(
+                f"ambient: --max-tokens {resolved} may be low for a reasoning "
+                f"model — it emits reasoning tokens before the answer and can "
+                f"need ~{need} to finish; it may stop mid-reasoning (the "
+                "auto-escalation guard will try to recover).",
+                file=sys.stderr,
+            )
     return resolved, False
 
 
@@ -3438,7 +3447,6 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     catalog = fetch_models(api_url, api_key)
                 except (NetworkError, SystemExit):
                     catalog = []
-                ready = ready_model_ids(catalog)
                 fb_conf = read_config_file()
                 # SACRED override (Codex H4): callers running a model the user
                 # EXPLICITLY chose (a --consensus set member, a chat /model
@@ -3530,8 +3538,11 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                             fallback_retried=True,
                             attempt_no=state.attempt_no + 1)
                         continue
-                if ready:
-                    diagnosis += f" Serving now: {', '.join(ready)}"
+                # NOTE: the serving-model list is intentionally NOT appended
+                # here — for a concrete non-serving model the pre-flight advisory
+                # (route_model) already printed it with prices, so repeating it
+                # in the error read as the same thing twice. The message still
+                # points at `ambient models`.
             err_obj = ChatError(category, diagnosis)
             # body may be a valid non-object JSON (str/list/number) on an
             # error response — guard before .get so it never AttributeErrors
@@ -3566,21 +3577,29 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # shapes.
             body.setdefault("finish_reason", finish)
         usage = body.get("usage") or {}
-        if not usage and isinstance(content, str):
-            # Ambient's stream does not reliably send a usage object (probe
-            # finding), so local metering was blind for most calls. Estimate
-            # tokens from char counts (reasoning counts as output) — marked
-            # _estimated. Far better for `ambient usage` than silently
-            # recording nothing.
-            in_tok = int(sum(len(m.get("content", "")) for m in messages)
+        if isinstance(content, str):
+            # Ambient's stream does not reliably send a COMPLETE usage object
+            # (probe finding — sometimes none, sometimes completion_tokens with
+            # prompt_tokens=0), so metering + the --json envelope went blind on
+            # the input. Fill any MISSING/zero field from char-based estimates
+            # (reasoning counts as output); mark _estimated only when we had to
+            # fill one, so a genuinely-complete usage stays exact and telemetry
+            # ignores it. Far better than recording/emitting a 0.
+            filled = dict(usage)
+            if not _as_pos_int(usage.get("prompt_tokens"), 0):
+                pt = int(sum(len(m.get("content", "")) for m in messages)
                          / CHARS_PER_TOKEN)
-            out_tok = int((len(content) + len(reasoning_text))
-                          / CHARS_PER_TOKEN)
-            usage = {"prompt_tokens": in_tok, "completion_tokens": out_tok,
-                     "_estimated": True}
-            # Reflect the estimate in the body too — ask/code --json read
-            # body["usage"] and must never say null while the ledger has an
-            # estimated record (Codex M3).
+                if pt > 0:
+                    filled["prompt_tokens"] = pt
+                    filled["_estimated"] = True
+            if not _as_pos_int(usage.get("completion_tokens"), 0):
+                ct = int((len(content) + len(reasoning_text)) / CHARS_PER_TOKEN)
+                if ct > 0:
+                    filled["completion_tokens"] = ct
+                    filled["_estimated"] = True
+            usage = filled
+            # Reflect it in the body too — ask/code --json read body["usage"]
+            # and must never say null / 0 while the ledger has a real record.
             if isinstance(body, dict):
                 body["usage"] = usage
         if usage:
@@ -4463,6 +4482,20 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     return final, partial, "; ".join(reasons)
 
 
+def _reasoning_hint(content, completion_tokens):
+    """A short receipt tag when billed output tokens materially exceed the
+    visible answer: a reasoning model bills its hidden thinking as output, so a
+    one-word reply can read as out=150 and look like a metering bug. Keeps the
+    receipt honest without pretending to know the exact reasoning split."""
+    try:
+        visible = len(content or "") / CHARS_PER_TOKEN
+        if completion_tokens and completion_tokens > max(20, visible * 2):
+            return " incl. reasoning"
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
 def render_result(text, partial, reason, args, api_key, usage=None, model=None,
                   already_streamed=False, usage_by_model=None):
     """Single place that prints a result and sets the exit code. Partial/
@@ -4503,9 +4536,10 @@ def render_result(text, partial, reason, args, api_key, usage=None, model=None,
         # mixed-served runs price per served model (Codex H1).
         note = (savings_note_by_served(usage_by_model) if usage_by_model
                 else savings_note(model, usage))
+        rhint = _reasoning_hint(text, usage.get("completion_tokens"))
         print(
             f"\n[ambient {model} | in={usage.get('prompt_tokens')} "
-            f"out={usage.get('completion_tokens')} tokens{note}]",
+            f"out={usage.get('completion_tokens')} tokens{rhint}{note}]",
             file=sys.stderr,
         )
 
@@ -8695,7 +8729,7 @@ def cmd_build(args, api_key, api_url, conf):
             max_gen_calls, args.max_tokens, args, conf,
             per_call_chars=[prompt_chars] * max_gen_calls)
         print(f"ambient: build estimated ~${expected:.2f} "
-              f"(hard bound ${bound:.2f} at the retry cap)"
+              f"(hard bound ${bound:.2f})"
               + (" — assumed worst-case pricing" if assumed else ""),
               file=sys.stderr)
         _gate_amount(expected, args, conf, bound=bound)
@@ -8804,10 +8838,17 @@ def cmd_build(args, api_key, api_url, conf):
                     print(f"ambient: {path0} came back incomplete — one more "
                           "attempt", file=sys.stderr)
                 else:
+                    # Don't presume a size overflow — a single missing file
+                    # after 2 tries can also mean the model kept proposing a
+                    # rejected path or simply didn't emit it (a one-line file
+                    # can't exceed the budget, so 'split it' was misleading).
                     failed.append({"path": path0,
-                                   "reason": "output exceeded one response "
-                                             "even alone — split this file "
-                                             "into smaller modules"})
+                                   "reason": "the model didn't return this "
+                                             "file after 2 attempts — it may "
+                                             "be too large for one response, "
+                                             "or the model kept proposing a "
+                                             "different/rejected path; "
+                                             "simplify or split it"})
     state["failed"] = failed
     _save_build_state(root, state)
 
@@ -8943,8 +8984,17 @@ def cmd_build(args, api_key, api_url, conf):
                          "written": written, "total_bytes": total_bytes})
         return
     print(f"\nBuild result for: {task}")
-    print(f"  target: {root} "
-          f"({'WRITTEN' if written else 'manifest only — re-run with --apply to write'})")
+    if written:
+        target_state = "WRITTEN"
+    elif getattr(args, "apply", False):
+        # --apply WAS passed but nothing landed (every planned file failed
+        # validation) — telling the user to "re-run with --apply" they already
+        # passed is nonsense; say WHY nothing was written instead.
+        target_state = (f"nothing written — all {len(failed)} planned file(s) "
+                        "failed" if failed else "nothing written")
+    else:
+        target_state = "manifest only — re-run with --apply to write"
+    print(f"  target: {root} ({target_state})")
     for f in files_out:
         print(f"  {f['action']:>11}  {f['path']:44} {f['bytes']:>8,} bytes")
     for f in failed:
@@ -9932,6 +9982,9 @@ def _configure_use(sub):
                    help="only set the code/agent default")
     p.add_argument("--all", action="store_true",
                    help="pick from every model, including curated-out ones")
+    # Accepted no-op: `use` never spends, but every other command takes --yes,
+    # so a uniform script/skill flow that passes it must not error (was exit 64).
+    p.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
 
 
 def _configure_ask(sub):
