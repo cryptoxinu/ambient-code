@@ -94,5 +94,46 @@ class TestM43StreamRedactor(unittest.TestCase):
                         amb.redact(raw, KEY), f"3-way {i},{j} raw={raw!r}")
 
 
+# -------------------------------------------------- Phase 2: crash-hardening
+
+class TestPhase2Hardening(unittest.TestCase):
+    def test_M30_as_bool_rejects_false_string(self):
+        self.assertFalse(amb._as_bool("false"))
+        self.assertFalse(amb._as_bool("0"))
+        self.assertFalse(amb._as_bool(""))
+        self.assertTrue(amb._as_bool("true"))
+        self.assertTrue(amb._as_bool(True))
+        self.assertFalse(amb._as_bool(False))
+
+    def test_M30_ready_model_ids_skips_false_string(self):
+        cat = [{"id": "a", "is_ready": "false"}, {"id": "b", "is_ready": True},
+               {"id": "c", "is_ready": "true"}]
+        self.assertEqual(amb.ready_model_ids(cat), ["b", "c"])
+
+    def test_M29_fetch_models_tolerates_non_dict_body(self):
+        # body is a list/str/None instead of an object → [] not a crash
+        for body in ([], "oops", None, 42):
+            with _patch(amb, "api_request", lambda *a, **k: (200, body)):
+                self.assertEqual(amb.fetch_models("https://x", "k"), [])
+
+    def test_L12_run_map_reduce_empty_chunks(self):
+        self.assertEqual(
+            amb.run_map_reduce("k", "u", "m", "sys", [], None, "syn", 1000),
+            ("", False, "no input"))
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def _patch(obj, name, value):
+    old = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, old)
+
+
 if __name__ == "__main__":
     unittest.main()

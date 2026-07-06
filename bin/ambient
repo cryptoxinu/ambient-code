@@ -1035,7 +1035,7 @@ def api_request(api_url, api_key, path, payload=None, timeout=DEFAULT_TIMEOUT_S)
                 return err.code, {"error": {"message": body[:2000]}}
         except urllib.error.URLError as err:
             last_err = NetworkError(f"cannot reach {url} ({err.reason})")
-        except (OSError, http.client.IncompleteRead) as err:
+        except (OSError, http.client.HTTPException) as err:
             # A dropped/incomplete read is a transient network fault, not a crash
             # — treat like URLError so it retries/wraps.
             last_err = NetworkError(f"read from {url} failed ({err})")
@@ -1062,6 +1062,8 @@ def fetch_models(api_url, api_key):
     # assume dict entries with a string id (a bare-string or
     # id-less entry crashed _dedupe_catalog/auth_probe). Field VALUES are still
     # coerced at use (_as_pos_int etc.).
+    if not isinstance(body, dict):   # M29: a 200 with a non-object JSON body
+        return []
     data = body.get("data")
     if not isinstance(data, list):
         return []
@@ -1089,9 +1091,18 @@ def _as_pos_int(v, default):
         return default
 
 
+def _as_bool(v):
+    """Coerce an untrusted catalog READINESS flag. A raw truthiness test let a
+    drifted string `"false"`/`"0"` read as READY (any non-empty string is
+    truthy). bool → itself; str → false for the usual falsey words; else bool()."""
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "false", "0", "no", "off")
+    return bool(v)
+
+
 def ready_model_ids(models):
     return [m.get("id") for m in models
-            if isinstance(m, dict) and m.get("is_ready") and m.get("id")]
+            if isinstance(m, dict) and _as_bool(m.get("is_ready")) and m.get("id")]
 
 
 def safe_catalog(api_url, api_key):
@@ -2221,7 +2232,7 @@ def pick_fallback_model(catalog, current, min_context=0, conf=None):
     candidates = []
     skipped_hidden = 0
     for m in catalog:
-        if not isinstance(m, dict) or not m.get("is_ready") \
+        if not isinstance(m, dict) or not _as_bool(m.get("is_ready")) \
                 or not m.get("id") or m.get("id") == current:
             continue
         out = m.get("output_modalities") or ["text"]
@@ -2287,7 +2298,7 @@ def resolve_auto_model(spec, catalog, conf, input_chars=0, args=None,
     allow, hide, show, _notes = curation(conf)
     candidates = []
     for m in catalog or []:
-        if not (isinstance(m, dict) and m.get("is_ready") and m.get("id")):
+        if not (isinstance(m, dict) and _as_bool(m.get("is_ready")) and m.get("id")):
             continue
         out_mod = m.get("output_modalities") or ["text"]
         if not isinstance(out_mod, list) or "text" not in out_mod:
@@ -2349,7 +2360,7 @@ def preflight_hint(model, catalog, conf, input_chars=0):
     if meta is None:
         return None  # unknown id: complete() gives the real [model] diagnosis
     problems = []
-    if not meta.get("is_ready"):
+    if not _as_bool(meta.get("is_ready")):
         problems.append(f"'{model}' isn't serving right now "
                         "(Ambient scales models with demand)")
     if input_chars:
@@ -2363,7 +2374,7 @@ def preflight_hint(model, catalog, conf, input_chars=0):
     allow, hide, show, _notes = curation(conf)
     alts = []
     for m in catalog:
-        if not (isinstance(m, dict) and m.get("is_ready") and m.get("id")) \
+        if not (isinstance(m, dict) and _as_bool(m.get("is_ready")) and m.get("id")) \
                 or m["id"] == model:
             continue
         out_mod = m.get("output_modalities") or ["text"]
@@ -3130,19 +3141,19 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
         raise NetworkError(f"cannot reach {url} ({err.reason})") from err
     except TimeoutError as err:
         raise NetworkError(f"{url} timed out connecting after {timeout}s") from err
-    except (OSError, http.client.IncompleteRead) as err:
+    except (OSError, http.client.HTTPException) as err:
         # urlopen can also raise a bare OSError out of getresponse() — a
         # RemoteDisconnected/ConnectionReset before the headers arrive, or (on
         # py<=3.9) a socket.timeout that is NOT TimeoutError. Categorize it as
         # a network fault instead of letting it surface as.
         raise NetworkError(f"cannot reach {url} ({err})") from err
     with resp:
-        ctype = resp.headers.get("Content-Type", "")
+        ctype = resp.headers.get("Content-Type", "").lower()  # M20: media type is case-insensitive
         if "text/event-stream" not in ctype:
             # Endpoint answered non-streamed anyway — parse it as one body.
             try:
                 raw_body = resp.read()
-            except (OSError, http.client.IncompleteRead) as err:
+            except (OSError, http.client.HTTPException) as err:
                 # A reset/timeout mid-body is a transient network fault, not a
                 # crash — mirror api_request's hardening.
                 raise NetworkError(
@@ -3169,6 +3180,8 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
             try:
                 obj = json.loads(payload_str)
             except json.JSONDecodeError:
+                return
+            if not isinstance(obj, dict):   # M18: a valid non-object SSE event
                 return
             if obj.get("usage"):
                 usage = obj["usage"]
@@ -3199,7 +3212,7 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                     f"({sum(map(len, content))} chars received before the stall)",
                     "".join(content), "".join(reasoning),
                 )
-            except (OSError, http.client.IncompleteRead) as err:
+            except (OSError, http.client.HTTPException) as err:
                 # Connection reset mid-stream = truncation, not a crash — route
                 # the partial through the same retry/salvage ladder as EOF.
                 close_beat()
@@ -3496,7 +3509,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 # record instead of returning empty usage — spend must never
                 # under-count. Same char-based estimate as the
                 # missing-usage path below; reasoning counts as output.
-                in_tok = int(sum(len(m.get("content", "")) for m in messages)
+                in_tok = int(sum(len(m.get("content") or "") for m in messages)
                              / CHARS_PER_TOKEN)
                 out_tok = int((len(err.partial) + len(err.reasoning or ""))
                               / CHARS_PER_TOKEN)
@@ -3555,7 +3568,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     # to a model whose context can hold the input we're about
                     # to resend PLUS its own output budget + overhead, so the
                     # switch can't overflow context or induce a marathon.
-                    input_tok = int(sum(len(m.get("content", ""))
+                    input_tok = int(sum(len(m.get("content") or "")
                                         for m in messages) / CHARS_PER_TOKEN)
                     alt = pick_fallback_model(catalog, model,
                                               min_context=input_tok,
@@ -3613,7 +3626,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                             fb_expected, fb_bound, _fb_assumed = \
                                 estimate_cost(
                                     catalog, alt,
-                                    sum(len(m.get("content", ""))
+                                    sum(len(m.get("content") or "")
                                         for m in messages),
                                     1, alt_tokens)
                             _gate_amount(fb_expected, spec, fb_conf,
@@ -3677,7 +3690,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # ignores it. Far better than recording/emitting a 0.
             filled = dict(usage)
             if not _as_pos_int(usage.get("prompt_tokens"), 0):
-                in_chars = sum(len(m.get("content", "")) for m in messages)
+                in_chars = sum(len(m.get("content") or "") for m in messages)
                 if in_chars > 0:  # min 1: a non-empty prompt is never 0 tokens
                     filled["prompt_tokens"] = max(
                         1, int(in_chars / CHARS_PER_TOKEN))
@@ -3697,7 +3710,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # Real usage carries the observed input char count for the Phase
             # 8a telemetry EWMA (estimated usage is ignored inside log_usage).
             log_usage(model, usage,
-                      input_chars=sum(len(m.get("content", ""))
+                      input_chars=sum(len(m.get("content") or "")
                                       for m in messages))
         if not isinstance(content, str) or not content.strip():
             # All budget spent on reasoning, nothing emitted: escalate ONCE,
@@ -3721,7 +3734,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     budget_retried=True, attempt_no=state.attempt_no + 1)
                 continue
             reasoning = reasoning_text
-            input_chars = sum(len(m.get("content", "")) for m in messages)
+            input_chars = sum(len(m.get("content") or "") for m in messages)
             if len(reasoning) > 200 and input_chars < 20_000:
                 # Small input, so splitting can't help: the thinking exists
                 # even though the answer doesn't — a labeled draft beats an
@@ -4321,6 +4334,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     reduce-specific replaced spec (max_tokens/response_format re-derived) — a
     smaller-window reduce model must never receive merge prompts or token
     budgets sized for the map model."""
+    if not chunks:   # L12: no input → ThreadPoolExecutor(max_workers=0) raises
+        return "", False, "no input"
     session = _session_or(session, api_key, api_url)
     api_key, api_url = session.api_key, session.api_url
     # FAN-OUT lane: the caller's batch gate already reserved any --fallback
@@ -4805,7 +4820,7 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
     # Same vocabulary as `ambient models`' section headers: a model is either
     # serving now (READY) or spins up on demand — never a bare mystery glyph.
     # Both labels render 9 columns wide so every row stays aligned.
-    flag = (paint("READY", "32") + "    " if m.get("is_ready")
+    flag = (paint("READY", "32") + "    " if _as_bool(m.get("is_ready"))
             else paint("on-demand", "2"))
     marks = []
     if m["id"] == chat_default:
@@ -4850,7 +4865,7 @@ def _dedupe_catalog(models):
 def cmd_models(args, api_key, api_url, conf):
     models = [m for m in _dedupe_catalog(fetch_models(api_url, api_key))
               if isinstance(m, dict) and m.get("id")]
-    models.sort(key=lambda m: (not m.get("is_ready"), m.get("id") or ""))
+    models.sort(key=lambda m: (not _as_bool(m.get("is_ready")), m.get("id") or ""))
     chat_default = resolve_model(argparse.Namespace(model=None), conf, "chat")
     code_default = resolve_model(argparse.Namespace(model=None), conf, "code")
     configured = bool(resolve_key_and_backend(conf)[0])
@@ -4866,7 +4881,7 @@ def cmd_models(args, api_key, api_url, conf):
     if getattr(args, "json", False):
         out = [{
             "id": m["id"], "name": m.get("name"),
-            "ready": bool(m.get("is_ready")),
+            "ready": _as_bool(m.get("is_ready")),
             "context_length": m.get("context_length"),
             "max_output_length": m.get("max_output_length"),
             "features": m.get("supported_features") or [],
@@ -4878,8 +4893,8 @@ def cmd_models(args, api_key, api_url, conf):
         print(json.dumps({"schema_version": 1, "configured": configured,
                           "models": out}, indent=2))
         return
-    serving = [m for m in visible if m.get("is_ready")]
-    on_demand = [m for m in visible if not m.get("is_ready")]
+    serving = [m for m in visible if _as_bool(m.get("is_ready"))]
+    on_demand = [m for m in visible if not _as_bool(m.get("is_ready"))]
     if serving:
         print(f"Serving now ({len(serving)}) — ready for instant use:")
         for m in serving:
@@ -4917,7 +4932,7 @@ def cmd_models(args, api_key, api_url, conf):
 def cmd_use(args, api_key, api_url, conf):
     models = [m for m in fetch_models(api_url, api_key)
               if isinstance(m, dict) and m.get("id")]
-    models.sort(key=lambda m: (not m.get("is_ready"), m.get("id") or ""))
+    models.sort(key=lambda m: (not _as_bool(m.get("is_ready")), m.get("id") or ""))
     known_ids = [m["id"] for m in models]
     allow, hide, show, notes = curation(conf)
     chosen = args.model_id
@@ -4977,7 +4992,7 @@ def cmd_use(args, api_key, api_url, conf):
             file=sys.stderr,
         )
     picked = next((m for m in models if m["id"] == chosen), None)
-    if picked and not picked.get("is_ready"):
+    if picked and not _as_bool(picked.get("is_ready")):
         print(
             f"note: '{chosen}' isn't serving at this moment — saving anyway; "
             "Ambient brings models up as demand arrives (`ambient models` "
@@ -5382,9 +5397,9 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
     api_key, api_url = session.api_key, session.api_url
     spec = RequestSpec.from_args(args)
     want_json = spec.json
-    system_text = "".join(m.get("content", "") for m in messages
+    system_text = "".join(m.get("content") or "" for m in messages
                           if m.get("role") == "system")
-    user_text = "\n".join(m.get("content", "") for m in messages
+    user_text = "\n".join(m.get("content") or "" for m in messages
                           if m.get("role") != "system")
     rf = spec.response_format
     use_cache = not spec.no_cache
@@ -8028,7 +8043,7 @@ def cmd_audit(args, api_key, api_url, conf):
             {"role": "user", "content": files_block(labeled)},
         ]
         _single_call_gate(catalog, model,
-                          sum(len(m.get("content", "")) for m in messages),
+                          sum(len(m.get("content") or "") for m in messages),
                           args, conf)
         try:
             content, _usage, body = complete(api_key, api_url, model, messages,
@@ -8228,7 +8243,7 @@ def cmd_code(args, api_key, api_url, conf):
     # fleet-reserve it up front like every fan-out lane (silent pass when
     # under ceiling; any distillation passes above ran their own gates).
     _single_call_gate(catalog, model,
-                      sum(len(m.get("content", "")) for m in messages),
+                      sum(len(m.get("content") or "") for m in messages),
                       args, conf)
     chat(api_key, api_url, model, messages, args, kind="code",
          session=session)
@@ -8272,7 +8287,7 @@ def _trim_chat_history(history, budget_chars):
     kept = list(history)
 
     def size(msgs):
-        return sum(len(m.get("content", "")) for m in msgs)
+        return sum(len(m.get("content") or "") for m in msgs)
 
     while len(kept) > 2 and size(kept) > budget_chars:
         kept = kept[2:]
@@ -8378,7 +8393,7 @@ def cmd_chat(args, api_key, api_url, conf):
         # fits here (refused above), so a doomed over-window request is
         # never gated or billed.
         while history and sys_len + len(line) + sum(
-                len(m.get("content", "")) for m in history) \
+                len(m.get("content") or "") for m in history) \
                 > profile.single_shot_chars:
             history = history[1:]
         messages = ([{"role": "system", "content": args.system}]
@@ -8390,7 +8405,7 @@ def cmd_chat(args, api_key, api_url, conf):
         turn_spec = dataclasses.replace(
             RequestSpec.from_args(args), _no_fallback=model_pinned,
             max_tokens=args.max_tokens if explicit_max else None)
-        input_chars = sum(len(m.get("content", "")) for m in messages)
+        input_chars = sum(len(m.get("content") or "") for m in messages)
         turn_spec = turn_spec.with_output_budget(profile, input_chars)
         # Every turn is cost-gated + fleet-reserved like any other call
         # (ceiling, aggregate fleet budget, >0.50 TTY confirm) — quietly:
@@ -9511,7 +9526,8 @@ def cmd_doctor(args):
         report("service", False, diagnosis)
         print(f"\nDIAGNOSIS: {diagnosis}")
         sys.exit(1)
-    models = body.get("data", [])
+    # M12: a 200 with a non-object body must not crash the diagnosis.
+    models = body.get("data", []) if isinstance(body, dict) else []
     ready = ready_model_ids(models)
     report("network", True,
            f"api reachable; {len(models)} models, {len(ready)} serving")
@@ -9914,6 +9930,13 @@ def ensure_opencode_config(api_url, model):
         # meets an inexplicable opencode failure (doctor also flags this).
         print(
             f"ambient: {OPENCODE_CONFIG_PATH} could not be parsed — leaving it "
+            "alone; `ambient agent` may misbehave (see: ambient doctor)",
+            file=sys.stderr,
+        )
+        return
+    if not isinstance(cfg, dict):    # M13: valid JSON but not an object ([] / "x")
+        print(
+            f"ambient: {OPENCODE_CONFIG_PATH} is not a JSON object — leaving it "
             "alone; `ambient agent` may misbehave (see: ambient doctor)",
             file=sys.stderr,
         )
