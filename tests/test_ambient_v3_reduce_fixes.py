@@ -554,7 +554,7 @@ class TestM2DryRunParity(unittest.TestCase):
             amb.cmd_build(args, "key-abcdef123456", "https://x", {})
         self.assertTrue(
             seen, "build must price generation via the fallback-aware helper")
-        # per-call sizing must be threaded (final re-audit HIGH): each
+        # per-call sizing must be threaded: each
         # generation call re-sends the full prompt, so the fallback candidate is
         # sized per-call, never the input_chars/n_calls average.
         self.assertTrue(

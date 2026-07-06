@@ -78,5 +78,5 @@ exit code against the envelope's own `exit_code`.
 - **CI** (`.github/workflows/ci.yml`) — compile + import + the unit suite on
   macOS, Linux, and Windows across Python 3.8-3.13, a version tri-sync +
   manifest check, and ruff as a gate. No live API in CI.
-- **Adversarial audit rounds** on snapshot copies during development — every
+- **Adversarial review** on snapshot copies during development — every
   verified finding fixed before release.

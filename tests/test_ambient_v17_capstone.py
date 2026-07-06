@@ -1,4 +1,4 @@
-"""Hermetic capstone tests: whole-system spend gating (3 cross-phase HIGHs).
+"""Hermetic tests: whole-system spend gating (3 cross-phase HIGHs).
 
 H1: the SINGLE-CALL lanes (normal ask, code's final generation, single-shot
     audit) must cost-gate + FLEET-RESERVE up front, so AMBIENT_MAX_SPEND is

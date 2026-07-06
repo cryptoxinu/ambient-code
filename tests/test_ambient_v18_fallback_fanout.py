@@ -1,4 +1,4 @@
-"""Hermetic capstone re-audit tests: fan-out x --fallback spend safety.
+"""Hermetic tests: fan-out x --fallback spend safety.
 
 FIX 1 (HIGH): the UP-FRONT batch gates (cost_gate / cost_gate_mr /
     _consensus_estimate for best-of) are FALLBACK-AWARE — with --fallback
@@ -374,7 +374,7 @@ class TestFix2WorkerGateRouting(unittest.TestCase):
         self.assertEqual(content, "j")
         self.assertEqual(calls[1]["model"], "alt/other")
         self.assertEqual(len(gate_calls), 1,
-                         "single-call lanes keep the capstone H2 re-gate")
+                         "single-call lanes keep the re-gate")
         self.assertGreater(gate_calls[0], 0.0)
 
     def test_fanout_worker_swap_never_systemexits_at_the_ceiling(self):

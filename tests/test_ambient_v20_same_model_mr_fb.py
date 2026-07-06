@@ -1,4 +1,4 @@
-"""Hermetic capstone tests: SAME-MODEL map-reduce fallback under-reserve.
+"""Hermetic tests: SAME-MODEL map-reduce fallback under-reserve.
 
 Final spend-safety fixture: with a live
 --fallback, cost_gate_mr's same-model delegation to cost_gate priced the swap

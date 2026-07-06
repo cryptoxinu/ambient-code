@@ -1614,7 +1614,7 @@ def cost_gate(catalog, model, input_chars, n_calls, args, conf,
     """Show a cost estimate before a large spend; enforce a ceiling; confirm on
     a TTY. Makes runaway spend impossible to trigger accidentally — including
     when pricing is unknown (assumed worst-case pricing, never fail-open).
-    FALLBACK-AWARE (capstone re-audit HIGH, tightened by the final re-audit):
+    FALLBACK-AWARE:
     with --fallback live the batch reserves the PER-CALL SUM-OF-MAXIMA
     Σ_i max(requested_i, fallback-candidate_i), so ANY mixture of workers
     succeeding on the requested model or swapping to a pricier alt is fully
@@ -1752,7 +1752,7 @@ def _fallback_enabled(spec, conf):
 
 def _batch_fallback_alt(catalog, model, args, conf, per_call_input_chars):
     """The ONE deterministic fallback candidate an UP-FRONT batch gate must
-    ALSO price (capstone re-audit HIGH). Fan-out workers do not re-gate a
+    ALSO price. Fan-out workers do not re-gate a
     live --fallback swap per call (see RequestSpec.gate_fallback) — instead
     the batch reserves the swap exposure up front. This returns the same
     fit-then-cheapest candidate pick_fallback_model would hand a live worker
@@ -1793,7 +1793,7 @@ def _fb_call_cost(catalog, model, chars, max_tokens, in_factor,
 
 def _fb_alt_budget(catalog, alt, requested_max_tokens, auto_budget):
     """The output budget a live worker RESENDS after swapping to `alt` —
-    the exact alt_tokens re-derivation complete() performs (final re-audit
+    the exact alt_tokens re-derivation complete() performs (
     H1): auto-budget → the ALT's own profile budget (which can be far
     LARGER than a small-cap requested model's resolved max_tokens);
     explicit --max-tokens → that value clamped to the alt's real output
@@ -1808,7 +1808,7 @@ def _fb_alt_budget(catalog, alt, requested_max_tokens, auto_budget):
 def estimate_cost_fb(catalog, model, input_chars, n_calls, max_tokens,
                      args, conf, per_call_chars=None, per_call_tokens=None):
     """estimate_cost made FALLBACK-AWARE for the up-front batch gates and
-    plans (capstone re-audit HIGH, tightened by the final re-audit): with
+    plans: with
     --fallback/AMBIENT_FALLBACK live, ANY SUBSET of the batch may legally
     be re-served by a fallback candidate, so the reserve is the PER-CALL
     SUM-OF-MAXIMA  Σ_i max(cost_requested(call_i), cost_alt(call_i)) —
@@ -4190,7 +4190,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     spec = dataclasses.replace(RequestSpec.from_args(args),
                                gate_fallback=False)
     if cancel_event is None:
-        # Local fail-fast lane (capstone re-audit MED): a worker-side fatal
+        # Local fail-fast lane: a worker-side fatal
         # must be able to stop siblings even when no caller event exists.
         cancel_event = threading.Event()
     total = sum(map(len, chunks))
@@ -5865,7 +5865,7 @@ def cmd_map(args, api_key, api_url, conf):
         # The fallback-aware reserve needs each ITEM's real size + budget:
         # items are arbitrary sizes, and a big item live-switches to a
         # large-context (possibly pricier) candidate that an average-input
-        # pick would miss (final re-audit H2). Whether the batch is
+        # pick would miss. Whether the batch is
         # auto-budgeted also decides the ALT's own resend budget —
         # thread the per-item data on the gate's private args copy (the
         # gate signature stays stable for its many callers).
@@ -6939,7 +6939,7 @@ def _audit_split_estimate(catalog, model, reduce_model, labeled, total,
     shared by --dry-run and the --repo upfront plan, mirroring exactly what
     the live path will gate: single-shot when it fits, else the same
     pack_chunks split with the structured (deterministic-merge) discount.
-    `fb_args`/`fb_conf` (capstone re-audit HIGH): the chunked lane's live
+    `fb_args`/`fb_conf`: the chunked lane's live
     gate (cost_gate_mr) is fallback-aware, so the plan prices the same
     max(requested, candidate) figure — plan == gate by construction. The
     single-shot lane keeps the requested-only price on purpose: it gates
@@ -7020,7 +7020,7 @@ def _consensus_estimate(catalog, models, labeled, total,
     _audit_sample_prep uses, so plan == gate == live by construction. The
     old prof_m.output_budget figure under-priced any explicit budget LARGER
     than the profile default and weakened the 3x worst-case guard.
-    `fb_args`/`fb_conf` (capstone re-audit HIGH): ONLY the --best-of lanes
+    `fb_args`/`fb_conf`: ONLY the --best-of lanes
     pass them — their samples may legally --fallback to a pricier alt, so
     each sample is priced fallback-aware (estimate_cost_fb). Consensus
     lanes must NOT pass them: their workers pin the SACRED _no_fallback, a
@@ -7577,7 +7577,7 @@ def cmd_audit(args, api_key, api_url, conf):
                 # (the same a.max_tokens the live run sends) — never the
                 # profile default, which under-priced a larger explicit
                 # --max-tokens and weakened the 3x worst-case guard.
-                # Fallback-aware (capstone re-audit HIGH): samples may
+                # Fallback-aware: samples may
                 # --fallback to a pricier alt — reserved at each billed
                 # chunk's REAL size and OWN candidate (final HIGH), never
                 # the sample's uniform average.

@@ -153,7 +153,7 @@ else
   fail "map-reduce chunk evidence" "no chunk banner — input went single-shot?"
 fi
 
-echo "--- live: D7 resumable cache (re-audit reuses chunks) ---"
+echo "--- live: resumable cache (re-run reuses chunks) ---"
 run with_key "$AMB" audit "$BIG" --json --yes
 if grep -qi "served from cache" "$OUT"; then pass "cache: re-run served chunks from cache"
 else skip "cache reuse" "no cache line"; fi

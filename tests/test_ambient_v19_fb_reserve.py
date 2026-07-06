@@ -1,4 +1,4 @@
-"""Hermetic final re-audit tests: the fully-conservative fallback reserve.
+"""Hermetic tests: the fully-conservative fallback reserve.
 
 The up-front batch gates reserve the PER-CALL SUM-OF-MAXIMA —
 Sum_i max(cost_requested(call_i), cost_alt(call_i)) — which dominates EVERY
