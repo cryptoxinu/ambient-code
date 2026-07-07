@@ -3010,6 +3010,19 @@ SECRET_PATTERNS = [
 # on minified/hex blobs). _line_has_secret gates it on
 # the literal '://' and scans only a bounded window around each occurrence.
 CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{6,}@")
+# A high-entropy value assigned to an ALL-CAPS env identifier whose last
+# component names a credential (AWS_SECRET_ACCESS_KEY=…, DB_PASSWORD=…,
+# GITHUB_TOKEN=…). The keyword-abuts-'=' pattern above MISSES these — the token
+# right before '=' is a bare KEY/TOKEN component, not the keyword — which let a
+# creds.txt holding a real secret reach the network (stress test F02). Anchored
+# and linear-time ('_' is a hard delimiter so the quantifiers can't overlap); a
+# 16+ value guard keeps the false-positive rate low. A PUBLIC_* identifier is
+# excluded (a public key is not a secret) by the caller.
+ENV_SECRET_ASSIGN_RE = re.compile(
+    r"^[ \t]*(?:export[ \t]+)?"
+    r"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_"
+    r"(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL|CREDENTIALS|KEY))"
+    r"[ \t]*[:=][ \t]*['\"]?[A-Za-z0-9+/_.\-]{16,}")
 # Credential-named files refused regardless of content (the
 # old check missed .envrc/.netrc/.npmrc/.pgpass/id_rsa/*.pem/credentials.json).
 SECRET_NAMES_RE = re.compile(
@@ -3020,6 +3033,9 @@ SECRET_NAMES_RE = re.compile(
 
 def _line_has_secret(line):
     if any(p.search(line) for p in SECRET_PATTERNS):
+        return True
+    m = ENV_SECRET_ASSIGN_RE.search(line)
+    if m and "PUBLIC" not in m.group(1):  # a public key is not a secret
         return True
     if "://" not in line:
         return False
@@ -3048,8 +3064,15 @@ def refuse_if_secrets(labeled_chunks, allow):
             hits.append(f"{label} (credential-named file — never send these)")
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
-            if _line_has_secret(line):
-                hits.append(f"{label}:{lineno}")
+            # Scan the SEMANTIC content, not the presentation: audit inputs are
+            # line-number-guttered ("  42| CODE") before the tripwire, and an
+            # anchored secret pattern would miss a gutter-prefixed assignment
+            # (the leak the stress test found). Strip the gutter, and report the
+            # true absolute line it carried when present.
+            m = re.match(r"^ *(\d+)\| ?(.*)$", line)
+            disp, scan_line = (int(m.group(1)), m.group(2)) if m else (lineno, line)
+            if _line_has_secret(scan_line):
+                hits.append(f"{label}:{disp}")
     if hits:
         msg = (
             "refusing to send — content that looks like "
