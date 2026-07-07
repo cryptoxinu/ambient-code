@@ -107,6 +107,20 @@ class TestM43StreamRedactor(unittest.TestCase):
         got = "".join(sr.feed(p) for p in pieces) + sr.flush()
         self.assertNotIn(KEY, got)
 
+    def test_over_cap_escape_stays_consistent_with_redact_of_whole(self):
+        # A >cap escape gets its middle compacted, but the escape stays "open"
+        # so it is removed exactly as redact(full) does — no leaked middle text.
+        cases = [
+            "\x1b]" + "x" * 3000 + "\x07" + KEY + " tail",   # terminated OSC
+            "pre \x1b]" + "y" * 3000 + KEY + "z",             # unterminated OSC
+            "\x1bP" + "d" * 3000 + "\x1b\\" + KEY + " q",     # terminated DCS
+        ]
+        for full in cases:
+            sr = amb._StreamRedactor(KEY)
+            streamed = "".join(sr.feed(c) for c in full) + sr.flush()
+            self.assertEqual(streamed, amb.redact(full, KEY), repr(full[:12]))
+            self.assertNotIn(KEY, streamed)
+
     def test_streamed_equals_redact_of_whole_at_every_split(self):
         # The strong invariant: however the provider chunks the bytes, the
         # streamed output is byte-identical to redacting the full text at once
@@ -312,6 +326,20 @@ class TestPhase6Misc(unittest.TestCase):
         # the key-exfil warning + prompt must NOT pollute stdout
         self.assertEqual(out.getvalue(), "")
         self.assertIn("Authorization header", err.getvalue())
+
+    def test_catalog_data_normalizes_malformed_bodies(self):
+        # whole-branch audit: a malformed /v1/models 200 must not crash a
+        # downstream models[0]["id"] / `for m in models`.
+        for body in (1, "oops", [], None, {"data": "oops"},
+                     {"data": ["bad", 1, None]}, {"nope": 1}):
+            out = amb._catalog_data(body)
+            self.assertIsInstance(out, list)
+            self.assertTrue(all(isinstance(x, dict) for x in out))
+        # keeps only dict rows with a non-empty string id (matches fetch_models)
+        self.assertEqual(
+            amb._catalog_data({"data": [{"id": "x"}, "bad", {"y": 1},
+                                        {"id": 5}, {"id": ""}]}),
+            [{"id": "x"}])
 
     def test_M14_shim_is_ours_only_matches_our_template(self):
         import tempfile

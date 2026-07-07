@@ -531,8 +531,9 @@ def load_config():
 
 
 _KEY_PLACEHOLDER = "[AMBIENT_API_KEY]"   # _StreamRedactor mirrors this exactly
-_MAX_ESCAPE_HOLD = 4096                  # a real escape is short; past this a
-#                                          "never-terminating" one is hostile
+_MAX_ESCAPE_HOLD = 256                   # compact a held escape past this so
+_ESCAPE_KEEP_TAIL = 64                    # _raw (and each _stable_len rescan) stays
+#                                          small; a terminator is short + recent
 
 
 def redact(text, api_key):
@@ -618,14 +619,17 @@ class _StreamRedactor:
         self._raw += piece
         cut = self._stable_len(self._raw)
         stable_raw, self._raw = self._raw[:cut], self._raw[cut:]
-        # Bound a pathological unterminated escape: a real CSI/OSC/DCS is short,
-        # so a held remainder past the cap can't be a legit escape still
-        # arriving — force it through sanitization now, else _raw (and each
-        # _stable_len rescan of it) grows without bound: O(n^2) DoS from a
-        # hostile stream. Force-resolved garbage is still key/escape-safe.
+        # Bound a pathological unterminated escape (a hostile endpoint streaming
+        # ESC[ + endless params) WITHOUT breaking its semantics. `_raw` here is
+        # exactly one still-open escape (starts with ESC); its CONTENT is
+        # discarded regardless, so drop the bloated MIDDLE while keeping the
+        # ESC-prefix + recent tail. `_raw` (and each _stable_len rescan) stays
+        # bounded, yet the escape remains "open" so when its terminator finally
+        # arrives — or at flush — it is removed exactly as redact() would,
+        # instead of leaking its middle as literal text. Any terminator is short
+        # and recent, so it can only be in the kept tail, never the dropped span.
         if len(self._raw) > _MAX_ESCAPE_HOLD:
-            stable_raw += self._raw
-            self._raw = ""
+            self._raw = self._raw[:2] + self._raw[-_ESCAPE_KEEP_TAIL:]
         if stable_raw:
             self._san += redact(stable_raw, "")   # sanitize only (escape-free)
         return self._emit(hold=self._keep)
@@ -1097,6 +1101,19 @@ def api_request(api_url, api_key, path, payload=None, timeout=DEFAULT_TIMEOUT_S)
         else:
             break
     raise last_err
+
+
+def _catalog_data(body):
+    """Model list from a /v1/models body, normalized to DICT entries with a
+    non-empty string `id` (same filter as fetch_models). A malformed 200
+    (non-object body, `data` that is a scalar/string or a list of non-objects /
+    id-less rows) yields [] instead of crashing a downstream models[0]["id"] or
+    a `for m in models` over a non-iterable."""
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, list):
+        return []
+    return [m for m in data
+            if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
 
 
 def fetch_models(api_url, api_key):
@@ -2742,7 +2759,10 @@ def apply_output_budget(args, profile, input_chars=None):
 def error_message(body):
     err = body.get("error") if isinstance(body, dict) else None
     if isinstance(err, dict):
-        return err.get("message", json.dumps(err)[:500])
+        msg = err.get("message")
+        # A non-string "message" (None / list / number) must not propagate — a
+        # caller does msg.lower()/redact(msg), which would crash on a non-str.
+        return msg if isinstance(msg, str) else json.dumps(err)[:500]
     return json.dumps(body)[:500]
 
 
@@ -2810,7 +2830,10 @@ def auth_probe(api_url, api_key, models):
     unauthenticated, so it proves nothing about the key). Returns
     (ok, category, detail). A not-serving 429 still proves auth passed."""
     ready = ready_model_ids(models)
-    probe_model = ready[0] if ready else (models[0]["id"] if models else DEFAULT_MODEL)
+    probe_model = ready[0] if ready else next(
+        (m["id"] for m in models
+         if isinstance(m, dict) and isinstance(m.get("id"), str)),
+        DEFAULT_MODEL)
     payload = {
         "model": probe_model,
         "messages": [{"role": "user", "content": "ping"}],
@@ -3249,21 +3272,29 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                 return
             if not isinstance(obj, dict):   # M18: a valid non-object SSE event
                 return
-            if obj.get("usage"):
+            if isinstance(obj.get("usage"), dict):
                 usage = obj["usage"]
-            for ch in obj.get("choices") or []:
-                delta = ch.get("delta") or {}
-                if delta.get("content"):
-                    content.append(delta["content"])
-                    if on_delta is not None: # live stdout streaming
-                        on_delta(delta["content"])
+            choices = obj.get("choices")
+            for ch in (choices if isinstance(choices, list) else []):
+                if not isinstance(ch, dict):   # a scalar/list choice entry
+                    continue
+                delta = ch.get("delta")
+                if not isinstance(delta, dict):
+                    delta = {}
+                # Only STRING values are streamable — a scalar delta value
+                # (e.g. {"content": 1}) would crash on "".join / on_delta.
+                piece = delta.get("content")
+                if isinstance(piece, str) and piece:
+                    content.append(piece)
+                    if on_delta is not None:   # live stdout streaming
+                        on_delta(piece)
                 # Providers differ: OpenAI-style uses "reasoning_content",
-                # Kimi/others stream "reasoning". Capture BOTH — dropping either
-                # loses the whole thinking trace of a reasoning model.
-                if delta.get("reasoning_content"):
-                    reasoning.append(delta["reasoning_content"])
-                if delta.get("reasoning"):
-                    reasoning.append(delta["reasoning"])
+                # Kimi/others stream "reasoning". Capture BOTH (string only) —
+                # dropping either loses a reasoning model's whole thinking trace.
+                for _rk in ("reasoning_content", "reasoning"):
+                    _rv = delta.get(_rk)
+                    if isinstance(_rv, str) and _rv:
+                        reasoning.append(_rv)
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
                     terminated = True
@@ -3501,6 +3532,16 @@ class AttemptState:
 MAX_COMPLETE_ATTEMPTS = 5
 
 
+def _reasoning_str(*vals):
+    """First non-empty STRING among candidate reasoning fields, stripped. An
+    untrusted response may carry a scalar `reasoning`/`reasoning_content`
+    (e.g. 1) — `(v or "").strip()` would AttributeError on it."""
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 def complete(api_key, api_url, model, messages, args, _stall_retried=False,
              _budget_retried=False, _fallback_retried=False,
              _budget_shrunk=False, on_delta=None, session=None):
@@ -3728,10 +3769,17 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             if isinstance(body, dict) and body.get("_retry_after"):
                 err_obj.retry_after = body["_retry_after"]
             raise err_obj
+        if not isinstance(body, dict):
+            # A 200 with a non-object JSON body (scalar/list/str) — `"content"
+            # in body` would crash on an int. Treat as an unexpected shape.
+            raise ChatError(
+                "unknown",
+                "unexpected response shape: "
+                f"{redact(json.dumps(body)[:800], api_key)}")
         if "content" in body and "choices" not in body:
             # Streamed result (normal path).
             content = body.get("content")
-            reasoning_text = (body.get("reasoning") or "").strip()
+            reasoning_text = _reasoning_str(body.get("reasoning"))
             finish = body.get("finish_reason")
         else:
             # Classic JSON body (endpoint ignored streaming).
@@ -3744,17 +3792,22 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     "unexpected response shape: "
                     f"{redact(json.dumps(body)[:800], api_key)}",
                 )
+            if not isinstance(choice, dict) or not isinstance(message, dict):
+                raise ChatError(   # a non-object message → message.get would crash
+                    "unknown",
+                    "unexpected response shape: "
+                    f"{redact(json.dumps(body)[:800], api_key)}")
             content = message.get("content")
-            reasoning_text = (
-                message.get("reasoning_content") or message.get("reasoning")
-                or ""
-            ).strip()
+            reasoning_text = _reasoning_str(message.get("reasoning_content"),
+                                            message.get("reasoning"))
             finish = choice.get("finish_reason")
             # Surface finish_reason at the top level so every caller's
             # truncation check works on both the streamed and classic body
             # shapes.
             body.setdefault("finish_reason", finish)
-        usage = body.get("usage") or {}
+        usage = body.get("usage")
+        if not isinstance(usage, dict):   # a non-object usage → dict(usage) crash
+            usage = {}
         content_str = content if isinstance(content, str) else ""
         # M19/L22: meter whenever we got content OR reasoning. A reasoning-only
         # response has content=None but still SPENT output tokens — the old
@@ -4890,8 +4943,12 @@ def _humanize_ctx(n):
 
 
 def _model_badges(m):
-    feats = m.get("supported_features") or []
-    ins = m.get("input_modalities") or []
+    # Catalog fields are untrusted network data — a scalar (e.g. 42) would crash
+    # the `"reasoning" in feats` membership test; coerce to a list first.
+    feats = m.get("supported_features")
+    feats = feats if isinstance(feats, (list, tuple)) else []
+    ins = m.get("input_modalities")
+    ins = ins if isinstance(ins, (list, tuple)) else []
     badges = []
     if "reasoning" in feats:
         badges.append("reason")
@@ -4918,7 +4975,8 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
     if hidden:
         marks.append("hidden")
     mark = f"  {','.join(marks)}" if marks else ""
-    name = (m.get("name") or "").strip()
+    _name = m.get("name")                       # untrusted: may be a non-str
+    name = _name.strip() if isinstance(_name, str) else ""
     badges = _model_badges(m)
     # id + name are catalog (network) data — sanitize before they hit the
     # terminal (A12); the raw values are still used for the comparisons above.
@@ -9539,7 +9597,7 @@ def _verify_and_store_key(key, conf, use_file):
             category, diagnosis = classify_error(status, body, key)
             sys.exit(f"ambient [{category}]: {diagnosis} Nothing was saved.\n"
                      f"{SUPPORT_LINE}")
-        models = body.get("data", [])
+        models = _catalog_data(body)   # normalized list of dict entries
         # /v1/models is unauthenticated, so really verify the key with a tiny
         # completion (fractions of a cent).
         ok, category, detail = auth_probe(api_url, key, models)
@@ -9718,7 +9776,7 @@ def cmd_doctor(args):
         print(f"\nDIAGNOSIS: {diagnosis}")
         sys.exit(1)
     # M12: a 200 with a non-object body must not crash the diagnosis.
-    models = body.get("data", []) if isinstance(body, dict) else []
+    models = _catalog_data(body)   # normalized list of dict entries
     ready = ready_model_ids(models)
     report("network", True,
            f"api reachable; {len(models)} models, {len(ready)} serving")
