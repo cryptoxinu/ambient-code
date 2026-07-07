@@ -515,6 +515,46 @@ def test_no_severity_finding_with_scenario_field_not_clean():
     assert env["verdict"] != "SHIP" and env["exit_code"] != 0
 
 
+def _rj(raw):
+    import io, contextlib, json as _j
+    b = io.StringIO()
+    with contextlib.redirect_stdout(b):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    return _j.loads(b.getvalue())
+
+
+def _is_clean(e):
+    return e["verdict"] == "SHIP" and not e.get("findings") and e["exit_code"] == 0
+
+
+@pytest.mark.parametrize("raw", [
+    # Workflow round-2: severity phrased as an ADJECTIVE label, P/Sev taxonomy,
+    # XML tags, CWE ref, 'Where:' label — all real hidden findings.
+    '{"findings": [], "verdict": "SHIP"}\n- HIGH-risk: SQL injection in db/query.py:88 lets any user dump users.',
+    '{"findings": [], "verdict": "SHIP"}\nCritical-severity: auth bypass in api/auth.py:14.',
+    '{"findings": [], "verdict": "SHIP"}\nhigh-severity issue in db/query.py:88 allows SQLi.',
+    '{"findings": [], "verdict": "SHIP"}\n| Sev | File | Line |\n|--|--|--|\n| P0 | pay/charge.py | 210 | client-controlled amount |',
+    '{"findings": [], "verdict": "SHIP"}\nSev1: predictable reset token in auth/reset.py:9.',
+    '{"findings": [], "verdict": "SHIP"}\nBlocker: SQL injection in db/query.py:42.',
+    '{"findings": [], "verdict": "SHIP"}\n<severity>HIGH</severity> <file>src/auth.py</file> <line>42</line> - auth bypass.',
+    '{"findings": []}\nCWE-798: hardcoded AWS key in config.py, line 12.',
+    '{"findings": []}\nWhere: auth.py line 42 - token compared with == (timing attack).',
+])
+def test_workflow_hidden_findings_are_not_clean(raw):
+    assert not _is_clean(_rj(raw))
+
+
+@pytest.mark.parametrize("raw", [
+    # Workflow: a severity ADJECTIVE in a clean 'sections audited' sentence, a
+    # valid clean JSON with innocuous prose, a numbered review summary.
+    'I audited thoroughly.\nCritical sections audited: crypto.py:120 - constant-time compare verified correct.\nNo defects found.\nVerdict: SHIP',
+    'Critical sections audited: crypto.py:120 - verified correct.\n{"findings": [], "verdict": "SHIP"}',
+    '1. Critical paths - payment/charge.py:57 - idempotency verified, no double-charge.\n2. Error handling - solid.\nVerdict: SHIP',
+])
+def test_workflow_clean_audits_stay_clean(raw):
+    assert _is_clean(_rj(raw))
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
