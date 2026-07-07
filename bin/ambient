@@ -3181,7 +3181,16 @@ def _env_assignment_is_secret(line):
     (`password = get_input()`, `foreign_key = other.id`) is NOT a secret. ALL
     assignments are checked — on the whole line AND on each whitespace token, so
     a prose prefix ('here is my key: AWS_SECRET_ACCESS_KEY=…') whose first match
-    greedily swallows the real assignment is still caught (Codex R5)."""
+    greedily swallows the real assignment is still caught (Codex R5).
+
+    DOCUMENTED BACKSTOP BOUNDARY: a bare lowercase unquoted assignment to a
+    plain DICTIONARY-WORD value (`password: postgres`) is intentionally NOT
+    flagged — it can't be told apart from a config KEY (`password_policy:
+    enabled`) or a code variable (`password = default_pw`) without
+    false-positiving on the tool's primary job (auditing code). The tripwire is
+    a backstop for the COMMON high-signal shapes (uppercase env vars, quoted
+    JSON/YAML values, punctuated/high-entropy secrets, vendor tokens, auth
+    headers, URL creds); the docs tell users never to send secrets."""
     for segment in [line, *line.split()]:
         for m in ENV_ASSIGN_RE.finditer(segment):
             ident, val = m.group(2), m.group(4)
@@ -6967,7 +6976,7 @@ _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
     r"(CRITICAL|HIGH|MEDIUM|LOW)\b"                    # 1 severity
-    r"[^\n]*?\(\s*confidence\s*:\s*(HIGH|LOW)\s*\)"    # 2 confidence
+    r"[^\n]*?\(?\s*confidence\s*:\s*(HIGH|LOW)\b\)?"   # 2 confidence (parens opt)
     r"[^\n]*?[—–\-]\s*"                               # sep -> file:line
     r"([^\s:—–]+?):[ \t]*(\d+)"                       # 3 file  4 line (': 7' ok)
     r"\s*[—–\-]\s*"                                   # sep -> title
@@ -6993,7 +7002,7 @@ _PROSE_VERDICT_RE = re.compile(
 # file:line ('no HIGH (confidence: HIGH) issues remain') still stays clean.
 _PROSE_SEVERITY_HINT_RE = re.compile(
     r"(?im)^(?=[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b)"
-    r"(?=[^\n]*\(\s*confidence\s*:)"
+    r"(?=[^\n]*confidence\s*:)"                        # parenthesized or not
     r"(?=[^\n]*:[ \t]*\d)[^\n]*$")
 
 

@@ -203,6 +203,17 @@ def test_confidence_last_finding_does_not_fake_clean():
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_unparenthesized_confidence_finding_does_not_fake_clean():
+    # Codex round 10: 'HIGH — Confidence: HIGH — a.py:7 — …' (confidence not in
+    # parens) must not fake a clean SHIP.
+    txt = ("HIGH — Confidence: HIGH — a.py:7 — auth bypass.\nVerdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    # It PARSES the finding (a HIGH finding forces FIX FIRST at render time) —
+    # the point is it is not silently dropped into a clean SHIP.
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "a.py"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
