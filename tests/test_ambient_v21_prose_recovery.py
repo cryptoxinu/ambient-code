@@ -293,6 +293,22 @@ def test_fieldlist_any_location_phrasing_does_not_fake_clean(loc):
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_fieldlist_standalone_line_number_does_not_fake_clean():
+    # Codex round 19: standalone 'Line number 42' (no colon, no File: label).
+    txt = ("Finding:\nSeverity: HIGH\nLine number 42\n"
+           "Defect: empty token bypass.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
+@pytest.mark.parametrize("txt", [
+    "The code is sound. No defects found.\nVerdict: SHIP\n",
+    "Reviewed auth.py thoroughly. No HIGH or MEDIUM issues.\nVerdict: SHIP\n",
+])
+def test_genuinely_clean_audits_stay_clean(txt):
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

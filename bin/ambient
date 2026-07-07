@@ -7073,8 +7073,9 @@ _PROSE_FIELD_SEV_RE = re.compile(
 # 15-18), instead of enumerating them. Paired with a 'Severity: <level>' label,
 # this is an unparsed finding, never a clean SHIP.
 _PROSE_FIELD_LINE_RE = re.compile(
-    r"(?im)(?:^[\ \t>*•#\-]*(?:lines?|file|location|path)\s*:"
-    r"|[A-Za-z0-9_./\-]+:[ \t]*\d)")
+    r"(?im)(?:^[\ \t>*•#\-]*(?:file|location|path)\s*:"   # File/Location/Path label
+    r"|^[\ \t>*•#\-]*lines?\b[^\n]*\d"                    # a 'Line[s] … <digit>' line
+    r"|[A-Za-z0-9_./\-]+:[ \t]*\d)")                      # or a bare file:line
 
 
 def _extract_labeled(body, label):
