@@ -166,6 +166,17 @@ def test_space_after_colon_finding_does_not_fake_clean():
     assert obj["findings"][0]["line"] == 7
 
 
+def test_markdown_heading_finding_does_not_fake_clean():
+    # Codex round 6: a '### HIGH …' Markdown-heading finding must parse, not
+    # fake a clean SHIP.
+    txt = ("### HIGH (confidence: HIGH) — a.py:7 — auth bypass.\n"
+           "Scenario: unauthenticated request succeeds.\n"
+           "Fix: check auth.\nVerdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "a.py"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

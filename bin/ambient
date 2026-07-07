@@ -3095,7 +3095,16 @@ SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
     re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"
                r"\.[A-Za-z0-9_\-]{6,}"),    # JWT (header.payload.signature)
+    # Azure / ADO.NET connection-string secrets: AccountKey=…==, SharedAccessKey=…
+    re.compile(r"(?i)(?:account|shared[_-]?access|shared)[_-]?(?:key|secret)"
+               r"\s*=\s*['\"]?[A-Za-z0-9+/]{16,}={0,2}"),
 ]
+# SECRET_PATTERNS[0] is the LOOSE labeled pattern (keyword abutting '='); it can
+# match a dotted code reference ('password = user.passwordHash'), so it runs
+# AFTER the code-ref exclusion. Everything else is precise/anchored and runs
+# first, so a real JWT/Azure key is caught even if it also looks code-ref-ish.
+_LOOSE_LABEL_RE = SECRET_PATTERNS[0]
+_PRECISE_SECRET_PATTERNS = SECRET_PATTERNS[1:]
 # Kept OUT of SECRET_PATTERNS: this pattern backtracks quadratically on long
 # lowercase-alnum runs (measured 129s on a 400k-char line — an effective hang
 # on minified/hex blobs). _line_has_secret gates it on
@@ -3148,13 +3157,16 @@ _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
 # code reference — deliberately EXCLUDES '/' (paths) and code brackets.
 _SECRET_VALUE_HINT_RE = re.compile(r"[@#$%^&*!=~]")
 _CODE_VALUE_RE = re.compile(r"[()\[\]{}]")
-# A whole line that is just `name = dotted.attr.reference` is a code
-# expression, not a credential — e.g. `password = user.password_hash` (Codex R4
-# false positive). The dotted segments must be LOWERCASE identifiers so a JWT
-# ('TOKEN=eyJhbGci….eyJzdWIi….sig', mixed-case base64) is NOT cleared as a
-# code ref (Codex R5).
+# A whole line that is just `[keyword…] name = obj.attr.reference[;]` is a code
+# expression, not a credential — e.g. `password = user.password_hash` or
+# `const password = user.passwordHash;` (Codex R4/R6 false positives). Allows a
+# declaration keyword prefix, camelCase attribute segments, and a trailing ';'.
+# Safe against JWT/base64 secrets because those are caught by the PRECISE
+# patterns before this filter runs (see _line_has_secret).
 _CODE_REF_ASSIGN_RE = re.compile(
-    r"^\s*[A-Za-z_]\w*\s*[:=]\s*[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+\s*$")
+    r"^\s*(?:(?:const|let|var|final|val|public|private|protected|static|"
+    r"readonly|self\.|this\.)\s*)*[A-Za-z_][\w.]*\s*[:=]\s*"
+    r"[a-z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+\s*;?\s*$")
 
 
 def _env_assignment_is_secret(line):
@@ -3204,9 +3216,13 @@ SECRET_NAMES_RE = re.compile(
 
 
 def _line_has_secret(line):
+    # Precise/anchored patterns first — a real JWT/Azure/AWS key is a secret
+    # even if the line also reads like a code reference.
+    if any(p.search(line) for p in _PRECISE_SECRET_PATTERNS):
+        return True
     if _CODE_REF_ASSIGN_RE.match(line):
         return False  # `x = a.b.c` is a code reference, never a credential
-    if any(p.search(line) for p in SECRET_PATTERNS):
+    if _LOOSE_LABEL_RE.search(line):
         return True
     if _env_assignment_is_secret(line):
         return True
@@ -6940,7 +6956,7 @@ def findings_reducer(texts):
 # models routinely number findings (Codex round 3). Deliberately EXCLUDES '-'
 # and '+': those are diff markers, and a quoted '+ HIGH (confidence…) — f:1'
 # inside a ```diff block must NOT be parsed as a live finding (Codex round 2).
-_PROSE_LEAD = r"[\ \t>]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
+_PROSE_LEAD = r"[\ \t>#]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
 _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
@@ -6963,7 +6979,7 @@ _PROSE_VERDICT_RE = re.compile(
 # '- HIGH … — f:1 — …' header still trips it → safe raw envelope, never a
 # silent drop.
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)^[\ \t>*•+\-]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
+    r"(?im)^[\ \t>*•+\-#]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
     r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:"
     r"[^\n]*(?::[ \t]*\d[^\n]*[—–\-]|[—–\-][^\n]*:[ \t]*\d)")
 

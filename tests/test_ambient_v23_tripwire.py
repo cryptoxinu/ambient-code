@@ -136,6 +136,25 @@ def test_round5_code_refs_still_clean(line):
     assert amb._line_has_secret(line) is False
 
 
+# --- Codex round 6 ------------------------------------------------------
+@pytest.mark.parametrize("line", [
+    ('"AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=devstore;'
+     'AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;'
+     'EndpointSuffix=core.windows.net"'),
+])
+def test_round6_azure_connection_string_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
+@pytest.mark.parametrize("line", [
+    "const password = user.passwordHash;",      # JS/TS camelCase code ref
+    "this.password = req.body.password;",
+    "self.token = obj.session_token",
+])
+def test_round6_code_refs_not_false_positive(line):
+    assert amb._line_has_secret(line) is False
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="
