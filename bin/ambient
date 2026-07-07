@@ -7034,7 +7034,9 @@ _PROSE_FINDING_RE = re.compile(
     r"(CRITICAL|HIGH|MEDIUM|LOW)\b"                    # 1 severity
     r"(?:[^\n]*?\(?\s*confidence\s*:\s*(HIGH|LOW)\b\)?)?"  # 2 confidence (OPTIONAL)
     r"[^\n]*?[—–\-:,]\s*"                             # sep -> file:line (—/-/:/,)
-    r"([^\s:—–]+?)(?::[ \t]*|[ \t]+lines?[ \t]+|#L?)(\d+)"  # 3 file 4 line (:7 / line 7 / #L7)
+    r"([^\s:—–]+?)"
+    r"(?::[ \t]*|[ \t]+lines?[ \t]+(?:number[ \t]+|no\.?[ \t]+|#)?|#L?)"  # sep
+    r"(\d+)"  # 3 file 4 line (:7 / line 7 / line number 7 / #L7)
     r"\s*[—–\-]\s*"                                   # sep -> title
     r"(.+?)\s*$")                                      # 5 title (rest of line)
 _PROSE_VERDICT_RE = re.compile(
@@ -7058,7 +7060,8 @@ _PROSE_VERDICT_RE = re.compile(
 # file:line ('no HIGH (confidence: HIGH) issues remain') still stays clean.
 _PROSE_SEVERITY_HINT_RE = re.compile(
     r"(?im)^(?=[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b)"
-    r"(?=[^\n]*(?::[ \t]*\d|\blines?[ \t]+\d|#L?\d))[^\n]*$")  # + 'line N' / '#L42'
+    r"(?=[^\n]*(?::[ \t]*\d|\blines?[ \t]+(?:number[ \t]+|no\.?[ \t]+|#)?\d"
+    r"|#L?\d))[^\n]*$")  # severity + file:line / 'line [number] N' / '#L42'
 # A field-LIST finding splits the fields across lines ('Severity: HIGH' /
 # 'Line: 42') — the single-line hint misses it (Codex round 14). A 'Severity:'
 # label naming a real level PLUS a 'Line:' label with a digit is an unparsed

@@ -344,6 +344,16 @@ def test_github_anchor_finding_parses():
     assert o["findings"][0]["file"] == "app/auth.py" and o["findings"][0]["line"] == 42
 
 
+@pytest.mark.parametrize("loc", ["line number 42", "line no. 42", "line no 42", "#L42", "line 42", ":42"])
+def test_all_single_line_fileline_notations_parse(loc):
+    # Codex round 22-24: every file:line notation must parse, not fake clean.
+    sep = "" if loc.startswith(":") else " "
+    o = amb.parse_prose_findings(
+        f"HIGH (confidence: HIGH) — app/auth.py{sep}{loc} — auth bypass.\nVerdict: SHIP\n")
+    assert o is not None and len(o["findings"]) == 1
+    assert o["findings"][0]["line"] == 42
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
