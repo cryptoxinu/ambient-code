@@ -3088,6 +3088,7 @@ SECRET_PATTERNS = [
     re.compile(r"(?i)bearer\s+[A-Za-z0-9_.\-]{20,}"),
     re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/]{20,}={0,2}"),  # HTTP Basic auth
     re.compile(r"(?:github_pat|gh[pousr])_[A-Za-z0-9_]{20,}"),
+    re.compile(r"glpat-[A-Za-z0-9_\-]{20,}"),  # GitLab personal access token
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),
     # Unlabeled high-value creds the label pattern above misses. Both are
@@ -6976,7 +6977,7 @@ _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
     r"(CRITICAL|HIGH|MEDIUM|LOW)\b"                    # 1 severity
-    r"[^\n]*?\(?\s*confidence\s*:\s*(HIGH|LOW)\b\)?"   # 2 confidence (parens opt)
+    r"(?:[^\n]*?\(?\s*confidence\s*:\s*(HIGH|LOW)\b\)?)?"  # 2 confidence (OPTIONAL)
     r"[^\n]*?[—–\-]\s*"                               # sep -> file:line
     r"([^\s:—–]+?):[ \t]*(\d+)"                       # 3 file  4 line (': 7' ok)
     r"\s*[—–\-]\s*"                                   # sep -> title
@@ -7037,7 +7038,9 @@ def parse_prose_findings(text):
         title = title.strip().strip("*").strip().rstrip(".").strip()
         findings.append({
             "severity": sev.upper(),
-            "confidence": conf.upper(),
+            # confidence is optional in the prose (Codex R11); an unstated one
+            # defaults to HIGH — conservative, so it never softens a finding.
+            "confidence": (conf or "HIGH").upper(),
             "file": fname,
             "line": int(line),
             "title": title,

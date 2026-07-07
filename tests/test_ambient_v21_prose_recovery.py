@@ -196,11 +196,14 @@ def test_labeled_heading_finding_does_not_fake_clean():
 
 
 def test_confidence_last_finding_does_not_fake_clean():
-    # Codex round 9: a header with confidence AFTER the file:line must not fake
-    # a clean SHIP (order-independent hint).
+    # Codex round 9/11: a header with confidence AFTER the file:line must not
+    # fake a clean SHIP. Since confidence is now optional in the parser, this
+    # PARSES as a real finding (even better than falling to raw).
     txt = ("HIGH — a.py:7 — auth bypass, unauthenticated access (confidence: HIGH).\n"
            "Verdict: SHIP\n")
-    assert amb.parse_prose_findings(txt) is None
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "a.py"
 
 
 def test_unparenthesized_confidence_finding_does_not_fake_clean():
@@ -212,6 +215,17 @@ def test_unparenthesized_confidence_finding_does_not_fake_clean():
     # the point is it is not silently dropped into a clean SHIP.
     assert obj is not None and len(obj["findings"]) == 1
     assert obj["findings"][0]["file"] == "a.py"
+
+
+def test_finding_without_confidence_parses_not_faked_clean():
+    # Codex round 11: a finding that omits the confidence label entirely must
+    # still parse (not fake a clean SHIP).
+    txt = ("HIGH — a.py:7 — auth bypass lets unauthenticated users read data.\n"
+           "Scenario: x.\nFix: y.\nVerdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "a.py"
+    assert obj["findings"][0]["confidence"] == "HIGH"
 
 
 def test_high_finding_forces_non_ship_verdict():
