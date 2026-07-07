@@ -212,6 +212,19 @@ def test_round13_lowercase_code_refs_still_cleared():
     assert amb._line_has_secret("const password = user.passwordHash;") is False
 
 
+@pytest.mark.parametrize("line", [
+    "account_key = settings.account_key",       # code ref, not Azure key
+    "shared_key = configuration.sharedKey",
+])
+def test_round14_azure_code_refs_not_false_positive(line):
+    assert amb._line_has_secret(line) is False
+
+
+def test_round14_real_account_key_still_caught():
+    assert amb._line_has_secret(
+        "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq==") is True
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="

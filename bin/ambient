@@ -3101,6 +3101,7 @@ SECRET_PATTERNS = [
     # SharedAccessSignature=sv=…&sig=… (a SAS token is a query string).
     re.compile(r"(?i)(?:account|shared[_-]?access|shared)[_-]?"
                r"(?:key|secret|signature)\s*=\s*['\"]?"
+               r"(?=[A-Za-z0-9%+/=&?.\-]*[+/=%&])"   # a real key/SAS, not code
                r"[A-Za-z0-9%+/=&?.\-]{16,}"),
     re.compile(r"(?i)[?&]sig=[A-Za-z0-9%+/]{16,}"),  # a SAS signature parameter
 ]
@@ -7015,6 +7016,13 @@ _PROSE_VERDICT_RE = re.compile(
 _PROSE_SEVERITY_HINT_RE = re.compile(
     r"(?im)^(?=[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b)"
     r"(?=[^\n]*:[ \t]*\d)[^\n]*$")  # severity + file:line (confidence now optional)
+# A field-LIST finding splits the fields across lines ('Severity: HIGH' /
+# 'Line: 42') — the single-line hint misses it (Codex round 14). A 'Severity:'
+# label naming a real level PLUS a 'Line:' label with a digit is an unparsed
+# finding → must not fake a clean SHIP.
+_PROSE_FIELD_SEV_RE = re.compile(
+    r"(?im)^[\ \t>*•#\-]*severity\s*:?\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
+_PROSE_FIELD_LINE_RE = re.compile(r"(?im)^[\ \t>*•#\-]*line\s*:?\s*\d")
 
 
 def _extract_labeled(body, label):
@@ -7068,7 +7076,9 @@ def parse_prose_findings(text):
         # real recoverable result. But if the text DID contain finding-shaped
         # lines we simply failed to parse, that's an unrecoverable parse — never
         # fake a clean verdict; fall through to the raw-text envelope.
-        if _PROSE_SEVERITY_HINT_RE.search(text):
+        if _PROSE_SEVERITY_HINT_RE.search(text) or (
+                _PROSE_FIELD_SEV_RE.search(text)
+                and _PROSE_FIELD_LINE_RE.search(text)):
             return None
         return {"findings": [], "verdict": vlast} if vlast else None
     return {"findings": findings, "verdict": vlast or _verdict_from(findings, False)}

@@ -251,6 +251,14 @@ def test_no_confidence_labeled_findings_do_not_fake_clean(txt):
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_fieldlist_multiline_finding_does_not_fake_clean():
+    # Codex round 14: a field-list finding (Severity:/File:/Line: on separate
+    # lines) must not fake a clean SHIP.
+    txt = ("Finding 1:\nSeverity: HIGH\nConfidence: HIGH\nFile: app/auth.py\n"
+           "Line: 42\nDefect: auth bypass.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
