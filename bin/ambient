@@ -1398,6 +1398,18 @@ def adaptive_response_format(model, profile, schema):
     return response_format_for(profile, schema)
 
 
+def downgrade_response_format(rf, profile):
+    """The next-looser structured-output demand after `rf` failed: strict
+    json_schema -> json_object (when the model supports it) -> None
+    (prompt-only). A model that ignores a strict schema often complies with a
+    looser ask, so a build/plan retry steps DOWN the ladder instead of
+    re-sending the same doomed request."""
+    if (rf and rf.get("type") == "json_schema"
+            and "json_mode" in (getattr(profile, "features", None) or [])):
+        return {"type": "json_object"}
+    return None
+
+
 def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     """(expected, bound, assumed) dollar estimates for a run. `bound` assumes
     every call emits its FULL max_tokens budget (the old, 10-30x-pessimistic
@@ -9253,10 +9265,15 @@ def cmd_build(args, api_key, api_url, conf):
 
     # ---- PHASE 1: PLAN (one cheap call) ------------------------------------
     if state is None:
-        rf = response_format_for(profile, BUILD_PLAN_SCHEMA)
-        pa, extra = _ns_with(
-            rf, "" if (rf and rf.get("type") == "json_schema")
-            else BUILD_JSON_INSTRUCTION_PLAN)
+        # A model that has repeatedly failed to produce a usable build plan
+        # gets an honest heads-up up front — never a silent model swap (choice
+        # is sacred). We name the reliable model and keep going on theirs.
+        if cap_state(model, "build_plan") == "unreliable":
+            print(f"ambient: note — {model} has struggled to produce a usable "
+                  f"build plan before; {DEFAULT_CODE_MODEL} is reliable for "
+                  f"builds (re-run with -m {DEFAULT_CODE_MODEL} to switch). "
+                  "Trying your model anyway.", file=sys.stderr)
+        rf = adaptive_response_format(model, profile, BUILD_PLAN_SCHEMA)
         user = f"TASK: {task}"
         if context:
             user += f"\n\nContext files:\n\n{context}"
@@ -9264,7 +9281,14 @@ def cmd_build(args, api_key, api_url, conf):
         # ceiling across BOTH phases, not just generation.
         cost_gate(catalog, model, len(task) + len(context), 1, args, conf)
         obj = None
-        for attempt in (1, 2):
+        # Adaptive ladder: each attempt DOWNGRADES the structured-output demand
+        # (strict json_schema -> json_object -> prompt-only) rather than
+        # re-sending the same doomed request the model already ignored.
+        attempts = [rf, downgrade_response_format(rf, profile)]
+        for attempt, attempt_rf in enumerate(attempts, 1):
+            pa, extra = _ns_with(
+                attempt_rf, "" if (attempt_rf and attempt_rf.get("type") == "json_schema")
+                else BUILD_JSON_INSTRUCTION_PLAN)
             try:
                 content, _u, _b = complete(
                     api_key, api_url, model,
@@ -9278,14 +9302,20 @@ def cmd_build(args, api_key, api_url, conf):
             obj = extract_json(content)
             if obj and isinstance(obj.get("plan"), list) and obj["plan"]:
                 break
-            if attempt == 1:
-                print("ambient: plan reply wasn't valid JSON — asking once "
-                      "more", file=sys.stderr)
+            if attempt < len(attempts):
+                print("ambient: plan reply wasn't valid JSON — retrying with a "
+                      "looser output format", file=sys.stderr)
                 user += ("\n\nREMINDER: return ONLY the JSON object, no prose, "
                          "no fences.")
-        if not obj or not isinstance(obj.get("plan"), list) or not obj["plan"]:
-            pmsg = ("the model did not produce a usable build plan "
-                    "— try rephrasing the task or another model (-m)")
+        ok_plan = bool(obj and isinstance(obj.get("plan"), list) and obj["plan"])
+        # Learn whether this model can drive a structured build plan, so the
+        # next build on it starts with the heads-up above instead of a wall.
+        record_cap(model, "build_plan", ok_plan)
+        if not ok_plan:
+            pmsg = (f"{model} did not produce a usable build plan even after "
+                    "loosening the output format — it may not support "
+                    f"structured build output. Try -m {DEFAULT_CODE_MODEL} "
+                    "(reliable for builds), or rephrase the task.")
             if _json_mode(args):
                 emit_json_error("build", "model", pmsg, api_key)
             sys.exit(f"ambient: {pmsg}")
