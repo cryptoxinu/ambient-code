@@ -274,6 +274,13 @@ def test_fieldlist_location_line_word_does_not_fake_clean():
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_fieldlist_plural_lines_range_does_not_fake_clean():
+    # Codex round 17: 'Location: app/auth.py lines 42-45' (plural, range).
+    txt = ("Finding:\nSeverity: HIGH\nLocation: app/auth.py lines 42-45\n"
+           "Defect: bug.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

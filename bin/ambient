@@ -3186,6 +3186,12 @@ _PUBLIC_KEY_IDENT_RE = re.compile(r"(?i)(^|_)PUBLIC_KEY$")
 # A high-entropy key value: 20+ base64/hex chars. Pure lowercase-hex (a git SHA
 # / hash) and dashed UUIDs are excluded — they aren't credentials (Codex).
 _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
+# A value that is a pure variable interpolation ($VAR / ${VAR} / %VAR% / #{...}
+# / $(...)) is a passthrough reference, not a literal secret (Codex round 17:
+# 'DB_PASSWORD=${DB_PASSWORD}' is weekly deployment config).
+_ENV_INTERP_RE = re.compile(
+    r"^(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_][A-Za-z0-9_]*%"
+    r"|#\{[^}\n]*\}|\$\([^)\n]*\))$")
 # Secret-ish punctuation in a value marks it a literal credential rather than a
 # code reference — deliberately EXCLUDES '/' (paths) and code brackets.
 _SECRET_VALUE_HINT_RE = re.compile(r"[@#$%^&*!=~]")
@@ -3240,6 +3246,8 @@ def _env_assignment_is_secret(line):
             quoted = bool(m.group(1)) or bool(m.group(3))
             if len(val) < 8:
                 continue
+            if _ENV_INTERP_RE.match(val):
+                continue  # a variable passthrough ($VAR/${VAR}), not a literal
             if _env_is_strong(ident):
                 # An ALL-CAPS env var or a quoted key/value is a literal secret
                 # regardless of punctuation (a real password CAN contain '(').
@@ -7055,8 +7063,8 @@ _PROSE_FIELD_SEV_RE = re.compile(
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
 _PROSE_FIELD_LINE_RE = re.compile(
-    r"(?im)(?:^[\ \t>*•#\-]*(?:line|file|location|path)\b[^\n]*?\bline[ \t]*\d"
-    r"|^[\ \t>*•#\-]*(?:line|file|location|path)\s*:?\s*\S*:?[ \t]*\d"
+    r"(?im)(?:^[\ \t>*•#\-]*(?:lines?|file|location|path)\b[^\n]*?\blines?[ \t]*\d"
+    r"|^[\ \t>*•#\-]*(?:lines?|file|location|path)\s*:?\s*\S*:?[ \t]*\d"
     r"|[A-Za-z0-9_./\-]+:[ \t]*\d)")
 
 

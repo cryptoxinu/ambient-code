@@ -264,6 +264,16 @@ def test_round16_real_env_secrets_still_caught(line):
     assert amb._line_has_secret(line) is True
 
 
+@pytest.mark.parametrize("line", [
+    "DB_PASSWORD=$DB_PASSWORD",                  # shell passthrough
+    "DB_PASSWORD=${DB_PASSWORD}",
+    "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}",   # docker-compose
+    "API_TOKEN=%API_TOKEN%",                     # windows
+])
+def test_round17_variable_passthrough_not_false_positive(line):
+    assert amb._line_has_secret(line) is False
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="
