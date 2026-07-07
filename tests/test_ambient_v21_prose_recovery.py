@@ -402,6 +402,20 @@ def test_benign_table_without_severity_stays_clean():
     assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
 
 
+@pytest.mark.parametrize("sev,want", [("HIGH", "FIX FIRST"), ("CRITICAL", "FIX FIRST"),
+                                       ("MEDIUM", "NEEDS WORK"), ("LOW", "NEEDS WORK")])
+def test_any_finding_overrides_ship_verdict(sev, want):
+    # Codex round 28: a SHIP verdict can't coexist with ANY finding.
+    import io, contextlib, json as _j
+    raw = _j.dumps({"findings": [{"severity": sev, "confidence": "HIGH", "file": "a.py",
+                                  "line": 1, "title": "x", "defect": "d",
+                                  "scenario": "s", "fix": "f"}], "verdict": "SHIP"})
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    assert _j.loads(buf.getvalue())["verdict"] == want
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

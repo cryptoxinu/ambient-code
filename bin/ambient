@@ -7217,13 +7217,13 @@ def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
     verdict = obj.get("verdict") or _verdict_from(findings, partial)
     if partial and verdict == "SHIP":  # a partial audit can never be a clean pass
         verdict = "NEEDS WORK"
-    # A model-stated SHIP can't coexist with a HIGH/CRITICAL finding (Codex
-    # round 2): a self-contradicting reply must not let the pre-commit hook
-    # wave through a real defect — force a non-clean verdict.
-    if verdict == "SHIP" and any(
+    # A model-stated SHIP can't coexist with ANY finding (Codex round 2 + 28): a
+    # self-contradicting reply must not let the pre-commit hook wave through a
+    # real defect. HIGH/CRITICAL => FIX FIRST; any MEDIUM/LOW => NEEDS WORK.
+    if verdict == "SHIP" and findings:
+        verdict = "FIX FIRST" if any(
             isinstance(f, dict) and f.get("severity") in ("CRITICAL", "HIGH")
-            for f in findings):
-        verdict = "FIX FIRST"
+            for f in findings) else "NEEDS WORK"
     if fmt == "json":
         extra = {"coverage_complete": not partial}
         if recovered_from_prose:
