@@ -1443,6 +1443,15 @@ def record_cap(model, dim, ok):
                 os.close(lock_fd)
             except OSError:
                 pass
+            if fcntl is None:
+                # The O_EXCL fallback lock is a real file — unlink it on release
+                # or the NEXT writer's O_EXCL fails for 30s and falls to the
+                # unlocked path (Codex round 3, Windows lost-update window).
+                try:
+                    os.unlink(os.path.join(os.path.dirname(CAPABILITY_PATH),
+                                           ".caps.lock"))
+                except OSError:
+                    pass
 
 
 def adaptive_response_format(model, profile, schema):
@@ -3124,29 +3133,62 @@ CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{6,}@")
 #     (20+ base64/hex run) and a genuine *_PUBLIC_KEY is exempt.
 # Anchored + linear-time ('_' is a hard delimiter so the quantifiers can't
 # overlap).
+# Matches KEY[:=]VALUE in env / JSON / YAML shapes, any case, with optional
+# matching quotes around the key ("AWS_SECRET_ACCESS_KEY": "…") and an optional
+# opening quote on the value. Group 1 = key quote (or ''), 2 = identifier,
+# 3 = value quote (or ''), 4 = value.
 ENV_ASSIGN_RE = re.compile(
-    r"^[ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]*[A-Z0-9])[ \t]*[:=]"
-    r"[ \t]*['\"]?([^\s'\"]*)")
-_ENV_STRONG_RE = re.compile(
-    r"(^|_)(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY)(_|$)")
-_ENV_KEY_TAIL_RE = re.compile(r"(^|_)KEY$")
-_PUBLIC_KEY_IDENT_RE = re.compile(r"(^|_)PUBLIC_KEY$")
+    r"(?:^|[\{,\s])(['\"]?)(?:export[ \t]+)?"
+    r"([A-Za-z][A-Za-z0-9_]*[A-Za-z0-9])\1?"
+    r"[ \t]*[:=][ \t]*(['\"]?)([^\s'\"]*)")
+# A credential keyword as a full snake_case/UPPER component (db_password,
+# AWS_SECRET_ACCESS_KEY) OR as a camelCase token (DbPassword) — but NOT buried
+# in a longer lowercase word (Tokenizer must not read as TOKEN — Codex round 3).
+_ENV_STRONG_COMPONENT_RE = re.compile(
+    r"(?i)(^|_)(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY)(_|$)")
+_ENV_STRONG_CAMEL_RE = re.compile(
+    r"(?:Secret|Token|Password|Passwd|Credential|Credentials|ApiKey)(?![a-z])")
+
+
+def _env_is_strong(ident):
+    return bool(_ENV_STRONG_COMPONENT_RE.search(ident)
+                or _ENV_STRONG_CAMEL_RE.search(ident))
+# An ambiguous *_KEY trips only when a SENSITIVE component precedes KEY (schema
+# columns like PRIMARY_KEY/FOREIGN_KEY/CACHE_KEY are NOT secrets — Codex).
+_ENV_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(^|_)(ACCESS|PRIVATE|ENCRYPT|ENCRYPTION|SIGN|SIGNING|AUTH|SESSION|"
+    r"CLIENT|MASTER|ROOT|APP|SERVICE)_KEY$")
+_PUBLIC_KEY_IDENT_RE = re.compile(r"(?i)(^|_)PUBLIC_KEY$")
+# A high-entropy key value: 20+ base64/hex chars. Pure lowercase-hex (a git SHA
+# / hash) and dashed UUIDs are excluded — they aren't credentials (Codex).
 _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
+_HEX_ONLY_RE = re.compile(r"[0-9a-f]+$")
+# Secret-ish punctuation in a value marks it a literal credential rather than a
+# code reference — deliberately EXCLUDES '/' (paths) and code brackets.
+_SECRET_VALUE_HINT_RE = re.compile(r"[@#$%^&*!=~]")
+_CODE_VALUE_RE = re.compile(r"[()\[\]{}]")
 
 
 def _env_assignment_is_secret(line):
-    """True if `line` is an env-style assignment whose identifier + value read
-    as a real credential (see ENV_ASSIGN_RE commentary)."""
+    """True if `line` assigns a real credential to a credential-named key, in
+    env / JSON / YAML shape, any case (see ENV_ASSIGN_RE). A code reference
+    (`password = get_input()`, `foreign_key = other.id`) is NOT a secret."""
     m = ENV_ASSIGN_RE.search(line)
     if not m:
         return False
-    ident, val = m.group(1), m.group(2)
-    if _ENV_STRONG_RE.search(ident):
-        return len(val) >= 8                      # strong name → any real value
-    if _ENV_KEY_TAIL_RE.search(ident):
-        if _PUBLIC_KEY_IDENT_RE.search(ident):
-            return False                          # a genuine public key
-        return bool(_ENV_HIGH_ENTROPY_RE.match(val))  # only a high-entropy key
+    ident, val = m.group(2), m.group(4)
+    quoted_key, quoted_val = bool(m.group(1)), bool(m.group(3))
+    if len(val) < 8 or _CODE_VALUE_RE.search(val):
+        return False                              # too short, or a code expr
+    if _env_is_strong(ident):
+        # A literal secret if the name is an ALL-CAPS env var, the key/value is
+        # quoted (JSON/YAML/config), or the value carries secret-ish
+        # punctuation — but not a bare lowercase code assignment.
+        return (ident.isupper() or quoted_key or quoted_val
+                or bool(_SECRET_VALUE_HINT_RE.search(val)))
+    if _ENV_SENSITIVE_KEY_RE.search(ident) \
+            and not _PUBLIC_KEY_IDENT_RE.search(ident):
+        return bool(_ENV_HIGH_ENTROPY_RE.match(val)) and not _HEX_ONLY_RE.match(val)
     return False
 # Credential-named files refused regardless of content (the
 # old check missed .envrc/.netrc/.npmrc/.pgpass/id_rsa/*.pem/credentials.json).
@@ -3195,11 +3237,11 @@ def refuse_if_secrets(labeled_chunks, allow):
             # segments — attacker-crafted content can embed a second fake gutter
             # ("1| 12| SECRET=…") to survive a single strip — and report the
             # first (true) absolute line number.
-            first = re.match(r"^ *(\d+)\| ?", line)
+            first = re.match(r"^[ \t]*(\d+)\| ?", line)
             disp = int(first.group(1)) if first else lineno
             scan_line = line
-            while True:
-                stripped = re.sub(r"^ *\d+\| ?", "", scan_line, count=1)
+            while True:  # strip ALL leading gutter layers (space- OR tab-indented)
+                stripped = re.sub(r"^[ \t]*\d+\| ?", "", scan_line, count=1)
                 if stripped == scan_line:
                     break
                 scan_line = stripped
@@ -6887,12 +6929,11 @@ def findings_reducer(texts):
 # model that follows the prose spec (even one that ignores the JSON schema, like
 # GLM 5.2 on Ambient) still produces recoverable structured findings.
 # Leading noise a finding/verdict line may carry: whitespace, blockquote,
-# markdown bold, and '*'/'•' bullets. Deliberately EXCLUDES '-' and '+': those
-# are diff markers, and a quoted '+ HIGH (confidence…) — f:1' inside a ```diff
-# block must NOT be parsed as a live finding (Codex round 2). A genuinely
-# bulleted '- HIGH …' header simply falls to the raw envelope via the
-# severity-hint guard below — safe, never a silent drop.
-_PROSE_LEAD = r"[\ \t>*•]*"
+# markdown bold, '*'/'•' bullets, and a numbered-list marker (1. / 2) / (3)) —
+# models routinely number findings (Codex round 3). Deliberately EXCLUDES '-'
+# and '+': those are diff markers, and a quoted '+ HIGH (confidence…) — f:1'
+# inside a ```diff block must NOT be parsed as a live finding (Codex round 2).
+_PROSE_LEAD = r"[\ \t>]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
 _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
@@ -6906,16 +6947,18 @@ _PROSE_VERDICT_RE = re.compile(
     r"(?im)^" + _PROSE_LEAD + r"verdict\b\s*[:\-—]?\s*\**\s*"
     r"(SHIP|FIX FIRST|NEEDS WORK)\b")
 # A genuine finding HEADER we failed to fully parse: a line that STARTS with a
-# severity (after any bullet/diff/blockquote lead — BROADER than the finding
-# regex, so a '- '/'+ ' header the finding regex skipped is still recognized),
-# carries a (confidence: …), AND a file:line (":<digit>"). Used to avoid
-# mistaking a partial parse for a clean "no defects" verdict. It must NOT fire
-# on prose like "no HIGH (confidence: HIGH) issues remain" — that line does not
-# START with a severity and has no file:line, so it stays a real clean SHIP
-# (Codex round 2 false-rejection).
+# severity (after any bullet/diff/number/blockquote lead — BROADER than the
+# finding regex, so a '- '/'+ ' header it skipped is still recognized), carries
+# a (confidence: …), a dash separator, AND a file:line (":<digit>"). The dash
+# requirement is what keeps it off clean prose that merely QUOTES an example
+# ("HIGH (confidence: HIGH) at foo.py:1 means …" has no '—' before the
+# file:line, so it stays a real clean SHIP — Codex round 3), while a real
+# '- HIGH … — f:1 — …' header still trips it → safe raw envelope, never a
+# silent drop.
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)^[\ \t>*•+\-]*"
-    r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:[^\n]*:\d")
+    r"(?im)^[\ \t>*•+\-]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
+    r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:"
+    r"[^\n]*[—–\-][^\n]*:\d")
 
 
 def _extract_labeled(body, label):
@@ -9518,9 +9561,11 @@ def cmd_build(args, api_key, api_url, conf):
                 # is worth downgrading for. Every other category — rate, model,
                 # context, budget, key, funds, network, service — won't improve
                 # on a looser rung, so abort now and surface the real cause
-                # instead of a misleading 'no usable plan' (Codex round 2).
+                # instead of a misleading 'no usable plan' (Codex round 2). We do
+                # NOT record a capability outcome here: an infra failure (rate/
+                # outage/funds/network) is NOT the model failing to plan, and
+                # recording False would wrongly mark it unreliable (Codex round 3).
                 if err.category != "unknown" or attempt == len(attempts):
-                    record_cap(served_model, "build_plan", False)
                     _fail(args, "build",
                           ChatError(err.category,
                                     f"planning failed — {err.diagnosis}"),

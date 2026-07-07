@@ -96,7 +96,7 @@ def test_bulleted_finding_header_falls_to_raw_not_faked_clean():
 def test_unparsable_finding_lines_do_not_fake_clean_verdict():
     # A finding-shaped header (severity + confidence + file:line) we CAN'T fully
     # parse must NOT be reported as a clean SHIP with zero findings.
-    txt = ("HIGH (confidence: HIGH) at a.py:42 malformed, no proper markers\n"
+    txt = ("HIGH (confidence: HIGH) — a.py:42 malformed, missing 2nd separator\n"
            "Verdict: SHIP\n")
     assert amb.parse_prose_findings(txt) is None
 
@@ -125,6 +125,26 @@ def test_diff_plus_line_is_not_parsed_as_finding():
            "```\nVerdict: SHIP\n")
     obj = amb.parse_prose_findings(txt)
     assert obj is None or len(obj["findings"]) == 0
+
+
+def test_numbered_finding_is_parsed_not_faked_clean():
+    # Codex round 3: '1. HIGH …' numbered findings were dropped, then faked a
+    # clean SHIP. They must now parse as real findings.
+    txt = ("1. HIGH (confidence: HIGH) — a.py:1 — auth bypass.\n"
+           "Scenario: x.\nFix: y.\nVerdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "a.py"
+
+
+def test_clean_audit_quoting_example_format_is_not_rejected():
+    # Codex round 3: a clean SHIP that QUOTES an example finding format (no dash
+    # before the file:line) must stay clean, not fall to raw.
+    txt = ("No defects found. Example finding format:\n"
+           "  HIGH (confidence: HIGH) at foo.py:1 means a real issue.\n"
+           "Verdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
 
 
 def test_high_finding_forces_non_ship_verdict():

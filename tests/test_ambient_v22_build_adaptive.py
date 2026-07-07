@@ -210,6 +210,9 @@ def test_rate_limit_aborts_immediately_not_downgrade():
     assert code == 1 and len(calls) == 1
     env = json.loads(out)
     assert env["category"] == "rate"          # surfaces the REAL cause
+    # Codex round 3: an infra failure must NOT poison the model's build_plan
+    # capability (it isn't the model failing to plan).
+    assert amb.cap_state("m", "build_plan") == "unknown"
 
 
 def test_malformed_completion_meta_does_not_crash():

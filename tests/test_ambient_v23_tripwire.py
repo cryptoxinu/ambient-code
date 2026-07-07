@@ -74,6 +74,38 @@ def test_codex_bypasses_now_caught(line):
     assert amb._line_has_secret(line) is True
 
 
+# --- Codex round 3: JSON / lowercase / tab-gutter / hash-FP -------------
+@pytest.mark.parametrize("line", [
+    '{"AWS_SECRET_ACCESS_KEY":"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}',
+    '{"password":"p@ssw0rd!"}',
+    "db_password=p@ssw0rd!",
+    "DbPassword=p@ssw0rd!",
+    'password: "p@ssw0rd!"',
+])
+def test_round3_secret_shapes_are_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
+@pytest.mark.parametrize("line", [
+    "CACHE_KEY=0123456789abcdef0123456789abcdef01234567",  # git SHA, not a key
+    "CACHE_KEY=550e8400e29b41d4a716446655440000",          # compact UUID
+    "password = get_input()",                               # code, not a literal
+    "foreign_key = other_table.id",                         # code reference
+    "sort_key = compute(x)",
+])
+def test_round3_false_positives_do_not_trip(line):
+    assert amb._line_has_secret(line) is False
+
+
+def test_tab_gutter_bypass_blocked(capsys):
+    # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
+    chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="
+                        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY\n")]
+    with pytest.raises(SystemExit) as ei:
+        amb.refuse_if_secrets(chunks, allow=False)
+    assert "x.txt" in (str(ei.value.code) + capsys.readouterr().err)
+
+
 def test_real_public_key_still_excluded():
     # a genuine *_PUBLIC_KEY trailing component is still not a secret
     assert amb._line_has_secret(f"RSA_PUBLIC_KEY={_HI}") is False
