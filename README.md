@@ -30,7 +30,7 @@ Ambient support pointer), and finishes with a command showcase. Key entry happen
 
 ## The three moves
 
-**1. Pre-commit second opinion, for about a penny**
+**1. Pre-commit second opinion, cheap enough to run on every commit**
 
 ```bash
 git diff | ambient audit            # independent adversarial review of your changes
