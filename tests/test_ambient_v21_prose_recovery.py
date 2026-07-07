@@ -316,6 +316,13 @@ def test_dash_separated_fieldlist_does_not_fake_clean():
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_dash_bulleted_fieldlist_does_not_fake_clean():
+    # Codex round 21: a '- ' dash-bulleted field-list finding.
+    txt = ("Finding 1:\n- Severity: HIGH\n- Confidence: HIGH\n- File: app/auth.py\n"
+           "- Line: 42\n- Defect: auth bypass.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
