@@ -381,6 +381,14 @@ def test_fieldlist_root_fix_keeps_clean_audits_clean(txt):
     assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
 
 
+@pytest.mark.parametrize("pre", ["", "1. ", "2) ", "- ", "* ", "**", "### "])
+def test_severity_label_any_prefix_does_not_fake_clean(pre):
+    # ROOT fix + round 26: a 'Severity: <level>' field label with ANY prefix
+    # (numbered/bulleted/bold/heading) marks a finding -> raw, never fake clean.
+    txt = f"Finding:\n{pre}Severity: HIGH\nFile: a.py\nLine: 42\nVerdict: SHIP\n"
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

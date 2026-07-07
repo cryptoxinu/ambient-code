@@ -7067,7 +7067,7 @@ _PROSE_SEVERITY_HINT_RE = re.compile(
 # label naming a real level PLUS a 'Line:' label with a digit is an unparsed
 # finding → must not fake a clean SHIP.
 _PROSE_FIELD_SEV_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*\**severity\**\s*[:—–\-]?\**\s*"  # bold '**Severity:**' ok
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\**severity\**\s*[:—–\-]?\**\s*"  # '1. **Severity:**'
     r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
