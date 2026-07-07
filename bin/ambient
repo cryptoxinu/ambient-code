@@ -3095,8 +3095,8 @@ SECRET_PATTERNS = [
     # tightly anchored (fixed prefix + separators) so they stay linear on long
     # lines and carry a low false-positive rate.
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
-    re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"
-               r"\.[A-Za-z0-9_\-]{6,}"),    # JWT (header.payload.signature)
+    re.compile(r"eyJ[A-Za-z0-9_\-]{10,2000}\.eyJ[A-Za-z0-9_\-]{10,3000}"
+               r"\.[A-Za-z0-9_\-]{6,2000}"),  # JWT (header.payload.signature), bounded
     # Azure / ADO.NET connection-string secrets: AccountKey=…==, SharedAccessKey=…,
     # SharedAccessSignature=sv=…&sig=… (a SAS token is a query string).
     re.compile(r"(?i)(?:account|shared[_-]?access|shared)[_-]?"
@@ -3287,15 +3287,21 @@ SECRET_NAMES_RE = re.compile(
 
 
 def _line_has_secret(line):
+    # Bound the regex scan for the label/precise patterns to a real secret's
+    # length — a credential is short, and scanning an unbounded minified/blob
+    # line risks super-linear backtracking (Workflow: a 90k 'eyJ'-run took 2.2s).
+    # The URL window below stays on the FULL line (it is already linear via fixed
+    # windows and must catch a cred after many benign URLs).
+    scan = line if len(line) <= SIG_SCAN_LINE_MAX else line[:SIG_SCAN_LINE_MAX]
     # Precise/anchored patterns first — a real JWT/Azure/AWS key is a secret
     # even if the line also reads like a code reference.
-    if any(p.search(line) for p in _PRECISE_SECRET_PATTERNS):
+    if any(p.search(scan) for p in _PRECISE_SECRET_PATTERNS):
         return True
-    if _CODE_REF_ASSIGN_RE.match(line) or _ENV_CODE_VALUE_RE.search(line):
+    if _CODE_REF_ASSIGN_RE.match(scan) or _ENV_CODE_VALUE_RE.search(scan):
         return False  # `x = a.b.c` / `X = getenv(...)` is code, not a credential
-    if _LOOSE_LABEL_RE.search(line) and not _LOOSE_CODE_VALUE_RE.search(line):
+    if _LOOSE_LABEL_RE.search(scan) and not _LOOSE_CODE_VALUE_RE.search(scan):
         return True  # labeled secret, but not a bare code call/reference value
-    if _env_assignment_is_secret(line):
+    if _env_assignment_is_secret(scan):
         return True
     if "://" not in line:
         return False
@@ -7028,19 +7034,27 @@ def findings_reducer(texts):
 # and '+': those are diff markers, and a quoted '+ HIGH (confidence…) — f:1'
 # inside a ```diff block must NOT be parsed as a live finding (Codex round 2).
 _PROSE_LEAD = r"[\ \t>#]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
+# A FILE-LIKE file:line — the token before the colon must contain a '.' or '/'
+# (a real path like 'auth.py:42' or 'src/auth.py:42'), distinguishing it from a
+# plain 'coverage: 100%' / 'Line: 42' a clean audit writes (Workflow false
+# positives). Lookbehind-anchored to the token start and bounded so scanning is
+# LINEAR (an unbounded '+' before ':' is O(n^2) under search-restart — ReDoS).
+_PROSE_FILELINE = (r"(?<![A-Za-z0-9_./\-])"
+                   r"(?:[A-Za-z0-9_\-]{1,80}[./]){1,40}[A-Za-z0-9_.\-]{0,80}"
+                   r":[ \t]*\d")
 _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
-    r"(CRITICAL|HIGH|MEDIUM|LOW)\b"                    # 1 severity
-    r"(?:[^\n]*?\(?\s*confidence\s*:\s*(HIGH|LOW)\b\)?)?"  # 2 confidence (OPTIONAL)
-    r"[^\n]*?[—–\-:,]\s*"                             # sep -> file:line (—/-/:/,)
-    r"([^\s:—–]+?)"
+    r"(CRITICAL|HIGH|MEDIUM|LOW)(?![a-z\-])"           # 1 severity (not 'LOW-risk')
+    r"(?:[^\n]{0,400}?\(?\s*confidence\s*:\s*(HIGH|LOW)\b\)?)?"  # 2 confidence (OPTIONAL)
+    r"[^\n]{0,400}?[—–\-:,]\s*"                       # sep -> file:line (—/-/:/,)
+    r"([^\s:—–]{1,300}?)"
     # file:line separator — every common notation in one alternation:
     # ':7', ':L7', '#7', '#L7', ' L7', ' line 7', ' line number 7'
     r"(?:[:#][ \t]*L?[ \t]*|[ \t]+L|[ \t]+lines?[ \t]+(?:number[ \t]+|no\.?[ \t]+|#)?)"
-    r"(\d+)"  # 3 file 4 line
+    r"(\d+)(?![-\d])"  # 3 file 4 line (single line, not a '12-88' range)
     r"\s*[—–\-]\s*"                                   # sep -> title
-    r"(.+?)\s*$")                                      # 5 title (rest of line)
+    r"(.{1,2000}?)\s*$")                              # 5 title (rest of line)
 _PROSE_VERDICT_RE = re.compile(
     r"(?im)^" + _PROSE_LEAD + r"verdict\b\s*[:\-—]?\s*\**\s*"
     r"(SHIP|FIX FIRST|NEEDS WORK)\b")
@@ -7061,9 +7075,10 @@ _PROSE_VERDICT_RE = re.compile(
 # real defect behind a clean SHIP. Clean prose that names a severity with NO
 # file:line ('no HIGH (confidence: HIGH) issues remain') still stays clean.
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)^(?=[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b)"
-    r"(?=[^\n]*(?:[:#][ \t]*L?[ \t]*\d|[ \t]L\d"
-    r"|\blines?[ \t]+(?:number[ \t]+|no\.?[ \t]+|#)?\d))[^\n]*$")  # severity + any file:line
+    r"(?im)^(?=[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)(?![a-z\-]))"  # standalone severity
+    r"(?=[^\n]*(?:" + _PROSE_FILELINE +                          # a FILE-LIKE file:line
+    r"|(?:[A-Za-z0-9_.\-]{1,80})?[#][ \t]*L?[ \t]*\d"            # or file#L42
+    r"|\blines?[ \t]+(?:number[ \t]+|no\.?[ \t]+|#)?\d))[^\n]*$")  # or 'line N'
 # A field-LIST finding splits the fields across lines ('Severity: HIGH' /
 # 'Line: 42') — the single-line hint misses it (Codex round 14). A 'Severity:'
 # label naming a real level PLUS a 'Line:' label with a digit is an unparsed
@@ -7091,18 +7106,22 @@ _PROSE_DEFECT_FIELD_RE = re.compile(
     r"(?im)^[\ \t>*•#\-]*\**(?:defect|vulnerabilit(?:y|ies)|weakness|flaw|exploit"
     r"|scenario|impact|remediation|reproduction|steps\ to\ reproduce)"
     r"\**\s*[:—–\-]\s*\S")
-# A 'Finding/Issue/Bug:' heading LINE (any content) — anchored, linear.
+# A NUMBERED 'Finding 1:' / 'Issue #3:' heading LINE — the number distinguishes a
+# specific finding from a clean 'Findings: none' summary. Anchored, linear.
 _PROSE_FINDING_HEAD_LINE_RE = re.compile(
     r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\**"
-    r"(?:finding|issue|bug|vulnerability|defect|weakness)s?\b[ \t]*\d*[ \t]*[:—–\-]")
+    r"(?:finding|issue|bug|vulnerability|defect|weakness)s?[ \t]*#?[ \t]*\d+[ \t]*[:—–\-]")
+# A bare severity level in parentheses ('(CRITICAL)') — a finding annotation.
+_PROSE_PAREN_SEV_RE = re.compile(r"(?i)\(\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\)")
+_PROSE_ANY_SEV_RE = re.compile(r"(?i)\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
+# A location FIELD LABEL only (not a bare file:line) — 'Location:'/'File:'/'Path:'
+# at line start. Paired with a file-like file:line it marks a finding; a clean
+# 'reviewed config.py:12' with NO label does not (Workflow false positive).
+_PROSE_LOC_LABEL_RE = re.compile(
+    r"(?im)^[\ \t>*•#\-]*\**(?:file|location|path|affected\s+file|source)\**"
+    r"\s*[:—–\-]")
 # A bare file:line reference (word:digit) — a single quantifier, linear.
-# Path-run bounded (real path length) AND anchored with a lookbehind to the
-# START of a path token, so 'word:digit' scanning is LINEAR with a small
-# constant — an unbounded '+' before ':', or a bound without the anchor,
-# restarts at every position and is O(n^2)/O(300n) on a crafted 'a/a/…/a:x'
-# line (ReDoS caught by the perf test).
-_PROSE_BARE_FILELINE_RE = re.compile(
-    r"(?im)(?<![A-Za-z0-9_./\-])[A-Za-z0-9_./\-]{1,300}:[ \t]*\d")
+_PROSE_BARE_FILELINE_RE = re.compile(r"(?im)" + _PROSE_FILELINE)
 _PROSE_FILE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**file\**\s*[:—–\-]")
 _PROSE_LINE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**lines?\**\s*[:—–\-]?[ \t]*\d")
 # Defensive cap on how much prose we scan: an audit response with findings has
@@ -7111,19 +7130,34 @@ _PROSE_LINE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**lines?\**\s*[:—–
 PROSE_SCAN_MAX = 262_144
 
 
+_CODE_FENCE_RE = re.compile(r"(?ms)^[ \t]*```.*?^[ \t]*```[ \t]*$")
+
+
+def _strip_code_fences(text):
+    """Blank out fenced code blocks (```…```) so an ILLUSTRATIVE example finding
+    a clean audit quotes ('here is the format: ```HIGH — f.py:1 — …```') is not
+    parsed as a live finding (Workflow false positive). Replaced with blank lines
+    (not deleted) so line-anchored patterns elsewhere are unaffected in shape."""
+    return _CODE_FENCE_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
 def _text_has_unparsed_finding(text):
     """True if `text` contains a finding-shaped structure — an inline
     severity+file:line, a line-anchored 'Severity: <level>' field label, or a
     Markdown table row with a severity level. Used both to avoid faking a clean
     verdict on an unparsed finding AND to distrust an EMPTY-findings JSON result
     whose surrounding text clearly reports a defect (Codex rounds 14-30)."""
-    text = text[:PROSE_SCAN_MAX]
+    text = _strip_code_fences(text[:PROSE_SCAN_MAX])
     return bool(_PROSE_SEVERITY_HINT_RE.search(text)
                 or _PROSE_FIELD_SEV_RE.search(text)
                 or _PROSE_TABLE_ROW_RE.search(text)
                 or _PROSE_FINDING_HEADING_RE.search(text)
                 or _PROSE_DEFECT_FIELD_RE.search(text)
-                or (_PROSE_FINDING_HEAD_LINE_RE.search(text)  # 'Finding:' + a file:line
+                or (_PROSE_FINDING_HEAD_LINE_RE.search(text)  # 'Finding 1:' + a severity
+                    and _PROSE_ANY_SEV_RE.search(text))
+                or (_PROSE_FINDING_HEAD_LINE_RE.search(text)  # 'Finding 1:' + a file:line
+                    and _PROSE_BARE_FILELINE_RE.search(text))
+                or (_PROSE_LOC_LABEL_RE.search(text)         # 'Location:/File:' + a file:line
                     and _PROSE_BARE_FILELINE_RE.search(text))
                 or (_PROSE_FILE_FIELD_RE.search(text)
                     and _PROSE_LINE_FIELD_RE.search(text)))
@@ -7136,8 +7170,8 @@ def _text_has_unparsed_finding(text):
 # this is an unparsed finding, never a clean SHIP.
 _PROSE_FIELD_LINE_RE = re.compile(
     r"(?im)(?:^[\ \t>*•#\-]*(?:file|location|path)\s*[:—–\-]"  # File/Location/Path label
-    r"|^[\ \t>*•#\-]*lines?\b[^\n]*\d"                         # a 'Line[s] … <digit>' line
-    r"|(?<![A-Za-z0-9_./\-])[A-Za-z0-9_./\-]{1,300}:[ \t]*\d)")  # or a bare file:line
+    r"|^[\ \t>*•#\-]*lines?\s*[:—–\-]?\s*\d"                   # a 'Line[s][:] <digit>' field
+    r"|" + _PROSE_FILELINE + r")")                            # or a FILE-LIKE file:line
 
 
 def _extract_labeled(body, label):
@@ -7162,7 +7196,7 @@ def parse_prose_findings(text):
     audits work on ANY reasoning model, not only those that honor json_schema."""
     if not isinstance(text, str) or not text.strip():
         return None
-    text = text[:PROSE_SCAN_MAX]  # bound the scan (findings appear early)
+    text = _strip_code_fences(text[:PROSE_SCAN_MAX])  # bound scan; ignore examples
     matches = list(_PROSE_FINDING_RE.finditer(text))
     findings = []
     for i, m in enumerate(matches):
