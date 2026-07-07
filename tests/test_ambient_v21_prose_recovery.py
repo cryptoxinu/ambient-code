@@ -444,6 +444,14 @@ def test_empty_json_plus_fieldlist_or_table_not_clean(prose, _isolate):
     assert env["verdict"] != "SHIP" and env["exit_code"] != 0
 
 
+@pytest.mark.parametrize("loc", [":42", ":L42", "#42", "#L42", " L42", " line 42", " line number 42"])
+def test_all_inline_fileline_notations_parse(loc):
+    # Codex round 22-31: comprehensive inline file:line notation coverage.
+    o = amb.parse_prose_findings(
+        f"HIGH (confidence: HIGH) — app/auth.py{loc} — auth bypass.\nVerdict: SHIP\n")
+    assert o is not None and len(o["findings"]) == 1 and o["findings"][0]["line"] == 42
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
