@@ -6685,28 +6685,114 @@ def findings_reducer(texts):
                        "_repaired_chunks": repaired})
 
 
+# The prose format the audit system prompt dictates (:218) — one header line
+# per finding: SEVERITY (confidence: X) — file:line — defect, optionally
+# markdown-bold, em-dash or hyphen separators, followed by Scenario:/Fix: lines
+# and a closing one-line verdict. This is the fallback contract: any reasoning
+# model that follows the prose spec (even one that ignores the JSON schema, like
+# GLM 5.2 on Ambient) still produces recoverable structured findings.
+_PROSE_FINDING_RE = re.compile(
+    r"""(?imx)
+    ^[\ \t>*]*                                     # ws / blockquote / md-bold
+    (CRITICAL|HIGH|MEDIUM|LOW)\b                    # 1 severity
+    [^\n]*?\(\s*confidence\s*:\s*(HIGH|LOW)\s*\)    # 2 confidence
+    [^\n]*?[—–\-]\s*                               # sep -> file:line
+    ([^\s:—–]+?):(\d+)                             # 3 file  4 line
+    \s*[—–\-]\s*                                   # sep -> title
+    (.+?)\s*$                                       # 5 title (rest of line)
+    """)
+_PROSE_VERDICT_RE = re.compile(
+    r"(?im)^[\ \t>*]*verdict\b\s*[:\-—]?\s*\**\s*(SHIP|FIX FIRST|NEEDS WORK)\b")
+
+
+def _extract_labeled(body, label):
+    """The text of a `Label: …` block up to the next blank line, next finding
+    header, or end — whitespace collapsed, markdown stripped. '' when absent."""
+    m = re.search(
+        r"(?im)^[\ \t>*]*" + label + r"\b\s*[:\-—]\s*(.+?)"
+        r"(?=\n[\ \t]*\n|\n[\ \t>*]*(?:CRITICAL|HIGH|MEDIUM|LOW)\b"
+        r"|\n[\ \t>*]*verdict\b|\Z)",
+        body, re.S)
+    if not m:
+        return ""
+    return re.sub(r"\s+", " ", m.group(1)).strip().strip("*").strip()
+
+
+def parse_prose_findings(text):
+    """Recover audit findings from a model that ignored the JSON schema but
+    followed the tool's PROSE format. Returns a {"findings":[...], "verdict":...}
+    object shaped exactly like the JSON path, or None when the text carries no
+    recognizable finding AND no verdict (so the caller falls through to the
+    raw-text envelope). This is the adaptive fallback that makes structured
+    audits work on ANY reasoning model, not only those that honor json_schema."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    matches = list(_PROSE_FINDING_RE.finditer(text))
+    findings = []
+    for i, m in enumerate(matches):
+        sev, conf, fname, line, title = m.groups()
+        body = text[m.end():(matches[i + 1].start() if i + 1 < len(matches)
+                             else len(text))]
+        title = title.strip().strip("*").strip().rstrip(".").strip()
+        findings.append({
+            "severity": sev.upper(),
+            "confidence": conf.upper(),
+            "file": fname,
+            "line": int(line),
+            "title": title,
+            "defect": title,
+            "scenario": _extract_labeled(body, "scenario"),
+            "fix": _extract_labeled(body, "fix"),
+        })
+    vm = _PROSE_VERDICT_RE.search(text)
+    if not findings:
+        # No parsed findings, but a "code is sound — SHIP" reply is still a
+        # real, recoverable result; a bare non-audit blob is not.
+        return {"findings": [], "verdict": vm.group(1).upper()} if vm else None
+    verdict = vm.group(1).upper() if vm else _verdict_from(findings, False)
+    return {"findings": findings, "verdict": verdict}
+
+
 def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
     """Render structured audit findings as JSON or a clean report. Degrades to
     printing the raw text if it can't be parsed (never drops the output).
     Returns the EFFECTIVE partial flag — render_findings can discover coverage
     gaps its caller didn't know about (unparseable/repaired chunks), and the
-    caller's exit code must reflect them."""
+    caller's exit code must reflect them. Also LEARNS: whether the model
+    honored structured output (clean JSON) or needed the prose fallback is
+    recorded per model so the next call starts from the working path."""
     obj = extract_json(raw) if isinstance(raw, str) else raw
+    recovered_from_prose = False
     if not obj or not isinstance(obj.get("findings"), list):
-        text = raw if isinstance(raw, str) else json.dumps(raw)
-        if fmt == "json":
-            # --json must ALWAYS emit valid JSON — a consumer can't parse raw
-            # model text (surfaced by the stress battery). Wrap it in an error
-            # envelope with a non-clean verdict.
-            emit_json("audit", model=model, api_key=api_key,
-                      findings=[], verdict="NEEDS WORK", partial=True,
-                      reason="model output was not valid parseable JSON",
-                      extra={"coverage_complete": False,
-                             "raw": redact(text, api_key)[:4000]},
-                      exit_now=False)
+        # The model ignored the JSON schema. Before giving up, recover findings
+        # from its PROSE (the tool's own format) — the adaptive fallback that
+        # makes structured audits work on any reasoning model.
+        recovered = parse_prose_findings(raw) if isinstance(raw, str) else None
+        if recovered is not None:
+            obj = recovered
+            recovered_from_prose = True
         else:
-            print(redact(text, api_key))
-        return True
+            if isinstance(raw, str):
+                record_cap(model, "structured_json", False)
+            text = raw if isinstance(raw, str) else json.dumps(raw)
+            if fmt == "json":
+                # --json must ALWAYS emit valid JSON — a consumer can't parse
+                # raw model text. Wrap it in an envelope with a non-clean
+                # verdict and the raw text for the human.
+                emit_json("audit", model=model, api_key=api_key,
+                          findings=[], verdict="NEEDS WORK", partial=True,
+                          reason="model output was not valid parseable JSON",
+                          extra={"coverage_complete": False,
+                                 "raw": redact(text, api_key)[:4000]},
+                          exit_now=False)
+            else:
+                print(redact(text, api_key))
+            return True
+    # A direct model response (str) tells us whether this model honors
+    # structured output: clean JSON => yes; prose recovery => no. A pre-merged
+    # dict (from the reducer) isn't a single model's structured reply — skip.
+    if isinstance(raw, str):
+        record_cap(model, "structured_json", not recovered_from_prose)
     findings = obj["findings"]
     # Normalize a "file:line" leaked into the file field (gutter artifact).
     for f in findings:
@@ -6729,11 +6815,14 @@ def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
     if partial and verdict == "SHIP":  # a partial audit can never be a clean pass
         verdict = "NEEDS WORK"
     if fmt == "json":
+        extra = {"coverage_complete": not partial}
+        if recovered_from_prose:
+            # Transparent: the findings are real but were recovered from prose
+            # because the model ignored the JSON schema. NOT a coverage gap.
+            extra["recovered_from_prose"] = True
         emit_json("audit", model=model, api_key=api_key,
                   findings=findings, verdict=verdict, partial=partial,
-                  reason=reason or None,
-                  extra={"coverage_complete": not partial},
-                  exit_now=False)
+                  reason=reason or None, extra=extra, exit_now=False)
         return partial
     # report format
     if partial:
@@ -7055,7 +7144,7 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
             "report only findings you can ground in the shown code.")
     deep_spec = spec
     if structured:
-        rf = response_format_for(profile, AUDIT_FINDINGS_SCHEMA)
+        rf = adaptive_response_format(model, profile, AUDIT_FINDINGS_SCHEMA)
         deep_spec = dataclasses.replace(spec, response_format=rf)
         if rf is None or rf.get("type") == "json_object":
             sp += AUDIT_JSON_INSTRUCTION
@@ -7319,7 +7408,7 @@ def _audit_sample_prep(model, catalog, labeled, sys_prompt, args):
     single, chunk = profile.single_shot_chars, profile.chunk_chars
     total = sum(len(t) for _, t in labeled)
     spec = RequestSpec.from_args(args)
-    rf = response_format_for(profile, AUDIT_FINDINGS_SCHEMA)
+    rf = adaptive_response_format(model, profile, AUDIT_FINDINGS_SCHEMA)
     a = dataclasses.replace(
         spec.with_output_budget(profile, total if total <= single else chunk),
         response_format=rf)
@@ -8294,7 +8383,7 @@ def cmd_audit(args, api_key, api_url, conf):
     sys_prompt = AUDIT_SYSTEM_PROMPT + focus
     reducer = None
     if structured:
-        rf = response_format_for(profile, AUDIT_FINDINGS_SCHEMA)
+        rf = adaptive_response_format(model, profile, AUDIT_FINDINGS_SCHEMA)
         args.response_format = rf
         if rf is None or rf.get("type") == "json_object":
             sys_prompt += AUDIT_JSON_INSTRUCTION

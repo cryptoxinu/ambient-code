@@ -1,0 +1,124 @@
+"""P2 — the keystone: recover audit findings from a model that ignored the JSON
+schema but followed the prose format (GLM 5.2), and LEARN from it. See
+docs/plans/2026-07-06-stress-test-remediation.md."""
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+
+import pytest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BIN = os.path.join(os.path.dirname(_HERE), "bin", "ambient")
+
+
+def _load_module():
+    loader = importlib.machinery.SourceFileLoader("ambient_cli_prose", _BIN)
+    spec = importlib.util.spec_from_loader("ambient_cli_prose", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+amb = _load_module()
+
+# Verbatim shape of what GLM 5.2 actually returned in the stress test (prose,
+# em-dashes, markdown bold on some headers) — the fixture that must recover.
+GLM_PROSE = """## Audit: fixtures/stats.py
+
+**HIGH (confidence: HIGH) — stats.py:10 — `top_k` slices `s[0:k-1]`, returning one too few elements.**
+Scenario: `top_k([5,3,8,1], 3)` → sorted desc `[8,5,3,1]`, slice `[0:2]` returns `[8,5]` — only 2 of 3. Fix: `return s[0:k]`.
+
+HIGH (confidence: HIGH) — stats.py:14 — `moving_avg` loop bound is off by one, dropping the final window.
+Scenario: `moving_avg([1,2,3,4], 2)` → range(2) yields i=0,1 → misses the [3,4] window. Fix: `range(len(nums) - window + 1)`.
+
+MEDIUM (confidence: HIGH) — stats.py:5 — `average([])` divides by zero.
+Scenario: `average([])` → len 0 → ZeroDivisionError. Fix: guard empty input.
+
+Verdict: FIX FIRST.
+"""
+
+
+@pytest.fixture(autouse=True)
+def _isolate(tmp_path, monkeypatch):
+    monkeypatch.setattr(amb, "CAPABILITY_PATH", str(tmp_path / "caps.json"))
+    monkeypatch.setattr(amb, "_CAP_CACHE", None)
+    monkeypatch.delenv("AMBIENT_TELEMETRY", raising=False)
+    yield
+    monkeypatch.setattr(amb, "_CAP_CACHE", None)
+
+
+# --- parser ---------------------------------------------------------------
+def test_recovers_all_findings_from_real_glm_prose():
+    obj = amb.parse_prose_findings(GLM_PROSE)
+    assert obj is not None
+    assert len(obj["findings"]) == 3
+    sevs = [f["severity"] for f in obj["findings"]]
+    assert sevs == ["HIGH", "HIGH", "MEDIUM"]
+    first = obj["findings"][0]
+    assert first["file"] == "stats.py" and first["line"] == 10
+    assert first["confidence"] == "HIGH"
+    assert "top_k" in first["title"]
+    assert "top_k" in first["scenario"]
+    assert obj["verdict"] == "FIX FIRST"
+
+
+def test_title_strips_markdown_bold_and_trailing_period():
+    obj = amb.parse_prose_findings(GLM_PROSE)
+    assert not obj["findings"][0]["title"].endswith("*")
+    assert not obj["findings"][0]["title"].endswith(".")
+
+
+def test_clean_code_prose_yields_empty_findings_with_verdict():
+    obj = amb.parse_prose_findings("The code is sound, no defects.\nVerdict: SHIP")
+    assert obj is not None
+    assert obj["findings"] == []
+    assert obj["verdict"] == "SHIP"
+
+
+def test_garbage_returns_none():
+    assert amb.parse_prose_findings("hello, this is not an audit at all") is None
+    assert amb.parse_prose_findings("") is None
+
+
+# --- render integration + learning ---------------------------------------
+def _render_json(raw, model):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        amb.render_findings(raw, "json", api_key="", model=model)
+    return json.loads(buf.getvalue())
+
+
+def test_json_render_recovers_findings_and_is_not_partial():
+    env = _render_json(GLM_PROSE, "z-ai/glm-5.2")
+    assert env["status"] == "ok"          # recovered fully — NOT partial
+    assert env["exit_code"] == 0
+    assert len(env["findings"]) == 3
+    assert env["verdict"] == "FIX FIRST"
+    assert env.get("recovered_from_prose") is True
+
+
+def test_prose_recovery_records_model_as_structured_unreliable():
+    _render_json(GLM_PROSE, "z-ai/glm-5.2")
+    # one prose recovery = one failure outcome; a second confirms unreliable
+    _render_json(GLM_PROSE, "z-ai/glm-5.2")
+    assert amb.cap_state("z-ai/glm-5.2", "structured_json") == "unreliable"
+
+
+def test_clean_json_records_model_as_structured_ok():
+    clean = json.dumps({"findings": [{"severity": "LOW", "confidence": "LOW",
+                                       "file": "a.py", "line": 1, "title": "x",
+                                       "defect": "x", "scenario": "s", "fix": "f"}],
+                        "verdict": "NEEDS WORK"})
+    _render_json(clean, "moonshotai/kimi-k2.7-code")
+    assert amb.cap_state("moonshotai/kimi-k2.7-code", "structured_json") == "ok"
+
+
+def test_total_garbage_still_emits_valid_empty_envelope():
+    env = _render_json("~~~ not parseable, not prose ~~~", "some/model")
+    assert env["status"] == "partial"
+    assert env["findings"] == []
+    assert env["exit_code"] == amb.EXIT_PARTIAL
+    assert amb.cap_state("some/model", "structured_json") != "ok"
