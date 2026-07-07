@@ -157,14 +157,19 @@ def test_severity_with_fileline_biases_to_raw_not_fake_clean():
         assert amb.parse_prose_findings(txt) is None
 
 
-@pytest.mark.parametrize("txt", [
-    # Codex round 4: colon-style and 'at'-style real findings (file:line then a
-    # dash-defect) must NOT fake a clean SHIP.
-    "HIGH (confidence: HIGH): a.py:7 — hidden real defect\nVerdict: SHIP\n",
-    "HIGH (confidence: HIGH) at a.py:7 — hidden real defect\nVerdict: SHIP\n",
-])
-def test_colon_and_at_findings_do_not_fake_clean(txt):
-    assert amb.parse_prose_findings(txt) is None
+def test_colon_separated_finding_parses():
+    # Codex round 4/12: a colon-separated finding now PARSES (better than raw).
+    obj = amb.parse_prose_findings(
+        "HIGH (confidence: HIGH): a.py:7 — hidden real defect\nVerdict: SHIP\n")
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "a.py"
+
+
+def test_at_style_finding_does_not_fake_clean():
+    # Codex round 4: an 'at'-style finding (no separator char before file:line)
+    # falls to the safe raw envelope rather than faking a clean SHIP.
+    assert amb.parse_prose_findings(
+        "HIGH (confidence: HIGH) at a.py:7 — hidden real defect\nVerdict: SHIP\n") is None
 
 
 def test_space_after_colon_finding_does_not_fake_clean():
@@ -226,6 +231,14 @@ def test_finding_without_confidence_parses_not_faked_clean():
     assert obj is not None and len(obj["findings"]) == 1
     assert obj["findings"][0]["file"] == "a.py"
     assert obj["findings"][0]["confidence"] == "HIGH"
+
+
+def test_colon_no_confidence_finding_parses():
+    # Codex round 12: 'HIGH: file:line — title' (no confidence, colon separator)
+    # must parse, not fake a clean SHIP.
+    obj = amb.parse_prose_findings("HIGH: app/auth.py:42 — auth bypass\nVerdict: SHIP\n")
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "app/auth.py"
 
 
 def test_high_finding_forces_non_ship_verdict():

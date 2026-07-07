@@ -3110,6 +3110,16 @@ SECRET_PATTERNS = [
 # first, so a real JWT/Azure key is caught even if it also looks code-ref-ish.
 _LOOSE_LABEL_RE = SECRET_PATTERNS[0]
 _PRECISE_SECRET_PATTERNS = SECRET_PATTERNS[1:]
+# The loose labeled pattern also matches a labeled assignment whose UNQUOTED
+# value is a code EXPRESSION — a function call ('password = getPasswordFromEnv()')
+# or a dotted reference ('token = req.headers.authorization') — normal source
+# that must NOT be refused (Codex round 12 structural false positive). A quoted
+# value is a literal and is NOT cleared by this (no quote in the pattern).
+_LOOSE_CODE_VALUE_RE = re.compile(
+    r"(?i)(?:api[_-]?key|secret|passwd|password|token)\s*[:=]\s*"
+    r"[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:\.[A-Za-z0-9_.]*[A-Za-z0-9_](?:\s*\([^)\n]*\))?|\([^)\n]*\))"  # .attr[()] or ()
+    r"\s*[;,)}\]]*\s*$")
 # Kept OUT of SECRET_PATTERNS: this pattern backtracks quadratically on long
 # lowercase-alnum runs (measured 129s on a 400k-char line — an effective hang
 # on minified/hex blobs). _line_has_secret gates it on
@@ -3238,8 +3248,8 @@ def _line_has_secret(line):
         return True
     if _CODE_REF_ASSIGN_RE.match(line):
         return False  # `x = a.b.c` is a code reference, never a credential
-    if _LOOSE_LABEL_RE.search(line):
-        return True
+    if _LOOSE_LABEL_RE.search(line) and not _LOOSE_CODE_VALUE_RE.search(line):
+        return True  # labeled secret, but not a bare code call/reference value
     if _env_assignment_is_secret(line):
         return True
     if "://" not in line:
@@ -6978,7 +6988,7 @@ _PROSE_FINDING_RE = re.compile(
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
     r"(CRITICAL|HIGH|MEDIUM|LOW)\b"                    # 1 severity
     r"(?:[^\n]*?\(?\s*confidence\s*:\s*(HIGH|LOW)\b\)?)?"  # 2 confidence (OPTIONAL)
-    r"[^\n]*?[—–\-]\s*"                               # sep -> file:line
+    r"[^\n]*?[—–\-:,]\s*"                             # sep -> file:line (—/-/:/,)
     r"([^\s:—–]+?):[ \t]*(\d+)"                       # 3 file  4 line (': 7' ok)
     r"\s*[—–\-]\s*"                                   # sep -> title
     r"(.+?)\s*$")                                      # 5 title (rest of line)

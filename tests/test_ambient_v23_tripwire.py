@@ -180,6 +180,24 @@ def test_round11_gitlab_pat_caught():
     assert amb._line_has_secret("glpat-ABC123def456GHI789jkl0") is True
 
 
+@pytest.mark.parametrize("line", [
+    "password = getPasswordFromEnvironment()",   # function call (code)
+    "token = refreshTokenFromRequest()",
+    "const secret = config.getSecret();",
+    "password = req.body.password",
+])
+def test_round12_code_expression_values_not_false_positive(line):
+    assert amb._line_has_secret(line) is False
+
+
+@pytest.mark.parametrize("line", [
+    "password = 'wJalrXUtnFEMI/K7MDENG+bPxRf'",   # quoted literal still caught
+    "secret = supersecret_value_12345",           # bare high-entropy still caught
+])
+def test_round12_real_secrets_still_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="
