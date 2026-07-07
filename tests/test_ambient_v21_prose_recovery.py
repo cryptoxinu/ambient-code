@@ -157,6 +157,15 @@ def test_colon_and_at_findings_do_not_fake_clean(txt):
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_space_after_colon_finding_does_not_fake_clean():
+    # Codex round 5: 'a.py: 7' (space after colon) must still parse / not fake clean.
+    txt = ("HIGH (confidence: HIGH) — a.py: 7 — hidden real defect\n"
+           "Scenario: x.\nVerdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["line"] == 7
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
