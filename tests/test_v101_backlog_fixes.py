@@ -219,6 +219,21 @@ class TestPhase4Build(unittest.TestCase):
         with _patch(sys, "stdin", io.StringIO()):  # StringIO.isatty()==False, ok
             self.assertFalse(amb._stdin_is_tty())
 
+    def test_cmd_build_rejects_nonpositive_caps(self):
+        # whole-branch audit: a negative --max-files is a negative slice that
+        # keeps all-but-last — reject up front, before resume/catalog/spend.
+        import io
+        import sys
+        for bad in ({"max_files": -1, "max_file_bytes": 1000},
+                    {"max_files": 5, "max_file_bytes": 0}):
+            args = argparse.Namespace(task=["build a thing"], dir="out",
+                                      allow_secrets=False, apply=False, **bad)
+            with _patch(sys, "stderr", io.StringIO()), \
+                    _patch(sys, "argv", ["ambient"]):
+                with self.assertRaises(SystemExit) as cm:
+                    amb.cmd_build(args, "k", "https://x", {})
+            self.assertEqual(cm.exception.code, amb.EXIT_USAGE)
+
 
 # ------------------------------------------------ Phase 5: audit/reporting
 

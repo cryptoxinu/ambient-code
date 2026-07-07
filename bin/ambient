@@ -8773,6 +8773,13 @@ def cmd_build(args, api_key, api_url, conf):
     if not task:
         usage_exit('describe what to build: '
                    'ambient build "a flask todo API with tests" --dir out')
+    # Validate the caps UP FRONT (before resume/catalog/spend). A non-positive
+    # --max-files becomes a negative Python slice (obj["plan"][:args.max_files])
+    # that keeps all-but-the-last file — an invalid "cap" that still proceeds.
+    if args.max_files < 1:
+        usage_exit("--max-files must be a positive integer")
+    if args.max_file_bytes < 1:
+        usage_exit("--max-file-bytes must be a positive integer")
     warn_if_stdin_ignored("`build` does not read stdin — pass context with -f FILE")
     refuse_if_secrets([("task", task)], args.allow_secrets)
     root = os.path.abspath(os.path.expanduser(args.dir or "."))
@@ -9258,8 +9265,7 @@ def cmd_build(args, api_key, api_url, conf):
                 #.ambient-build.bak.
                 root_real0 = os.path.realpath(root)
                 parent_real0 = os.path.realpath(os.path.dirname(dest))
-                if parent_real0 != root_real0 and \
-                        not parent_real0.startswith(root_real0 + os.sep):
+                if not _within_root(parent_real0, root_real0):   # M9: correct at root '/'
                     actions[rel] = "write-failed"
                     failed.append({"path": rel,
                                    "reason": "parent escaped the target "

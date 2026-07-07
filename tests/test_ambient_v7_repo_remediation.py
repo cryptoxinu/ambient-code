@@ -344,8 +344,7 @@ class TestH2SymlinkDirContainment(unittest.TestCase):
         for _rel, full, _sz in files:
             real = os.path.realpath(full)
             rroot = os.path.realpath(root)
-            self.assertTrue(real == rroot
-                            or real.startswith(rroot + os.sep))
+            self.assertTrue(amb._within_root(real, rroot))
 
     def test_symlink_within_root_still_allowed_via_real_dir(self):
         # Containment must not reject ordinary in-root files.
