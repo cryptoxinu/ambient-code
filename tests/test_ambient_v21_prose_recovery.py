@@ -147,6 +147,16 @@ def test_clean_audit_quoting_example_format_is_not_rejected():
     assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
 
 
+@pytest.mark.parametrize("txt", [
+    # Codex round 4: colon-style and 'at'-style real findings (file:line then a
+    # dash-defect) must NOT fake a clean SHIP.
+    "HIGH (confidence: HIGH): a.py:7 — hidden real defect\nVerdict: SHIP\n",
+    "HIGH (confidence: HIGH) at a.py:7 — hidden real defect\nVerdict: SHIP\n",
+])
+def test_colon_and_at_findings_do_not_fake_clean(txt):
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

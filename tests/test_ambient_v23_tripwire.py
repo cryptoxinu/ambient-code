@@ -97,6 +97,27 @@ def test_round3_false_positives_do_not_trip(line):
     assert amb._line_has_secret(line) is False
 
 
+# --- Codex round 4 ------------------------------------------------------
+@pytest.mark.parametrize("line", [
+    "ok=1 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",  # 2nd assignment
+    "DB_PASSWORD=p(ass)w0rd!2026",                    # real secret with brackets
+    '{"password":"p(ass)w0rd!2026"}',
+    "SESSION_KEY=abcdefabcdefabcdefabcdef",            # sensitive key, hex value
+    "ACCESS_KEY=0123456789abcdef0123456789abcdef",
+])
+def test_round4_bypasses_now_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
+@pytest.mark.parametrize("line", [
+    "password = user.password_hash",       # code attribute reference
+    "token = session.current_access_token",
+    "CACHE_KEY=0123456789abcdef0123456789abcdef01234567",  # hash still not a key
+])
+def test_round4_false_positives_do_not_trip(line):
+    assert amb._line_has_secret(line) is False
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="

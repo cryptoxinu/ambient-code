@@ -1354,32 +1354,24 @@ def cap_state(model, dim):
 
 
 def _try_caps_lock(conf_dir):
-    """Best-effort NON-BLOCKING exclusive lock for the capability store, so a
-    telemetry write never hangs. Returns an fd on success, else None (caller
-    proceeds unlocked). POSIX uses flock(LOCK_NB); elsewhere an O_EXCL lock file
-    that self-heals if stale (>30s)."""
-    lock_path = os.path.join(conf_dir, ".caps.lock")
-    if fcntl is not None:
-        try:
-            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fd
-        except OSError:
-            try:
-                os.close(fd)
-            except (OSError, NameError, UnboundLocalError):
-                pass
-            return None
-    try:
-        return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        try:
-            if time.time() - os.path.getmtime(lock_path) > 30:
-                os.unlink(lock_path)  # break a stale lock (crashed writer)
-        except OSError:
-            pass
+    """Best-effort NON-BLOCKING exclusive lock (POSIX flock) for the capability
+    store, so a telemetry write never hangs. Returns an fd on success, else None
+    (caller proceeds unlocked). Where fcntl is absent (Windows) we do NOT use an
+    O_EXCL lock file — its unlink-on-release races with a concurrent holder
+    (Codex round 4) — and simply run unlocked; capability learning is
+    best-effort and a rare lost outcome self-heals."""
+    if fcntl is None:
         return None
+    lock_path = os.path.join(conf_dir, ".caps.lock")
+    try:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
     except OSError:
+        try:
+            os.close(fd)
+        except (OSError, NameError, UnboundLocalError):
+            pass
         return None
 
 
@@ -1438,20 +1430,10 @@ def record_cap(model, dim, ok):
     finally:
         if lock_fd is not None:
             try:
-                if fcntl is not None:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 os.close(lock_fd)
             except OSError:
                 pass
-            if fcntl is None:
-                # The O_EXCL fallback lock is a real file — unlink it on release
-                # or the NEXT writer's O_EXCL fails for 30s and falls to the
-                # unlocked path (Codex round 3, Windows lost-update window).
-                try:
-                    os.unlink(os.path.join(os.path.dirname(CAPABILITY_PATH),
-                                           ".caps.lock"))
-                except OSError:
-                    pass
 
 
 def adaptive_response_format(model, profile, schema):
@@ -3162,33 +3144,50 @@ _PUBLIC_KEY_IDENT_RE = re.compile(r"(?i)(^|_)PUBLIC_KEY$")
 # A high-entropy key value: 20+ base64/hex chars. Pure lowercase-hex (a git SHA
 # / hash) and dashed UUIDs are excluded — they aren't credentials (Codex).
 _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
-_HEX_ONLY_RE = re.compile(r"[0-9a-f]+$")
 # Secret-ish punctuation in a value marks it a literal credential rather than a
 # code reference — deliberately EXCLUDES '/' (paths) and code brackets.
 _SECRET_VALUE_HINT_RE = re.compile(r"[@#$%^&*!=~]")
 _CODE_VALUE_RE = re.compile(r"[()\[\]{}]")
+# A whole line that is just `name = dotted.attr.reference` (no quotes, no
+# secret-ish chars) is a code expression, not a credential — e.g.
+# `password = user.password_hash` (Codex round 4 false positive).
+_CODE_REF_ASSIGN_RE = re.compile(
+    r"^\s*[A-Za-z_]\w*\s*[:=]\s*[A-Za-z_]\w*(?:\.\w+)+\s*$")
 
 
 def _env_assignment_is_secret(line):
     """True if `line` assigns a real credential to a credential-named key, in
     env / JSON / YAML shape, any case (see ENV_ASSIGN_RE). A code reference
-    (`password = get_input()`, `foreign_key = other.id`) is NOT a secret."""
-    m = ENV_ASSIGN_RE.search(line)
-    if not m:
-        return False
-    ident, val = m.group(2), m.group(4)
-    quoted_key, quoted_val = bool(m.group(1)), bool(m.group(3))
-    if len(val) < 8 or _CODE_VALUE_RE.search(val):
-        return False                              # too short, or a code expr
-    if _env_is_strong(ident):
-        # A literal secret if the name is an ALL-CAPS env var, the key/value is
-        # quoted (JSON/YAML/config), or the value carries secret-ish
-        # punctuation — but not a bare lowercase code assignment.
-        return (ident.isupper() or quoted_key or quoted_val
-                or bool(_SECRET_VALUE_HINT_RE.search(val)))
-    if _ENV_SENSITIVE_KEY_RE.search(ident) \
-            and not _PUBLIC_KEY_IDENT_RE.search(ident):
-        return bool(_ENV_HIGH_ENTROPY_RE.match(val)) and not _HEX_ONLY_RE.match(val)
+    (`password = get_input()`, `foreign_key = other.id`) is NOT a secret. ALL
+    assignments on the line are checked (Codex: 'ok=1 SECRET=…' hid the second)."""
+    for m in ENV_ASSIGN_RE.finditer(line):
+        ident, val = m.group(2), m.group(4)
+        quoted_key, quoted_val = bool(m.group(1)), bool(m.group(3))
+        quoted = quoted_key or quoted_val
+        if len(val) < 8:
+            continue
+        if _env_is_strong(ident):
+            # An ALL-CAPS env var or a quoted key/value is a literal secret
+            # regardless of punctuation (a real password CAN contain '(' —
+            # Codex). A bare lowercase name needs the value to LOOK like a
+            # literal (secret-ish punctuation, or a high-entropy base64 token
+            # with a digit/uppercase) and NOT be a code expression.
+            if ident.isupper() or quoted:
+                return True
+            if _CODE_VALUE_RE.search(val):
+                continue
+            if _SECRET_VALUE_HINT_RE.search(val) or (
+                    _ENV_HIGH_ENTROPY_RE.match(val) and re.search(r"[A-Z0-9]", val)):
+                return True
+            continue
+        if _ENV_SENSITIVE_KEY_RE.search(ident) \
+                and not _PUBLIC_KEY_IDENT_RE.search(ident) \
+                and not _CODE_VALUE_RE.search(val):
+            # A sensitive *_KEY with a 20+ base64/hex value — hex is fine here
+            # (SESSION_KEY/ACCESS_KEY can be raw hex); CACHE_KEY etc. are already
+            # filtered out by the sensitive-name gate (Codex).
+            if _ENV_HIGH_ENTROPY_RE.match(val):
+                return True
     return False
 # Credential-named files refused regardless of content (the
 # old check missed .envrc/.netrc/.npmrc/.pgpass/id_rsa/*.pem/credentials.json).
@@ -3199,6 +3198,8 @@ SECRET_NAMES_RE = re.compile(
 
 
 def _line_has_secret(line):
+    if _CODE_REF_ASSIGN_RE.match(line):
+        return False  # `x = a.b.c` is a code reference, never a credential
     if any(p.search(line) for p in SECRET_PATTERNS):
         return True
     if _env_assignment_is_secret(line):
@@ -6958,7 +6959,7 @@ _PROSE_VERDICT_RE = re.compile(
 _PROSE_SEVERITY_HINT_RE = re.compile(
     r"(?im)^[\ \t>*•+\-]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
     r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:"
-    r"[^\n]*[—–\-][^\n]*:\d")
+    r"[^\n]*(?::\d[^\n]*[—–\-]|[—–\-][^\n]*:\d)")
 
 
 def _extract_labeled(body, label):
@@ -9027,6 +9028,15 @@ def cmd_chat(args, api_key, api_url, conf):
                 f"{profile.single_shot_chars:,}) — nothing was sent. "
                 "Shorten it, or use `ambient ask -f FILE` for large inputs.",
                 file=sys.stderr)
+            continue
+        # Never publish a credential typed into the REPL (Codex round 4: chat
+        # had no tripwire). Warn and SKIP the turn — the REPL survives, unlike
+        # the sys.exit refusal the one-shot commands use.
+        if not getattr(args, "allow_secrets", False) and any(
+                _line_has_secret(seg) for seg in line.splitlines()):
+            print("ambient: that message looks like it contains a credential — "
+                  "not sending it to the network. Redact it and try again.",
+                  file=sys.stderr)
             continue
         # Rolling window: keep the system prompt + the new line, drop the
         # OLDEST history past the model's single-shot budget.
