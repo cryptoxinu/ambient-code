@@ -7074,6 +7074,17 @@ _PROSE_FIELD_SEV_RE = re.compile(
 # has no level, so it does not trip.
 _PROSE_TABLE_ROW_RE = re.compile(
     r"(?im)^[\ \t>]*\|[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\|")
+
+
+def _text_has_unparsed_finding(text):
+    """True if `text` contains a finding-shaped structure — an inline
+    severity+file:line, a line-anchored 'Severity: <level>' field label, or a
+    Markdown table row with a severity level. Used both to avoid faking a clean
+    verdict on an unparsed finding AND to distrust an EMPTY-findings JSON result
+    whose surrounding text clearly reports a defect (Codex rounds 14-30)."""
+    return bool(_PROSE_SEVERITY_HINT_RE.search(text)
+                or _PROSE_FIELD_SEV_RE.search(text)
+                or _PROSE_TABLE_ROW_RE.search(text))
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
 # A field-list finding always carries a LOCATION field. Match the LABEL
@@ -7143,9 +7154,7 @@ def parse_prose_findings(text):
         # so it needs NO location match: this closes the whole file:line-notation
         # tail (Codex rounds 14-25) at the root. The single-line hint covers
         # inline 'HIGH … file:line' findings.
-        if (_PROSE_SEVERITY_HINT_RE.search(text)
-                or _PROSE_FIELD_SEV_RE.search(text)
-                or _PROSE_TABLE_ROW_RE.search(text)):
+        if _text_has_unparsed_finding(text):
             return None
         return {"findings": [], "verdict": vlast} if vlast else None
     return {"findings": findings, "verdict": vlast or _verdict_from(findings, False)}
@@ -7170,6 +7179,8 @@ def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
         recovered = parse_prose_findings(raw)
         if recovered and recovered.get("findings"):
             obj, recovered_from_prose = recovered, True
+        elif _text_has_unparsed_finding(raw):
+            obj = None  # empty JSON but the text reports a defect → don't fake clean
     if not obj or not isinstance(obj.get("findings"), list):
         # The model ignored the JSON schema. Before giving up, recover findings
         # from its PROSE (the tool's own format) — the adaptive fallback that

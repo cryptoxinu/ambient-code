@@ -429,6 +429,21 @@ def test_empty_json_plus_prose_finding_recovers(_isolate):
     assert len(env["findings"]) == 1 and env["verdict"] != "SHIP"
 
 
+@pytest.mark.parametrize("prose", [
+    "Finding 1:\nSeverity: HIGH\nFile: app/auth.py\nLine: 42\nDefect: bug.",
+    "| HIGH | app/auth.py | 42 | bug |",
+])
+def test_empty_json_plus_fieldlist_or_table_not_clean(prose, _isolate):
+    # Codex round 30: empty JSON then a field-list/table finding must not be clean.
+    import io, contextlib, json as _j
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        amb.render_findings('{"findings":[],"verdict":"SHIP"}\n' + prose + "\n",
+                            "json", api_key="", model="m")
+    env = _j.loads(buf.getvalue())
+    assert env["verdict"] != "SHIP" and env["exit_code"] != 0
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
