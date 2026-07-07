@@ -3095,9 +3095,12 @@ SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
     re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"
                r"\.[A-Za-z0-9_\-]{6,}"),    # JWT (header.payload.signature)
-    # Azure / ADO.NET connection-string secrets: AccountKey=…==, SharedAccessKey=…
-    re.compile(r"(?i)(?:account|shared[_-]?access|shared)[_-]?(?:key|secret)"
-               r"\s*=\s*['\"]?[A-Za-z0-9+/]{16,}={0,2}"),
+    # Azure / ADO.NET connection-string secrets: AccountKey=…==, SharedAccessKey=…,
+    # SharedAccessSignature=sv=…&sig=… (a SAS token is a query string).
+    re.compile(r"(?i)(?:account|shared[_-]?access|shared)[_-]?"
+               r"(?:key|secret|signature)\s*=\s*['\"]?"
+               r"[A-Za-z0-9%+/=&?.\-]{16,}"),
+    re.compile(r"(?i)[?&]sig=[A-Za-z0-9%+/]{16,}"),  # a SAS signature parameter
 ]
 # SECRET_PATTERNS[0] is the LOOSE labeled pattern (keyword abutting '='); it can
 # match a dotted code reference ('password = user.passwordHash'), so it runs
@@ -6978,9 +6981,12 @@ _PROSE_VERDICT_RE = re.compile(
 # file:line, so it stays a real clean SHIP — Codex round 3), while a real
 # '- HIGH … — f:1 — …' header still trips it → safe raw envelope, never a
 # silent drop.
+# The severity may appear ANYWHERE on the line, not just first after the lead
+# (Codex round 7: a labeled '### Finding 1: HIGH (confidence: HIGH) — a.py:7 —'
+# heading buried the severity). The dash + file:line requirement still keeps it
+# off clean prose that merely names a severity ("no HIGH issues remain").
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)^[\ \t>*•+\-#]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
-    r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:"
+    r"(?im)^[^\n]*?\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:"
     r"[^\n]*(?::[ \t]*\d[^\n]*[—–\-]|[—–\-][^\n]*:[ \t]*\d)")
 
 

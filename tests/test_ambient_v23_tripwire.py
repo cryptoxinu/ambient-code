@@ -155,6 +155,14 @@ def test_round6_code_refs_not_false_positive(line):
     assert amb._line_has_secret(line) is False
 
 
+# --- Codex round 7 ------------------------------------------------------
+def test_round7_azure_sas_signature_caught():
+    line = ('AZURE_STORAGE_CONNECTION_STRING="BlobEndpoint=https://acct.blob.core.'
+            'windows.net/;SharedAccessSignature=sv=2020-08-04&ss=b&srt=sco&sp=rwdlac'
+            '&se=2026-01-01T00:00:00Z&sig=abcDEF123%2Fghi%2BjklMNO456pqr%3D"')
+    assert amb._line_has_secret(line) is True
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="
