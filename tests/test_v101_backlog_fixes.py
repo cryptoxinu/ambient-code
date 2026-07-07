@@ -179,13 +179,25 @@ def _patch(obj, name, value):
 # ------------------------------------------------ Phase 3: input/path edges
 
 class TestPhase3InputPath(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX filesystem-root '/' semantics")
     def test_M9_within_root_correct_at_filesystem_root(self):
+        # The bug this fixes is specific to the POSIX root '/', where
+        # startswith(root + os.sep) == startswith('//') wrongly rejected subdirs.
         self.assertTrue(amb._within_root("/foo/bar", "/"))    # subdir of / allowed
         self.assertTrue(amb._within_root("/foo", "/"))         # top-level under /
-        self.assertTrue(amb._within_root("/repo/src/a.py", "/repo"))
-        self.assertTrue(amb._within_root("/repo", "/repo"))    # root itself
-        self.assertFalse(amb._within_root("/other", "/repo"))
-        self.assertFalse(amb._within_root("/repofoo", "/repo"))  # sibling-prefix
+
+    def test_M9_within_root_containment_cross_platform(self):
+        # OS-native absolute paths (real temp dir) so this holds on Windows too.
+        import os as _os
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            root = _os.path.realpath(root)
+            self.assertTrue(amb._within_root(root, root))                    # equal
+            self.assertTrue(amb._within_root(
+                _os.path.join(root, "src", "a.py"), root))                  # subdir
+            parent = _os.path.dirname(root)
+            self.assertFalse(amb._within_root(parent, root))                # escape
+            self.assertFalse(amb._within_root(root + "_sibling", root))     # prefix
 
     def test_M27_negative_older_than_refused(self):
         import io
