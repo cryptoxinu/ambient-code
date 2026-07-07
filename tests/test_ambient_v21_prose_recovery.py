@@ -309,6 +309,13 @@ def test_genuinely_clean_audits_stay_clean(txt):
     assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
 
 
+def test_dash_separated_fieldlist_does_not_fake_clean():
+    # Codex round 20: a field-list using dash separators ('Severity - HIGH').
+    txt = ("Finding 1:\nSeverity - HIGH\nConfidence - HIGH\nFile - app/auth.py\n"
+           "Line number 42\nDefect: auth bypass.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
