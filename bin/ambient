@@ -7069,8 +7069,9 @@ _PROSE_SEVERITY_HINT_RE = re.compile(
 # label naming a real level PLUS a 'Line:' label with a digit is an unparsed
 # finding → must not fake a clean SHIP.
 _PROSE_FIELD_SEV_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\**severity\**\s*[:—–\-]?\**\s*"  # '1. **Severity:**'
-    r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\**severity\b"  # a 'Severity' field label…
+    r"[^\n:—–]*[:—–\-]\**[ \t]*"                           # …'level'/'rating'/… then a sep
+    r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b")                      # then the level as the value
 # A Markdown TABLE row carrying a severity level ('| HIGH | app/auth.py | 42 |
 # … |') is a finding row (Codex round 27) — a header row ('| Severity | File |')
 # has no level, so it does not trip.

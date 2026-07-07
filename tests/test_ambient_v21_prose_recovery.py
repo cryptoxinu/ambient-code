@@ -452,6 +452,20 @@ def test_all_inline_fileline_notations_parse(loc):
     assert o is not None and len(o["findings"]) == 1 and o["findings"][0]["line"] == 42
 
 
+@pytest.mark.parametrize("lbl", ["Severity: HIGH", "Severity level: HIGH",
+    "Severity rating: HIGH", "**Severity:** HIGH", "1. Severity: HIGH", "Severity - HIGH"])
+def test_severity_label_variants_do_not_fake_clean(lbl):
+    # Codex round 25-32: any 'Severity [word]: <level>' field label -> raw.
+    txt = f"Finding:\n{lbl}\nFile: a.py\nLine: 42\nVerdict: SHIP\n"
+    assert amb.parse_prose_findings(txt) is None
+
+
+def test_severity_word_in_clean_prose_stays_clean():
+    o = amb.parse_prose_findings(
+        "Severity of low-priority items is minimal, all reviewed.\nVerdict: SHIP\n")
+    assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
