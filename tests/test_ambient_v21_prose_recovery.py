@@ -259,6 +259,14 @@ def test_fieldlist_multiline_finding_does_not_fake_clean():
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_fieldlist_with_file_line_label_does_not_fake_clean():
+    # Codex round 15: a field-list finding with 'File: a.py:42' (file:line on the
+    # File line, not a separate 'Line:') must not fake a clean SHIP.
+    txt = ("Finding:\nSeverity: HIGH\nFile: app/auth.py:42\n"
+           "Defect: auth bypass.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

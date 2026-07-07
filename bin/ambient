@@ -3159,7 +3159,22 @@ _ENV_STRONG_CAMEL_RE = re.compile(
     r"(?:Secret|Token|Password|Passwd|Credential|Credentials|ApiKey)(?![a-z])")
 
 
+# An identifier that NAMES config ABOUT a secret rather than holding one: its
+# trailing component is a non-secret modifier (SECRET_NAME, SECRET_PATH,
+# PASSWORD_POLICY, TOKEN_EXPIRATION, …). KEY/TOKEN/SECRET/PASSWORD themselves are
+# NOT in this list, so DB_PASSWORD / API_SECRET / ACCESS_TOKEN stay secrets.
+_ENV_CONFIG_SUFFIX_RE = re.compile(
+    r"(?i)_(NAME|PATH|POLICY|EXPIR\w*|ID|TTL|TIMEOUT|LENGTH|COUNT|URL|URI|FILE|"
+    r"DIR|DIRECTORY|TYPE|ENABLED|DISABLED|REQUIRED|FORMAT|HEADER|PREFIX|SUFFIX|"
+    r"ROTATION|LIFETIME|GRACE|ALGORITHM|ALGO|ISSUER|AUDIENCE|SCOPES?|LOCATION|"
+    r"SOURCE|PROVIDER|METHOD|MODE|VERSION|LIMIT|MAX|MIN|ATTEMPTS|WINDOW|AGE|"
+    r"DAYS|HOURS|MINUTES|SECONDS|PATTERN|VALIDATION|VALIDATOR|MANAGER|SERVICE|"
+    r"STORE|VAULT|BACKEND|STRATEGY|ENV|ENVIRONMENT|LABEL|DESCRIPTION|TITLE)$")
+
+
 def _env_is_strong(ident):
+    if _ENV_CONFIG_SUFFIX_RE.search(ident):
+        return False  # config ABOUT a secret, not a secret value
     return bool(_ENV_STRONG_COMPONENT_RE.search(ident)
                 or _ENV_STRONG_CAMEL_RE.search(ident))
 # An ambiguous *_KEY trips only when a SENSITIVE component precedes KEY (schema
@@ -7022,7 +7037,11 @@ _PROSE_SEVERITY_HINT_RE = re.compile(
 # finding → must not fake a clean SHIP.
 _PROSE_FIELD_SEV_RE = re.compile(
     r"(?im)^[\ \t>*•#\-]*severity\s*:?\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
-_PROSE_FIELD_LINE_RE = re.compile(r"(?im)^[\ \t>*•#\-]*line\s*:?\s*\d")
+# A location for a field-list finding: 'Line: 42', 'File: a.py:42',
+# 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
+_PROSE_FIELD_LINE_RE = re.compile(
+    r"(?im)(?:^[\ \t>*•#\-]*(?:line|file|location|path)\s*:?\s*\S*:?[ \t]*\d"
+    r"|[A-Za-z0-9_./\-]+:[ \t]*\d)")
 
 
 def _extract_labeled(body, label):

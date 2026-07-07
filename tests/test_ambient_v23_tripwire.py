@@ -225,6 +225,25 @@ def test_round14_real_account_key_still_caught():
         "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq==") is True
 
 
+@pytest.mark.parametrize("line", [
+    "SECRET_NAME=my-service-secret-name",       # config ABOUT a secret
+    "SECRET_PATH=/etc/myapp/secret-file",
+    "TOKEN_EXPIRATION=2026-12-31",
+    "PASSWORD_POLICY=minimum_length_12",
+    "PASSWORD_MIN_LENGTH=12",
+])
+def test_round15_config_about_secrets_not_false_positive(line):
+    assert amb._line_has_secret(line) is False
+
+
+@pytest.mark.parametrize("line", [
+    "DB_PASSWORD=aQ7pR2xL9mZ4kT8v",             # real secret still caught
+    "API_SECRET=wJalrXUtnFEMI123456",
+])
+def test_round15_real_secrets_still_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="
