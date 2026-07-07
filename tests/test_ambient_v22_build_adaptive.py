@@ -129,6 +129,73 @@ def test_build_failure_is_learned():
     assert amb.cap_state("stubborn/model", "build_plan") == "unreliable"
 
 
+# --- Codex-found build bugs ----------------------------------------------
+def test_rf_ladder_is_full_and_unique_for_capable_model():
+    class P:
+        features = ["structured_outputs", "json_mode"]
+    ladder = amb.build_plan_rf_ladder("cap/model", P())
+    types = [None if r is None else r.get("type") for r in ladder]
+    assert types == ["json_schema", "json_object", None]  # full ladder, no skip
+
+
+def test_rf_ladder_min_two_entries_for_unreliable():
+    class P:
+        features = ["structured_outputs", "json_mode"]
+    for _ in range(amb.CAP_FAIL_THRESHOLD):
+        amb.record_cap("bad/model", "structured_json", False)
+    ladder = amb.build_plan_rf_ladder("bad/model", P())
+    assert len(ladder) >= 2 and all(r is None for r in ladder)  # prompt-only ×2
+
+
+def test_terminal_chaterror_aborts_without_burning_the_ladder():
+    calls = []
+
+    def funds_error(api_key, api_url, model, messages, args, **kw):
+        calls.append(1)
+        raise amb.ChatError("funds", "no money near sk-x")
+
+    out, code = _run_build("m", funds_error)
+    assert code == 1 and len(calls) == 1          # aborted on first, no retry
+    assert amb.cap_state("m", "build_plan") != "ok"
+
+
+def test_nonterminal_chaterror_downgrades_and_can_succeed():
+    plan = json.dumps({"plan": [{"path": "tool.py", "purpose": "x"}]})
+    state = {"n": 0}
+
+    def flaky(api_key, api_url, model, messages, args, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise amb.ChatError("service", "transient 400 on json_schema")
+        return (plan, {}, {})
+
+    out, code = _run_build("m", flaky)
+    assert state["n"] == 2 and amb.cap_state("m", "build_plan") == "ok"
+
+
+def test_all_unsafe_paths_records_failure_not_success():
+    evil = json.dumps({"plan": [{"path": "../escape.py", "purpose": "x"}]})
+
+    def bad_paths(api_key, api_url, model, messages, args, **kw):
+        return (evil, {}, {})
+
+    out, code = _run_build("m", bad_paths)
+    assert code == 1
+    assert amb.cap_state("m", "build_plan") != "ok"   # NOT recorded capable
+
+
+def test_fallback_served_model_gets_the_credit_not_requested():
+    plan = json.dumps({"plan": [{"path": "tool.py", "purpose": "x"}]})
+
+    def served_by_other(api_key, api_url, model, messages, args, **kw):
+        return (plan, {}, {"_served_model": "actual/server"})
+
+    _run_build("requested/model", served_by_other)
+    assert amb.cap_state("actual/server", "build_plan") == "ok"
+    # the requested model that never produced it is not credited
+    assert amb.cap_state("requested/model", "build_plan") != "ok"
+
+
 def test_valid_plan_is_recorded_ok():
     plan = json.dumps({"plan": [{"path": "tool.py", "purpose": "does the thing"}]})
 

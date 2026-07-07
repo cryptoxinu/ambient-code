@@ -83,6 +83,44 @@ def test_garbage_returns_none():
     assert amb.parse_prose_findings("") is None
 
 
+# --- Codex-found prose bugs ----------------------------------------------
+def test_bulleted_finding_header_is_parsed():
+    # Codex: '- HIGH (confidence…)' was dropped, then the verdict faked a clean
+    # SHIP. The bulleted header must parse into a real finding.
+    txt = ("- HIGH (confidence: HIGH) — stats.py:10 — off-by-one bug.\n"
+           "Scenario: x.\nVerdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and len(obj["findings"]) == 1
+    assert obj["findings"][0]["file"] == "stats.py"
+
+
+def test_unparsable_finding_lines_do_not_fake_clean_verdict():
+    # A finding-shaped line we CAN'T fully parse must NOT be reported as a clean
+    # verdict with zero findings.
+    txt = ("HIGH (confidence: HIGH): something is wrong but no file:line here\n"
+           "Verdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
+def test_last_verdict_wins_over_quoted_one():
+    # Codex: a 'Verdict: SHIP' quoted in a scenario preceded the real verdict.
+    txt = ("HIGH (confidence: HIGH) — a.py:3 — bug.\n"
+           "Scenario: the doc says 'Verdict: SHIP' but it's wrong.\n"
+           "Verdict: FIX FIRST\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj["verdict"] == "FIX FIRST"
+
+
+def test_reducer_output_does_not_train_structured_ok(_isolate, monkeypatch):
+    # Codex: render_findings trained structured_json=True from the reducer's own
+    # JSON string (which carries _unparsed_chunks), even on partial coverage.
+    monkeypatch.setattr(amb, "_CAP_CACHE", None)
+    reducer_json = json.dumps({"findings": [], "verdict": "NEEDS WORK",
+                               "_unparsed_chunks": 1, "_repaired_chunks": 0})
+    _render_json(reducer_json, "reduced/model")
+    assert amb.cap_state("reduced/model", "structured_json") != "ok"
+
+
 # --- render integration + learning ---------------------------------------
 def _render_json(raw, model):
     buf = io.StringIO()

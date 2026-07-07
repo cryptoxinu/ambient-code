@@ -99,6 +99,32 @@ def test_store_written_0600(_isolate):
     assert mode == 0o600
 
 
+def test_stale_success_does_not_mask_fresh_failures():
+    # Codex: [ok, fail, fail] must be 'unreliable', not 'ok' (hysteresis keyed
+    # on the most-recent outcomes, not "any success ever").
+    amb.record_cap("m", "structured_json", True)
+    amb.record_cap("m", "structured_json", False)
+    amb.record_cap("m", "structured_json", False)
+    assert amb.cap_state("m", "structured_json") == "unreliable"
+
+
+def test_malformed_model_entry_does_not_crash(_isolate, monkeypatch):
+    # Codex: a valid-JSON but structurally-wrong entry ({"m": "bad"}) must not
+    # raise AttributeError on the audit path.
+    _isolate.write_text('{"m": "bad"}', encoding="utf-8")
+    monkeypatch.setattr(amb, "_CAP_CACHE", None)
+    assert amb.cap_state("m", "structured_json") == "unknown"
+    amb.record_cap("m", "structured_json", False)  # must not raise
+
+
+def test_concurrent_writers_do_not_lose_outcomes():
+    # Codex: unlocked read-modify-write lost outcomes. Two sequential record_cap
+    # calls (memo refreshed each time) must both persist.
+    amb.record_cap("m", "structured_json", False)
+    amb.record_cap("m", "structured_json", False)
+    assert amb.cap_state("m", "structured_json") == "unreliable"
+
+
 def test_adaptive_response_format_skips_schema_when_unreliable(monkeypatch):
     class _Prof:
         features = ["structured_outputs"]

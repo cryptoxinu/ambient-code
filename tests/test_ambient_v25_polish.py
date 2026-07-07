@@ -38,26 +38,19 @@ def test_other_400_still_unknown():
     assert cat == "unknown"
 
 
-# --- F05b: the same bug phrased two ways merges --------------------------
-def test_reworded_same_bug_merges():
-    a = ("top_k", "returns", "one", "fewer")
-    b = ("top_k", "returns", "k", "1")
-    assert amb._titles_match(a, b) is True
-
-
+# --- F05b: conservative title match — NEVER false-merge distinct findings -
+# (the fuzzy-overlap version was reverted; Codex showed it dropped a distinct
+#  SQL-injection finding, which is worse than a cosmetic duplicate.)
 def test_distinct_bugs_stay_separate():
     assert amb._titles_match(("missing", "null", "check"),
                              ("missing", "rate", "limit")) is False
 
 
-def test_dedupe_merges_reworded_duplicate_on_same_line():
-    findings = [
-        {"severity": "HIGH", "file": "s.py", "line": 10,
-         "title": "top_k returns one fewer element", "scenario": "x"},
-        {"severity": "HIGH", "file": "s.py", "line": 10,
-         "title": "top_k returns k-1 elements instead of k", "scenario": "yy"},
-    ]
-    assert len(amb.dedupe_findings(findings)) == 1
+def test_distinct_injection_sites_do_not_false_merge():
+    # Codex's counterexample: two DIFFERENT injection sites must stay separate.
+    a = ("sql", "injection", "in", "search")
+    b = ("sql", "injection", "in", "login")
+    assert amb._titles_match(a, b) is False
 
 
 # --- F05d: savings receipt appears on stderr in --json mode --------------
@@ -71,6 +64,18 @@ def test_json_emits_savings_receipt_on_stderr():
     # stdout is clean JSON; the receipt rode stderr
     json.loads(out.getvalue())
     assert "[ambient z-ai/glm-5.2" in err.getvalue()
+
+
+def test_receipt_redacts_key_if_it_ever_appears(monkeypatch):
+    # Codex: the receipt printed `model` unredacted; if model somehow carries a
+    # key it must be scrubbed. redact() is applied now.
+    key = "sk-secretkey-abcdef1234567890"
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        amb.emit_json("ask", model=key, api_key=key, content="hi",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1},
+                      exit_now=False)
+    assert key not in err.getvalue()
 
 
 def test_json_without_usage_has_no_receipt():

@@ -55,6 +55,32 @@ def test_benign_lines_do_not_trip(line):
     assert amb._line_has_secret(line) is False
 
 
+# --- Codex-found bypasses (must all be caught now) -----------------------
+@pytest.mark.parametrize("line", [
+    '{"secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}',   # base64 / and +
+    "DB_PASSWORD='p@ssw0rd-rotated-2026!'",                     # punctuated pw
+    "REDIS_PASSWORD=prod-7k9!",                                 # short pw
+    "NEXT_PUBLIC_AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCY",  # PUBLIC substring abuse
+    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI\\",                    # backslash continuation (line 1)
+])
+def test_codex_bypasses_now_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
+def test_real_public_key_still_excluded():
+    # a genuine *_PUBLIC_KEY trailing component is still not a secret
+    assert amb._line_has_secret(f"RSA_PUBLIC_KEY={_HI}") is False
+    assert amb._line_has_secret(f"PUBLIC_KEY={_HI}") is False
+
+
+def test_double_gutter_bypass_blocked(capsys):
+    # attacker embeds a fake gutter so a single strip leaves "12| SECRET=…"
+    chunks = [("x.txt", f"   1| 12| AWS_SECRET_ACCESS_KEY={_HI}\n")]
+    with pytest.raises(SystemExit) as ei:
+        amb.refuse_if_secrets(chunks, allow=False)
+    assert "x.txt" in (str(ei.value.code) + capsys.readouterr().err)
+
+
 # --- existing patterns still work (no regression) ------------------------
 def test_existing_patterns_still_detected():
     assert amb._line_has_secret("api_key: 'abcdef1234567890XYZ'") is True

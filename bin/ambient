@@ -1295,30 +1295,36 @@ CAP_FAIL_THRESHOLD = 2    # recent fails (with no recent ok) => "unreliable"
 _CAP_CACHE = None
 
 
+def _read_caps_file():
+    """Fresh read of the capability store from disk (no memo). Missing/corrupt
+    → {} (learning restarts clean, never an error)."""
+    try:
+        with open(CAPABILITY_PATH, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _load_caps():
-    """The learned capability store, read ONCE per process (memoized). A
-    missing/corrupt store yields an empty table — learning restarts clean,
-    never an error. Disabled telemetry yields an empty table (no history)."""
+    """The learned capability store, read ONCE per process (memoized). Disabled
+    telemetry yields an empty table (no history)."""
     global _CAP_CACHE
     if _CAP_CACHE is not None:
         return _CAP_CACHE
-    table = {}
-    if _telemetry_enabled():
-        try:
-            with open(CAPABILITY_PATH, encoding="utf-8") as fh:
-                raw = json.load(fh)
-            if isinstance(raw, dict):
-                table = raw
-        except (OSError, ValueError):
-            pass  # missing/corrupt store → start fresh
-    _CAP_CACHE = table
-    return table
+    _CAP_CACHE = _read_caps_file() if _telemetry_enabled() else {}
+    return _CAP_CACHE
 
 
 def _cap_recent(model, dim):
     """The last-K outcomes for (model, dim) as a list of 0/1, or [] if none/
-    malformed — the one place that tolerates a hand-edited or corrupt store."""
-    rec = (_load_caps().get(model) or {}).get(dim)
+    malformed — the one place that tolerates a hand-edited or corrupt store.
+    Guards EVERY layer (a `{"m": "bad"}` model entry must not crash the audit
+    path that calls cap_state)."""
+    model_rec = _load_caps().get(model)
+    if not isinstance(model_rec, dict):
+        return []
+    rec = model_rec.get(dim)
     if not isinstance(rec, dict):
         return []
     recent = rec.get("recent")
@@ -1330,17 +1336,19 @@ def _cap_recent(model, dim):
 def cap_state(model, dim):
     """Learned state for (model, dimension): 'ok' | 'unreliable' | 'unknown'.
     'unknown' when learning is off or there is no history (the caller then
-    tries the optimistic path). Hysteresis: any recent SUCCESS => 'ok' (trust
-    it again — models improve); else >= CAP_FAIL_THRESHOLD recent fails =>
-    'unreliable'; otherwise 'unknown'."""
+    tries the optimistic path). Hysteresis keyed on the MOST RECENT outcome so
+    a stale success can't mask fresh failures: the latest attempt succeeded =>
+    'ok' (recovered — models improve); the latest failed AND the last
+    CAP_FAIL_THRESHOLD attempts all failed => 'unreliable'; otherwise
+    'unknown'."""
     if not model or not _telemetry_enabled():
         return "unknown"
     recent = _cap_recent(model, dim)
     if not recent:
         return "unknown"
-    if any(recent):
+    if recent[-1] == 1:
         return "ok"
-    if len(recent) >= CAP_FAIL_THRESHOLD:
+    if len(recent) >= CAP_FAIL_THRESHOLD and not any(recent[-CAP_FAIL_THRESHOLD:]):
         return "unreliable"
     return "unknown"
 
@@ -1370,19 +1378,31 @@ def record_cap(model, dim, ok):
     break a real result the user is waiting on. No-op when learning is off."""
     if not model or not _telemetry_enabled():
         return
+    global _CAP_CACHE
     try:
-        table = dict(_load_caps())
-        model_rec = dict(table.get(model) or {})
-        dim_rec = dict(model_rec.get(dim) or {})
-        recent = _cap_recent(model, dim)
-        recent.append(1 if ok else 0)
-        dim_rec["recent"] = recent[-CAP_RECENT_K:]
-        dim_rec["updated"] = time.time()
-        model_rec[dim] = dim_rec
-        table[model] = model_rec
-        _write_caps(table)
-        global _CAP_CACHE
+        conf_dir = os.path.dirname(CAPABILITY_PATH)
+        os.makedirs(conf_dir, exist_ok=True)
+        # Read-modify-write UNDER the shared config lock and re-read fresh from
+        # disk inside it, so two concurrent processes can't clobber each other's
+        # outcomes (Codex: unlocked RMW lost outcomes).
+        with _config_lock(conf_dir):
+            table = _read_caps_file()
+            model_rec = dict(table.get(model) if isinstance(table.get(model), dict) else {})
+            dim_rec = model_rec.get(dim)
+            dim_rec = dict(dim_rec) if isinstance(dim_rec, dict) else {}
+            prior = dim_rec.get("recent")
+            recent = [1 if x else 0 for x in prior] if isinstance(prior, list) else []
+            recent.append(1 if ok else 0)
+            dim_rec["recent"] = recent[-CAP_RECENT_K:]
+            dim_rec["updated"] = time.time()
+            model_rec[dim] = dim_rec
+            table[model] = model_rec
+            _write_caps(table)
         _CAP_CACHE = table
+    except SystemExit:
+        # _config_lock sys.exits if it cannot open the lock — a telemetry write
+        # must never abort the real result the caller is waiting on.
+        pass
     except Exception:
         pass  # never propagate a telemetry failure into the caller
 
@@ -1408,6 +1428,29 @@ def downgrade_response_format(rf, profile):
             and "json_mode" in (getattr(profile, "features", None) or [])):
         return {"type": "json_object"}
     return None
+
+
+def build_plan_rf_ladder(model, profile):
+    """Ordered, de-duplicated response_format rungs to try for a build plan:
+    the adaptive first choice, then each strictly-looser fallback, ending in
+    prompt-only (None). A capable strict+json model gets json_schema ->
+    json_object -> None (Codex: the old 2-entry ladder skipped prompt-only); a
+    learned-unreliable model goes straight to prompt-only. Always >= 2 entries
+    so the reminder-retry still fires."""
+    def _t(rf):
+        return None if rf is None else rf.get("type")
+    rf = adaptive_response_format(model, profile, BUILD_PLAN_SCHEMA)
+    ladder, guard = [], 0
+    while guard < 4:
+        guard += 1
+        if not ladder or _t(ladder[-1]) != _t(rf):
+            ladder.append(rf)
+        if rf is None:
+            break
+        rf = downgrade_response_format(rf, profile)
+    if len(ladder) < 2:
+        ladder.append(ladder[-1])  # a second (reminder-)retry on the same rung
+    return ladder
 
 
 def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
@@ -2999,7 +3042,7 @@ def auth_probe(api_url, api_key, models):
 
 
 SECRET_PATTERNS = [
-    re.compile(r"(?i)(?:api[_-]?key|secret|passwd|password|token)['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9_.\-]{16,}"),
+    re.compile(r"(?i)(?:api[_-]?key|secret|passwd|password|token)['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9+/_.\-]{16,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)bearer\s+[A-Za-z0-9_.\-]{20,}"),
@@ -3018,19 +3061,25 @@ SECRET_PATTERNS = [
 # on minified/hex blobs). _line_has_secret gates it on
 # the literal '://' and scans only a bounded window around each occurrence.
 CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{6,}@")
-# A high-entropy value assigned to an ALL-CAPS env identifier whose last
-# component names a credential (AWS_SECRET_ACCESS_KEY=…, DB_PASSWORD=…,
-# GITHUB_TOKEN=…). The keyword-abuts-'=' pattern above MISSES these — the token
-# right before '=' is a bare KEY/TOKEN component, not the keyword — which let a
-# creds.txt holding a real secret reach the network (stress test F02). Anchored
-# and linear-time ('_' is a hard delimiter so the quantifiers can't overlap); a
-# 16+ value guard keeps the false-positive rate low. A PUBLIC_* identifier is
-# excluded (a public key is not a secret) by the caller.
+# A value assigned to an ALL-CAPS env identifier whose last component names a
+# credential (AWS_SECRET_ACCESS_KEY=…, DB_PASSWORD=…, GITHUB_TOKEN=…). The
+# keyword-abuts-'=' pattern above MISSES these — the token right before '=' is a
+# bare KEY/TOKEN component, not the keyword — which let a creds.txt holding a
+# real secret reach the network (stress test F02). Anchored and linear-time ('_'
+# is a hard delimiter so the quantifiers can't overlap). The identifier itself
+# signals credential intent, so the value guard is broad (any 8+ run of
+# non-space, non-quote chars — catches punctuated/base64 secrets and short
+# passwords a 16-alnum guard missed). A *_PUBLIC_KEY identifier is excluded by
+# the caller (a public key is not a secret) — but ONLY when PUBLIC_KEY is the
+# actual trailing component, not merely a substring (NEXT_PUBLIC_AWS_SECRET_KEY
+# is still a secret).
+_ENV_CRED_IDENT = (
+    r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_"
+    r"(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL|CREDENTIALS|KEY)")
 ENV_SECRET_ASSIGN_RE = re.compile(
-    r"^[ \t]*(?:export[ \t]+)?"
-    r"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_"
-    r"(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL|CREDENTIALS|KEY))"
-    r"[ \t]*[:=][ \t]*['\"]?[A-Za-z0-9+/_.\-]{16,}")
+    r"^[ \t]*(?:export[ \t]+)?(" + _ENV_CRED_IDENT + r")"
+    r"[ \t]*[:=][ \t]*['\"]?[^\s'\"]{8,}")
+_PUBLIC_KEY_IDENT_RE = re.compile(r"(^|_)PUBLIC_KEY$")
 # Credential-named files refused regardless of content (the
 # old check missed .envrc/.netrc/.npmrc/.pgpass/id_rsa/*.pem/credentials.json).
 SECRET_NAMES_RE = re.compile(
@@ -3043,7 +3092,7 @@ def _line_has_secret(line):
     if any(p.search(line) for p in SECRET_PATTERNS):
         return True
     m = ENV_SECRET_ASSIGN_RE.search(line)
-    if m and "PUBLIC" not in m.group(1):  # a public key is not a secret
+    if m and not _PUBLIC_KEY_IDENT_RE.search(m.group(1)):  # *_PUBLIC_KEY only
         return True
     if "://" not in line:
         return False
@@ -3075,10 +3124,18 @@ def refuse_if_secrets(labeled_chunks, allow):
             # Scan the SEMANTIC content, not the presentation: audit inputs are
             # line-number-guttered ("  42| CODE") before the tripwire, and an
             # anchored secret pattern would miss a gutter-prefixed assignment
-            # (the leak the stress test found). Strip the gutter, and report the
-            # true absolute line it carried when present.
-            m = re.match(r"^ *(\d+)\| ?(.*)$", line)
-            disp, scan_line = (int(m.group(1)), m.group(2)) if m else (lineno, line)
+            # (the leak the stress test found). Strip ALL leading gutter
+            # segments — attacker-crafted content can embed a second fake gutter
+            # ("1| 12| SECRET=…") to survive a single strip — and report the
+            # first (true) absolute line number.
+            first = re.match(r"^ *(\d+)\| ?", line)
+            disp = int(first.group(1)) if first else lineno
+            scan_line = line
+            while True:
+                stripped = re.sub(r"^ *\d+\| ?", "", scan_line, count=1)
+                if stripped == scan_line:
+                    break
+                scan_line = stripped
             if _line_has_secret(scan_line):
                 hits.append(f"{label}:{disp}")
     if hits:
@@ -4965,8 +5022,9 @@ def render_result(text, partial, reason, args, api_key, usage=None, model=None,
                 else savings_note(model, usage))
         rhint = _reasoning_hint(text, usage.get("completion_tokens"))
         print(
-            f"\n[ambient {model} | in={usage.get('prompt_tokens')} "
-            f"out={usage.get('completion_tokens')} tokens{rhint}{note}]",
+            redact(f"\n[ambient {model} | in={usage.get('prompt_tokens')} "
+                   f"out={usage.get('completion_tokens')} tokens{rhint}{note}]",
+                   api_key),
             file=sys.stderr,
         )
 
@@ -5010,9 +5068,9 @@ def emit_json(kind, *, model, api_key="", content=None, findings=None,
         # invisible to anyone who runs with --json. savings_note owns the
         # honesty rules (assumed pricing → no claim; est. label).
         note = savings_note(model, usage)
-        print(f"[ambient {model} | in={usage.get('prompt_tokens')} "
-              f"out={usage.get('completion_tokens')} tokens{note}]",
-              file=sys.stderr)
+        print(redact(f"[ambient {model} | in={usage.get('prompt_tokens')} "
+                     f"out={usage.get('completion_tokens')} tokens{note}]",
+                     api_key), file=sys.stderr)
     if code and exit_now:
         sys.exit(code)
     return code
@@ -6671,22 +6729,17 @@ def _finding_sig(f):
 
 
 def _titles_match(a, b):
-    """Same bug if the shorter title is a word-prefix of the longer (over at
-    most 4 significant words), OR the titles share their first two words AND
-    overlap on at least half their words. The second clause merges the SAME
-    bug phrased two ways ('top_k returns one fewer element' vs 'top_k returns
-    k-1 elements' — best-of counted these as two findings), while 'missing null
-    check' and 'missing rate limit' still stay distinct."""
+    """Same bug if the shorter title is a word-prefix of the longer, compared
+    over at most 4 significant words: 'SQL injection' matches 'SQL injection
+    here', but 'missing null check' does not match 'missing rate limit'.
+    (A looser token-overlap heuristic was tried for F05b's cosmetic best-of
+    duplicates but reverted — Codex showed it false-merges 'SQL injection in
+    search query' with '…in login query', and DROPPING a distinct finding is
+    far worse than showing a duplicate.)"""
     n = min(len(a), len(b), 4)
     if n == 0:
         return not a and not b
-    if a[:n] == b[:n]:
-        return True
-    if len(a) >= 2 and len(b) >= 2 and a[:2] == b[:2]:
-        sa, sb = set(a), set(b)
-        if len(sa & sb) >= max(2, (min(len(sa), len(sb)) + 1) // 2):
-            return True
-    return False
+    return a[:n] == b[:n]
 
 
 def dedupe_findings(findings):
@@ -6766,27 +6819,37 @@ def findings_reducer(texts):
 # and a closing one-line verdict. This is the fallback contract: any reasoning
 # model that follows the prose spec (even one that ignores the JSON schema, like
 # GLM 5.2 on Ambient) still produces recoverable structured findings.
+# Leading noise a finding/verdict line may carry: whitespace, blockquote,
+# markdown bold, and list bullets (-, *, +, •) — a bulleted header must still
+# parse (Codex: '- HIGH (confidence…)' was dropped, then a verdict line faked a
+# clean SHIP).
+_PROSE_LEAD = r"[\ \t>*•+\-]*"
 _PROSE_FINDING_RE = re.compile(
-    r"""(?imx)
-    ^[\ \t>*]*                                     # ws / blockquote / md-bold
-    (CRITICAL|HIGH|MEDIUM|LOW)\b                    # 1 severity
-    [^\n]*?\(\s*confidence\s*:\s*(HIGH|LOW)\s*\)    # 2 confidence
-    [^\n]*?[—–\-]\s*                               # sep -> file:line
-    ([^\s:—–]+?):(\d+)                             # 3 file  4 line
-    \s*[—–\-]\s*                                   # sep -> title
-    (.+?)\s*$                                       # 5 title (rest of line)
-    """)
+    r"(?im)"
+    r"^" + _PROSE_LEAD +                              # leading noise / bullet
+    r"(CRITICAL|HIGH|MEDIUM|LOW)\b"                    # 1 severity
+    r"[^\n]*?\(\s*confidence\s*:\s*(HIGH|LOW)\s*\)"    # 2 confidence
+    r"[^\n]*?[—–\-]\s*"                               # sep -> file:line
+    r"([^\s:—–]+?):(\d+)"                             # 3 file  4 line
+    r"\s*[—–\-]\s*"                                   # sep -> title
+    r"(.+?)\s*$")                                      # 5 title (rest of line)
 _PROSE_VERDICT_RE = re.compile(
-    r"(?im)^[\ \t>*]*verdict\b\s*[:\-—]?\s*\**\s*(SHIP|FIX FIRST|NEEDS WORK)\b")
+    r"(?im)^" + _PROSE_LEAD + r"verdict\b\s*[:\-—]?\s*\**\s*"
+    r"(SHIP|FIX FIRST|NEEDS WORK)\b")
+# A finding-SHAPED line (severity + confidence) — used to detect that a reply
+# DID contain findings we failed to parse, so we never mistake a partial parse
+# for a clean "no defects" verdict.
+_PROSE_SEVERITY_HINT_RE = re.compile(
+    r"(?im)\b(CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:")
 
 
 def _extract_labeled(body, label):
     """The text of a `Label: …` block up to the next blank line, next finding
     header, or end — whitespace collapsed, markdown stripped. '' when absent."""
     m = re.search(
-        r"(?im)^[\ \t>*]*" + label + r"\b\s*[:\-—]\s*(.+?)"
-        r"(?=\n[\ \t]*\n|\n[\ \t>*]*(?:CRITICAL|HIGH|MEDIUM|LOW)\b"
-        r"|\n[\ \t>*]*verdict\b|\Z)",
+        r"(?im)^" + _PROSE_LEAD + label + r"\b\s*[:\-—]\s*(.+?)"
+        r"(?=\n[\ \t]*\n|\n" + _PROSE_LEAD + r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b"
+        r"|\n" + _PROSE_LEAD + r"verdict\b|\Z)",
         body, re.S)
     if not m:
         return ""
@@ -6819,13 +6882,20 @@ def parse_prose_findings(text):
             "scenario": _extract_labeled(body, "scenario"),
             "fix": _extract_labeled(body, "fix"),
         })
-    vm = _PROSE_VERDICT_RE.search(text)
+    # The FINAL verdict line wins — an earlier one may be quoted inside a
+    # finding's scenario (Codex: 'Verdict: SHIP' in a scenario preceded the real
+    # 'Verdict: FIX FIRST').
+    verdicts = _PROSE_VERDICT_RE.findall(text)
+    vlast = verdicts[-1].upper() if verdicts else None
     if not findings:
-        # No parsed findings, but a "code is sound — SHIP" reply is still a
-        # real, recoverable result; a bare non-audit blob is not.
-        return {"findings": [], "verdict": vm.group(1).upper()} if vm else None
-    verdict = vm.group(1).upper() if vm else _verdict_from(findings, False)
-    return {"findings": findings, "verdict": verdict}
+        # A "code is sound — SHIP" reply (verdict, no finding-shaped lines) is a
+        # real recoverable result. But if the text DID contain finding-shaped
+        # lines we simply failed to parse, that's an unrecoverable parse — never
+        # fake a clean verdict; fall through to the raw-text envelope.
+        if _PROSE_SEVERITY_HINT_RE.search(text):
+            return None
+        return {"findings": [], "verdict": vlast} if vlast else None
+    return {"findings": findings, "verdict": vlast or _verdict_from(findings, False)}
 
 
 def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
@@ -6863,10 +6933,15 @@ def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
             else:
                 print(redact(text, api_key))
             return True
-    # A direct model response (str) tells us whether this model honors
-    # structured output: clean JSON => yes; prose recovery => no. A pre-merged
-    # dict (from the reducer) isn't a single model's structured reply — skip.
-    if isinstance(raw, str):
+    # A direct SINGLE-SHOT model response tells us whether this model honors
+    # structured output: clean JSON => yes; prose recovery => no. The reducer
+    # emits its own JSON STRING carrying _unparsed_chunks / _repaired_chunks
+    # markers — that is deterministic tool output, NOT this model's structured
+    # reply (Codex: it was training structured_json=True from partial reducer
+    # output), so skip recording for it.
+    is_reducer_output = isinstance(obj, dict) and any(
+        k in obj for k in ("_unparsed_chunks", "_repaired_chunks", "_repaired"))
+    if isinstance(raw, str) and not is_reducer_output:
         record_cap(model, "structured_json", not recovered_from_prose)
     findings = obj["findings"]
     # Normalize a "file:line" leaked into the file field (gutter artifact).
@@ -9336,18 +9411,17 @@ def cmd_build(args, api_key, api_url, conf):
                   f"build plan before; {DEFAULT_CODE_MODEL} is reliable for "
                   f"builds (re-run with -m {DEFAULT_CODE_MODEL} to switch). "
                   "Trying your model anyway.", file=sys.stderr)
-        rf = adaptive_response_format(model, profile, BUILD_PLAN_SCHEMA)
         user = f"TASK: {task}"
         if context:
             user += f"\n\nContext files:\n\n{context}"
         # Gate the (cheap) planning call too so AMBIENT_MAX_SPEND is a true
         # ceiling across BOTH phases, not just generation.
         cost_gate(catalog, model, len(task) + len(context), 1, args, conf)
-        obj = None
+        obj, served_model = None, model
         # Adaptive ladder: each attempt DOWNGRADES the structured-output demand
-        # (strict json_schema -> json_object -> prompt-only) rather than
-        # re-sending the same doomed request the model already ignored.
-        attempts = [rf, downgrade_response_format(rf, profile)]
+        # (json_schema -> json_object -> prompt-only) rather than re-sending the
+        # same doomed request the model already ignored.
+        attempts = build_plan_rf_ladder(model, profile)
         for attempt, attempt_rf in enumerate(attempts, 1):
             pa, extra = _ns_with(
                 attempt_rf, "" if (attempt_rf and attempt_rf.get("type") == "json_schema")
@@ -9358,23 +9432,32 @@ def cmd_build(args, api_key, api_url, conf):
                     [{"role": "system", "content": BUILD_PLAN_PROMPT + extra},
                      {"role": "user", "content": user}], pa, session=session)
             except ChatError as err:
-                _fail(args, "build",
-                      ChatError(err.category,
-                                f"planning failed — {err.diagnosis}"),
-                      api_key)
+                # Terminal failures (bad key, no funds, network) won't improve on
+                # a looser rung — abort now. Otherwise a structured-output
+                # rejection often clears on the next rung, so fall through.
+                if err.category in ("key", "funds", "network") \
+                        or attempt == len(attempts):
+                    record_cap(model, "build_plan", False)
+                    _fail(args, "build",
+                          ChatError(err.category,
+                                    f"planning failed — {err.diagnosis}"),
+                          api_key)
+                continue
             obj = extract_json(content)
             if obj and isinstance(obj.get("plan"), list) and obj["plan"]:
+                # Record under the model that ACTUALLY served (opt-in --fallback
+                # may have served a different one — don't pollute the requested
+                # model's learning).
+                served_model = (_b or {}).get("_served_model") or model
                 break
+            obj = None
             if attempt < len(attempts):
                 print("ambient: plan reply wasn't valid JSON — retrying with a "
                       "looser output format", file=sys.stderr)
                 user += ("\n\nREMINDER: return ONLY the JSON object, no prose, "
                          "no fences.")
-        ok_plan = bool(obj and isinstance(obj.get("plan"), list) and obj["plan"])
-        # Learn whether this model can drive a structured build plan, so the
-        # next build on it starts with the heads-up above instead of a wall.
-        record_cap(model, "build_plan", ok_plan)
-        if not ok_plan:
+        if not (obj and isinstance(obj.get("plan"), list) and obj["plan"]):
+            record_cap(model, "build_plan", False)
             pmsg = (f"{model} did not produce a usable build plan even after "
                     "loosening the output format — it may not support "
                     f"structured build output. Try -m {DEFAULT_CODE_MODEL} "
@@ -9395,6 +9478,9 @@ def cmd_build(args, api_key, api_url, conf):
             print(f"ambient: plan capped at {args.max_files} files "
                   f"(model proposed {len(obj['plan'])}; raise with "
                   "--max-files)", file=sys.stderr)
+        # Learn AFTER path validation (Codex: recording True before validation
+        # marked a model capable when every path was unsafe → build unusable).
+        record_cap(served_model, "build_plan", bool(plan))
         if not plan:
             rmsg = ("every planned path was rejected as unsafe — not "
                     "proceeding. (This usually means a poisoned or confused "
