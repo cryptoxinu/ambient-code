@@ -336,6 +336,14 @@ def test_clean_audit_mentioning_lines_count_stays_clean():
     assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
 
 
+def test_github_anchor_finding_parses():
+    # Codex round 23: 'app/auth.py#L42' GitHub-style anchor.
+    o = amb.parse_prose_findings(
+        "HIGH (confidence: HIGH) — app/auth.py#L42 — auth bypass.\nVerdict: SHIP\n")
+    assert o is not None and len(o["findings"]) == 1
+    assert o["findings"][0]["file"] == "app/auth.py" and o["findings"][0]["line"] == 42
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
