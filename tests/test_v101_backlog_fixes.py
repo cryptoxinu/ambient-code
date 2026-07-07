@@ -250,5 +250,43 @@ class TestPhase5AuditDedupe(unittest.TestCase):
         self.assertIn("chunk 3 of 5", rendered)     # ambient index substituted
 
 
+# ------------------------------------------------- Phase 6: reliability/misc
+
+class TestPhase6Misc(unittest.TestCase):
+    def test_M32_trust_url_prompts_go_to_stderr_not_stdout(self):
+        import io
+        import sys
+        args = argparse.Namespace(url="https://gw.example.com")
+        out, err = io.StringIO(), io.StringIO()
+
+        class _TTY(io.StringIO):
+            def isatty(self):
+                return True
+        with _patch(sys, "stdout", out), _patch(sys, "stderr", err), \
+                _patch(sys, "stdin", _TTY("nope\n")):
+            with self.assertRaises(SystemExit):   # hostname mismatch → no save
+                amb.cmd_trust_url(args)
+        # the key-exfil warning + prompt must NOT pollute stdout
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("Authorization header", err.getvalue())
+
+    def test_M14_shim_is_ours_only_matches_our_template(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ours = os.path.join(d, "a.cmd")
+            with open(ours, "w", encoding="utf-8") as fh:
+                fh.write('@python "/x/ambient-code/1.0/bin/ambient" %*\r\n')
+            self.assertTrue(amb._shim_is_ours(ours))
+            foreign = os.path.join(d, "b.cmd")
+            with open(foreign, "w", encoding="utf-8") as fh:
+                fh.write('@echo off\r\ncall other-tool %*\r\n')
+            self.assertFalse(amb._shim_is_ours(foreign))
+            # our template but a NON-ambient target → not ours
+            other = os.path.join(d, "c.cmd")
+            with open(other, "w", encoding="utf-8") as fh:
+                fh.write('@python "/x/some-tool/bin/run" %*\r\n')
+            self.assertFalse(amb._shim_is_ours(other))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -458,19 +458,24 @@ def cmd_trust_url(args):
     if not sys.stdin.isatty():
         sys.exit("ambient: trust-url is interactive-only (a typed confirmation "
                  "proves a human made this decision)")
+    # M32: interactive prompts + status go to STDERR (input() defaults its
+    # prompt to stdout) so a caller capturing stdout gets clean, parseable output.
     print(
         f"Your Ambient API key will be sent in the Authorization header to\n"
         f"  {host}\non EVERY future call. Only do this for a gateway you run "
-        "or fully trust."
+        "or fully trust.", file=sys.stderr
     )
     try:
-        typed = input(f"Type the hostname ({host}) to confirm: ").strip().lower()
+        sys.stderr.write(f"Type the hostname ({host}) to confirm: ")
+        sys.stderr.flush()
+        typed = input().strip().lower()
     except (EOFError, KeyboardInterrupt):
         sys.exit("\nambient: cancelled")
     if typed != host:
         sys.exit("ambient: hostname mismatch — nothing saved")
     save_config_values({"AMBIENT_TRUSTED_URL": url, "AMBIENT_API_URL": url})
-    print(f"Trusted endpoint saved: {url}\nRevert any time: ambient trust-url --reset")
+    print(f"Trusted endpoint saved: {url}\nRevert any time: ambient trust-url --reset",
+          file=sys.stderr)
 
 
 def cmd_trust_url_reset():
@@ -1961,6 +1966,19 @@ def estimate_cost_fb(catalog, model, input_chars, n_calls, max_tokens,
     if per_call_tokens is None:
         per_call_tokens = getattr(args, "_fb_per_call_tokens", None)
     uniform = per_call_chars is None and per_call_tokens is None
+    # L9: a PROVIDED per-call vector whose length != n_calls is an internal
+    # inconsistency. zip() would silently truncate the pricing loop and
+    # UNDER-reserve — but there is also NO safe conservative re-price: the
+    # fallback uplift is not monotone in size (a larger synthetic size can
+    # select a different, cheaper-uplift candidate), so an omitted large item
+    # can't be bounded by any single synthetic size. Degrade to the base
+    # requested-model estimate (which fully gates the REAL spend; only the
+    # secondary --fallback uplift is skipped) and warn, rather than mis-reserve.
+    if (per_call_chars is not None and len(per_call_chars) != n_calls) or \
+            (per_call_tokens is not None and len(per_call_tokens) != n_calls):
+        _fleet_warn("per-call pricing vector length mismatch — reserving the "
+                    "base estimate without the fallback uplift")
+        return exp, bnd, asm
     sizes = (list(per_call_chars) if per_call_chars is not None
              else [input_chars / n_calls] * n_calls)
     budgets = (list(per_call_tokens) if per_call_tokens is not None
@@ -3560,7 +3578,10 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     catalog = fetch_models(api_url, api_key)
                 except (NetworkError, SystemExit):
                     catalog = []
-                fb_conf = read_config_file()
+                # L8: prefer the session's already-loaded conf (honors any
+                # session-level overrides + skips a disk re-read in this retry
+                # path); fall back to reading the file only if none was threaded.
+                fb_conf = session.conf or read_config_file()
                 # SACRED override: callers running a model the user
                 # EXPLICITLY chose (a --consensus set member, a chat /model
                 # pick) set _no_fallback — the swap is disabled outright, even
@@ -3573,8 +3594,9 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     # to a model whose context can hold the input we're about
                     # to resend PLUS its own output budget + overhead, so the
                     # switch can't overflow context or induce a marathon.
-                    input_tok = int(sum(len(m.get("content") or "")
-                                        for m in messages) / CHARS_PER_TOKEN)
+                    input_chars_sum = sum(len(m.get("content") or "")
+                                          for m in messages)
+                    input_tok = int(input_chars_sum / CHARS_PER_TOKEN)
                     alt = pick_fallback_model(catalog, model,
                                               min_context=input_tok,
                                               conf=fb_conf)
@@ -3584,7 +3606,12 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                                       if spec._auto_budget
                                       else min(spec.max_tokens,
                                                alt_profile.max_output_length))
-                        if input_tok + alt_budget + 2500 \
+                        # L3: size the input against the ALT model's OWN observed
+                        # chars-per-token for the fit check — the global constant
+                        # can mis-size a model with a different tokenizer and let
+                        # a too-tight switch overflow context.
+                        alt_input_tok = int(input_chars_sum / _effective_cpt(alt))
+                        if alt_input_tok + alt_budget + 2500 \
                                 > alt_profile.context_length:
                             alt = None  # can't hold input+output — don't switch
                     if alt and alt_profile:
@@ -3685,7 +3712,12 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # shapes.
             body.setdefault("finish_reason", finish)
         usage = body.get("usage") or {}
-        if isinstance(content, str):
+        content_str = content if isinstance(content, str) else ""
+        # M19/L22: meter whenever we got content OR reasoning. A reasoning-only
+        # response has content=None but still SPENT output tokens — the old
+        # `isinstance(content, str)` gate skipped its metering entirely, so that
+        # billed reasoning never reached the ledger / --json usage.
+        if content_str or reasoning_text:
             # Ambient's stream does not reliably send a COMPLETE usage object
             # (probe finding — sometimes none, sometimes completion_tokens with
             # prompt_tokens=0), so metering + the --json envelope went blind on
@@ -3701,7 +3733,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                         1, int(in_chars / CHARS_PER_TOKEN))
                     filled["_estimated"] = True
             if not _as_pos_int(usage.get("completion_tokens"), 0):
-                out_chars = len(content) + len(reasoning_text)
+                out_chars = len(content_str) + len(reasoning_text)
                 if out_chars > 0:
                     filled["completion_tokens"] = max(
                         1, int(out_chars / CHARS_PER_TOKEN))
@@ -4389,6 +4421,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     use_cache = not spec.no_cache
     cache_ttl = spec.cache_ttl or CACHE_TTL_DEFAULT
     cache_hits = [0]
+    cache_hits_lock = threading.Lock()   # L14: workers increment concurrently
 
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
@@ -4414,7 +4447,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
         if use_cache:
             cached = _cache_get(key, cache_ttl)
             if cached is not None:
-                cache_hits[0] += 1
+                with cache_hits_lock:
+                    cache_hits[0] += 1
                 return cached, False
         # Ride out transient rate-limits during a fan-out instead of turning a
         # brief 429 burst into a permanent coverage gap. The gate (when shared
@@ -9929,6 +9963,19 @@ def _link_is_ours(dest):
     return "/ambient-code/" in target.replace("\\", "/")
 
 
+def _shim_is_ours(shim_path):
+    """Windows analogue of _link_is_ours for the `.cmd` shim (M14): true only if
+    the file is OUR exact `@python "<target>" %*` template AND the target has an
+    `/ambient-code/` component — so `--remove` never deletes a foreign shim."""
+    try:
+        with open(shim_path, encoding="utf-8") as fh:
+            body = fh.read().strip()
+    except OSError:
+        return False
+    m = re.fullmatch(r'@python "(.+)" %\*', body)
+    return bool(m) and "/ambient-code/" in m.group(1).replace("\\", "/")
+
+
 def cmd_link(args):
     """Put a stable `ambient` launcher on PATH. Marketplace installs live in a
     VERSIONED cache dir that changes on every update — a symlink in
@@ -9938,6 +9985,18 @@ def cmd_link(args):
     dest_dir = os.path.expanduser(getattr(args, "dir", None) or "~/.local/bin")
     dest = os.path.join(dest_dir, "ambient")
     if getattr(args, "remove", False):
+        if os.name == "nt":   # M14: install wrote ambient.cmd, not a symlink
+            shim = os.path.join(dest_dir, "ambient.cmd")
+            if os.path.exists(shim):
+                if _shim_is_ours(shim):
+                    os.remove(shim)
+                    print(f"removed: {shim}")
+                else:
+                    sys.exit(f"ambient: {shim} is not an ambient-code launcher "
+                             "— refusing to delete it")
+            else:
+                print(f"nothing to remove at {shim}")
+            return
         if os.path.islink(dest):
             if _link_is_ours(dest):
                 os.unlink(dest)
