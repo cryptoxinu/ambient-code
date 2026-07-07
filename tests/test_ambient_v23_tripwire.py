@@ -244,6 +244,26 @@ def test_round15_real_secrets_still_caught(line):
     assert amb._line_has_secret(line) is True
 
 
+@pytest.mark.parametrize("line", [
+    'DB_PASSWORD = os.getenv("DB_PASSWORD")',        # #1 secret-plumbing pattern
+    'API_SECRET = os.environ.get("API_SECRET")',
+    "const DB_PASSWORD = process.env.DB_PASSWORD;",
+    'AWS_SECRET_ACCESS_KEY = os.environ.get("KEY")',
+    "password = hashPassword(raw)",
+])
+def test_round16_env_plumbing_code_not_false_positive(line):
+    assert amb._line_has_secret(line) is False
+
+
+@pytest.mark.parametrize("line", [
+    "DB_PASSWORD=prod.db.password",          # .env dotted value (no spaces) = secret
+    "DB_PASSWORD=aQ7pR2xL9mZ4kT8v",          # bare high-entropy = secret
+    "DB_PASSWORD=p(ass)w0rd!",               # bracketed password = secret
+])
+def test_round16_real_env_secrets_still_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="

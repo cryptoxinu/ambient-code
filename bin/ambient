@@ -3201,6 +3201,21 @@ _CODE_REF_ASSIGN_RE = re.compile(
     r"readonly|self\.|this\.)\s*)*"
     r"(?=[\w.]*[a-z])[A-Za-z_][\w.]*\s*[:=]\s*"       # LHS must have a lowercase
     r"[a-z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+\s*;?\s*$")
+# An assignment (any case) whose VALUE is a code EXPRESSION — a function call
+# ('DB_PASSWORD = os.getenv("DB_PASSWORD")', the #1 secret-plumbing pattern) or a
+# dotted reference ('X = process.env.SECRET') — is CODE, never a credential. A
+# BARE identifier value ('DB_PASSWORD=aQ7pR2xL9mZ4kT8v') and a real bracketed
+# password ('DB_PASSWORD=p(ass)w0rd!') are NOT cleared — they lack the clean
+# call/dotted-ref shape (Codex round 16).
+_ENV_CODE_VALUE_RE = re.compile(
+    # A function/method CALL value is always code, any spacing:
+    r"[:=]\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*"
+    r"\([^)\n]*\)\s*;?\s*$"
+    # A DOTTED-reference value is code only with SPACES around the operator
+    # (code style) — NOT '.env' 'KEY=prod.db.password' with no spaces, which is
+    # a real secret (Codex round 13 vs 16):
+    r"|[ \t][:=][ \t]+[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+\s*;?\s*$")
 
 
 def _env_assignment_is_secret(line):
@@ -3263,8 +3278,8 @@ def _line_has_secret(line):
     # even if the line also reads like a code reference.
     if any(p.search(line) for p in _PRECISE_SECRET_PATTERNS):
         return True
-    if _CODE_REF_ASSIGN_RE.match(line):
-        return False  # `x = a.b.c` is a code reference, never a credential
+    if _CODE_REF_ASSIGN_RE.match(line) or _ENV_CODE_VALUE_RE.search(line):
+        return False  # `x = a.b.c` / `X = getenv(...)` is code, not a credential
     if _LOOSE_LABEL_RE.search(line) and not _LOOSE_CODE_VALUE_RE.search(line):
         return True  # labeled secret, but not a bare code call/reference value
     if _env_assignment_is_secret(line):
@@ -7040,7 +7055,8 @@ _PROSE_FIELD_SEV_RE = re.compile(
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
 _PROSE_FIELD_LINE_RE = re.compile(
-    r"(?im)(?:^[\ \t>*•#\-]*(?:line|file|location|path)\s*:?\s*\S*:?[ \t]*\d"
+    r"(?im)(?:^[\ \t>*•#\-]*(?:line|file|location|path)\b[^\n]*?\bline[ \t]*\d"
+    r"|^[\ \t>*•#\-]*(?:line|file|location|path)\s*:?\s*\S*:?[ \t]*\d"
     r"|[A-Za-z0-9_./\-]+:[ \t]*\d)")
 
 
