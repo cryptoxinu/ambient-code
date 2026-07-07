@@ -7133,9 +7133,12 @@ def parse_prose_findings(text):
         # real recoverable result. But if the text DID contain finding-shaped
         # lines we simply failed to parse, that's an unrecoverable parse — never
         # fake a clean verdict; fall through to the raw-text envelope.
-        if _PROSE_SEVERITY_HINT_RE.search(text) or (
-                _PROSE_FIELD_SEV_RE.search(text)
-                and _PROSE_FIELD_LINE_RE.search(text)):
+        # A line-anchored 'Severity: <level>' label is ALWAYS a finding field
+        # (a clean audit never writes one — it says "no defects"/"Verdict: SHIP")
+        # so it needs NO location match: this closes the whole file:line-notation
+        # tail (Codex rounds 14-25) at the root. The single-line hint covers
+        # inline 'HIGH … file:line' findings.
+        if _PROSE_SEVERITY_HINT_RE.search(text) or _PROSE_FIELD_SEV_RE.search(text):
             return None
         return {"findings": [], "verdict": vlast} if vlast else None
     return {"findings": findings, "verdict": vlast or _verdict_from(findings, False)}
