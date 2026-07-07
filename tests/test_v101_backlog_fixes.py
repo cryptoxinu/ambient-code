@@ -79,6 +79,34 @@ class TestM43StreamRedactor(unittest.TestCase):
         out = "".join(sr.feed(p) for p in ["a\x1b[31m", "b\x9dc"]) + sr.flush()
         self.assertEqual(out, "abc")
 
+    def test_streaming_is_bounded_not_quadratic(self):
+        # A long streamed answer, and a hostile never-terminating escape, must
+        # both stay ~linear (the redactor compacts its buffers). Generous 5s
+        # ceiling: the old O(n^2) took many seconds at these sizes; a healthy
+        # linear pass is well under a second, so this can't flake.
+        import time
+        t = time.perf_counter()
+        sr = amb._StreamRedactor(KEY)
+        for _ in range(30000):
+            sr.feed("token ")
+        sr.flush()
+        self.assertLess(time.perf_counter() - t, 5.0, "plain stream not linear")
+        t = time.perf_counter()
+        sr = amb._StreamRedactor(KEY)
+        sr.feed("\x1b[")
+        for _ in range(30000):            # never-terminating CSI params
+            sr.feed("0")
+        sr.flush()
+        self.assertLess(time.perf_counter() - t, 5.0, "escape hold not bounded")
+
+    def test_over_cap_unterminated_escape_still_redacts_split_key(self):
+        # even when a giant unterminated escape forces the hold-cap, a key split
+        # across the following pieces must still be redacted.
+        pieces = ["\x1b["] + ["9"] * 5000 + [KEY[:6], KEY[6:], " tail"]
+        sr = amb._StreamRedactor(KEY)
+        got = "".join(sr.feed(p) for p in pieces) + sr.flush()
+        self.assertNotIn(KEY, got)
+
     def test_streamed_equals_redact_of_whole_at_every_split(self):
         # The strong invariant: however the provider chunks the bytes, the
         # streamed output is byte-identical to redacting the full text at once

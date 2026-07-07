@@ -530,6 +530,11 @@ def load_config():
     sys.exit(EXIT_UNCONFIGURED)
 
 
+_KEY_PLACEHOLDER = "[AMBIENT_API_KEY]"   # _StreamRedactor mirrors this exactly
+_MAX_ESCAPE_HOLD = 4096                  # a real escape is short; past this a
+#                                          "never-terminating" one is hostile
+
+
 def redact(text, api_key):
     """Make model-derived text safe to print: strip the API key (endpoints
     echoing auth back must never land it in terminal output or transcripts)
@@ -546,7 +551,7 @@ def redact(text, api_key):
     if os.environ.get("AMBIENT_NO_SANITIZE") != "1":
         text = CTRL_RE.sub("", ANSI_RE.sub("", text))
     if api_key and len(api_key) >= 8:
-        text = text.replace(api_key, "[AMBIENT_API_KEY]")
+        text = text.replace(api_key, _KEY_PLACEHOLDER)
     return text
 
 
@@ -570,18 +575,22 @@ class _StreamRedactor:
 
     1. Escapes: peel any INCOMPLETE trailing escape (an ESC not yet a full
        sequence) back into the raw buffer; sanitize the rest into an
-       append-stable, escape-free `_san` buffer.
+       escape-free `_san` buffer.
     2. Key: key-redact `_san` and emit all but its last (len(key)-1) chars — a
        still-in-flight key prefix is at most that long and stays held until it
        either completes (→ redacted placeholder) or is flushed.
-    `_emitted` tracks committed output length so nothing is re-emitted."""
+
+    `_san` holds only the UN-emitted tail: each _emit() drops the committed,
+    key-safe prefix, so redact() runs on a bounded window (~keep + delta) rather
+    than re-scanning the whole growing stream — O(total) instead of O(total^2)
+    over a long streamed answer (a hostile endpoint can't amplify that with many
+    tiny deltas)."""
 
     def __init__(self, api_key):
         self._key = api_key if (api_key and len(api_key) >= 8) else ""
         self._keep = max(len(self._key) - 1, 0)
         self._raw = ""        # not-yet-escape-stable input
-        self._san = ""        # sanitized (escape-free), APPEND-ONLY
-        self._emitted = 0     # chars of key-redacted `_san` already emitted
+        self._san = ""        # sanitized (escape-free) UN-emitted tail
 
     @staticmethod
     def _stable_len(s):
@@ -609,21 +618,55 @@ class _StreamRedactor:
         self._raw += piece
         cut = self._stable_len(self._raw)
         stable_raw, self._raw = self._raw[:cut], self._raw[cut:]
+        # Bound a pathological unterminated escape: a real CSI/OSC/DCS is short,
+        # so a held remainder past the cap can't be a legit escape still
+        # arriving — force it through sanitization now, else _raw (and each
+        # _stable_len rescan of it) grows without bound: O(n^2) DoS from a
+        # hostile stream. Force-resolved garbage is still key/escape-safe.
+        if len(self._raw) > _MAX_ESCAPE_HOLD:
+            stable_raw += self._raw
+            self._raw = ""
         if stable_raw:
-            self._san += redact(stable_raw, "")   # sanitize only; append-stable
+            self._san += redact(stable_raw, "")   # sanitize only (escape-free)
         return self._emit(hold=self._keep)
 
+    def _raw_commit_len(self, seg, red_target):
+        """RAW chars of escape-free `seg` whose key-redaction is <= red_target
+        redacted chars, stopping on a KEY BOUNDARY (never mid-key / mid-
+        placeholder). `seg` is escape-free so redact() only substitutes the
+        fixed key → placeholder; every other char maps 1:1."""
+        if not self._key:
+            return min(len(seg), red_target)
+        klen, plen, n = len(self._key), len(_KEY_PLACEHOLDER), len(seg)
+        raw_i = red_out = 0
+        while raw_i < n:
+            if seg.startswith(self._key, raw_i):
+                if red_out + plen > red_target:
+                    break                     # whole placeholder wouldn't fit
+                raw_i += klen
+                red_out += plen
+            else:
+                if red_out + 1 > red_target:
+                    break
+                raw_i += 1
+                red_out += 1
+        return raw_i
+
     def _emit(self, hold):
-        # Redact the WHOLE sanitized buffer so a key straddling the hold
-        # boundary is a stable placeholder, then emit up to len(red)-hold. A
-        # still-in-flight key prefix is at most (len(key)-1) chars and always
-        # lands inside the held region, so the emitted prefix is final.
+        # `_san` is only the un-emitted tail, so this redact() is O(tail).
+        # Redacting the whole tail makes a key straddling the hold boundary a
+        # stable placeholder; commit the largest key-safe raw prefix whose
+        # redaction fits within len(red)-hold, emit it, and DROP it from `_san`.
         red = redact(self._san, self._key) if self._key else self._san
-        end = len(red) - hold if hold else len(red)
-        if end <= self._emitted:
+        target = len(red) - hold if hold else len(red)
+        if target <= 0:
             return ""
-        out = red[self._emitted:end]
-        self._emitted = end
+        raw_i = self._raw_commit_len(self._san, target)
+        if raw_i <= 0:
+            return ""
+        out = (redact(self._san[:raw_i], self._key)
+               if self._key else self._san[:raw_i])
+        self._san = self._san[raw_i:]     # drop the committed, key-safe prefix
         return out
 
     def flush(self):
@@ -9126,8 +9169,12 @@ def cmd_build(args, api_key, api_url, conf):
         if head + len(user) > single:
             user = _mk_user(plan_overview, "  (omitted to fit the window)", context)
         if head + len(user) > single and context:
+            # _mk_user prepends an 11-char "\n\nContext:\n" before ctx — account
+            # for it, else context[:room] overshoots the window by 11 and this
+            # whole tier is a no-op that drops ALL context at the next guard.
             room = max(0, single - head
-                       - len(_mk_user(plan_overview, "  (omitted)", "")))
+                       - len(_mk_user(plan_overview, "  (omitted)", ""))
+                       - len("\n\nContext:\n"))
             user = _mk_user(plan_overview, "  (omitted)", context[:room])
         if head + len(user) > single:
             user = _mk_user("\n".join(f"  {p['path']}" for p in plan),
