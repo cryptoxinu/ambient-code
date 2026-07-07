@@ -323,6 +323,19 @@ def test_dash_bulleted_fieldlist_does_not_fake_clean():
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_path_line_word_finding_parses():
+    # Codex round 22: 'app/auth.py line 42' (word 'line', no colon) now parses.
+    o = amb.parse_prose_findings(
+        "HIGH (confidence: HIGH) — app/auth.py line 42 — auth bypass.\nVerdict: SHIP\n")
+    assert o is not None and len(o["findings"]) == 1
+    assert o["findings"][0]["file"] == "app/auth.py" and o["findings"][0]["line"] == 42
+
+
+def test_clean_audit_mentioning_lines_count_stays_clean():
+    o = amb.parse_prose_findings("Reviewed 500 lines across 3 files. No issues.\nVerdict: SHIP\n")
+    assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
