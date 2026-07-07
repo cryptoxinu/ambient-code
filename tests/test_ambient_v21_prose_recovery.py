@@ -195,6 +195,14 @@ def test_labeled_heading_finding_does_not_fake_clean():
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_confidence_last_finding_does_not_fake_clean():
+    # Codex round 9: a header with confidence AFTER the file:line must not fake
+    # a clean SHIP (order-independent hint).
+    txt = ("HIGH — a.py:7 — auth bypass, unauthenticated access (confidence: HIGH).\n"
+           "Verdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

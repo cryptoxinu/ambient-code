@@ -171,6 +171,10 @@ def test_round8_basic_word_not_false_positive():
     assert amb._line_has_secret("Basic understanding of the system is required") is False
 
 
+def test_round9_password_only_redis_url_caught():
+    assert amb._line_has_secret("REDIS_URL=redis://:supersecret1@redis.example.com:6379/0") is True
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="

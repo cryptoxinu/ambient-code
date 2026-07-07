@@ -3113,7 +3113,9 @@ _PRECISE_SECRET_PATTERNS = SECRET_PATTERNS[1:]
 # lowercase-alnum runs (measured 129s on a 400k-char line — an effective hang
 # on minified/hex blobs). _line_has_secret gates it on
 # the literal '://' and scans only a bounded window around each occurrence.
-CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{6,}@")
+# Credentials embedded in a URL: scheme://[user]:password@host. The username may
+# be EMPTY (redis://:password@host is common — Codex round 9).
+CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]*:[^@\s]{6,}@")
 # An ALL-CAPS env identifier assigned a value (AWS_SECRET_ACCESS_KEY=…,
 # DB_PASSWORD=…, GITHUB_TOKEN=…). The keyword-abuts-'=' pattern above misses
 # these (the token before '=' is a bare KEY/TOKEN component). We classify the
@@ -6982,16 +6984,17 @@ _PROSE_VERDICT_RE = re.compile(
 # file:line, so it stays a real clean SHIP — Codex round 3), while a real
 # '- HIGH … — f:1 — …' header still trips it → safe raw envelope, never a
 # silent drop.
-# A finding-shaped line we failed to parse: severity + (confidence: …) + a
-# file:line, in any order and with ANY separator (dash, colon, comma — Codex
-# round 8 found colon/comma findings faking clean). We deliberately bias toward
-# firing: the ONLY cost is falling to the raw envelope, whereas NOT firing hides
-# a real defect behind a clean SHIP. It still stays off clean prose that merely
-# names a severity with no file:line ("no HIGH (confidence: HIGH) issues
-# remain"). A file:line requires ':<optional space><digit>'.
+# A finding-shaped line we failed to parse: one line that contains ALL THREE of
+# a severity, a (confidence: …), and a file:line (':<opt space><digit>') — in
+# ANY order (Codex round 9: 'HIGH — a.py:7 — … (confidence: HIGH)' put
+# confidence last). Three independent lookaheads = order-independent. We bias
+# toward firing: the ONLY cost is the raw envelope, whereas NOT firing hides a
+# real defect behind a clean SHIP. Clean prose that names a severity with NO
+# file:line ('no HIGH (confidence: HIGH) issues remain') still stays clean.
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)^[^\n]*?\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*"
-    r"\(\s*confidence\s*:[^\n]*:[ \t]*\d")
+    r"(?im)^(?=[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b)"
+    r"(?=[^\n]*\(\s*confidence\s*:)"
+    r"(?=[^\n]*:[ \t]*\d)[^\n]*$")
 
 
 def _extract_labeled(body, label):
