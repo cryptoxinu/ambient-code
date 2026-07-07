@@ -357,3 +357,37 @@ def test_no_redos_on_pathological_line():
     start = time.monotonic()
     amb._line_has_secret(line2)
     assert time.monotonic() - start < 1.0
+
+
+# --- Workflow adversarial findings (2026-07-07) ---
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("line", [
+    '"DefaultConnection": "Server=db;Database=app;User Id=sa;Password=MyP@ssw0rd123;"',
+    'spring.datasource.url=jdbc:mysql://prod-db:3306/app?user=root&password=Xk9mQz7Lp2w',
+    'ConnectionString: "Host=db;Username=admin;Password=s3cr3tP@ss99"',
+])
+def test_connection_string_password_is_a_leak(line):
+    assert amb._line_has_secret(line) is True
+
+
+@_pytest.mark.parametrize("line", [
+    'SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]',       # subscript env read
+    'const GITHUB_TOKEN = process.env.GITHUB_TOKEN as string;',  # TS cast trailing
+    'DB_PASSWORD=${DB_PASSWORD:-postgres}',               # bash param expansion
+    'TOKEN_ENDPOINT=https://auth.example.com/oauth/token',  # config ABOUT a token
+    'db_host = config["DB_HOST"]',
+    'const pw = process.env.DB_PASSWORD;',
+])
+def test_canonical_secret_plumbing_is_not_flagged(line):
+    assert amb._line_has_secret(line) is False
+
+
+@_pytest.mark.parametrize("line", [
+    'DB_PASSWORD=prod.db.password.literal',   # round-13: dotted no-spaces = real
+    'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    'DB_PASSWORD=aQ7pR2xL9mZ4kT8v',
+])
+def test_real_secrets_still_caught_after_fp_guards(line):
+    assert amb._line_has_secret(line) is True

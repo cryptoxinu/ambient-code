@@ -3104,6 +3104,13 @@ SECRET_PATTERNS = [
                r"(?=[A-Za-z0-9%+/=&?.\-]*[+/=%&])"   # a real key/SAS, not code
                r"[A-Za-z0-9%+/=&?.\-]{16,}"),
     re.compile(r"(?i)[?&]sig=[A-Za-z0-9%+/]{16,}"),  # a SAS signature parameter
+    # A connection-string / URL password: 'Password=…' in an ADO.NET/JDBC
+    # connection string or 'password=…' in a URL query — the #1 place a real DB
+    # password is stored (Workflow leak). No spaces around '=' (code uses
+    # 'password = …'), a preceding delimiter/quote, and a literal value (not an
+    # interpolation/placeholder) keep it off normal source.
+    re.compile(r"(?i)(?:^|[;&?\"'\s])(?:password|passwd|pwd)="
+               r"(?![\s$%{<])[^;&\s\"'<>]{6,}"),
 ]
 # SECRET_PATTERNS[0] is the LOOSE labeled pattern (keyword abutting '='); it can
 # match a dotted code reference ('password = user.passwordHash'), so it runs
@@ -3174,7 +3181,8 @@ _ENV_CONFIG_SUFFIX_RE = re.compile(
     r"ROTATION|LIFETIME|GRACE|ALGORITHM|ALGO|ISSUER|AUDIENCE|SCOPES?|LOCATION|"
     r"SOURCE|PROVIDER|METHOD|MODE|VERSION|LIMIT|MAX|MIN|ATTEMPTS|WINDOW|AGE|"
     r"DAYS|HOURS|MINUTES|SECONDS|PATTERN|VALIDATION|VALIDATOR|MANAGER|SERVICE|"
-    r"STORE|VAULT|BACKEND|STRATEGY|ENV|ENVIRONMENT|LABEL|DESCRIPTION|TITLE)$")
+    r"STORE|VAULT|BACKEND|STRATEGY|ENV|ENVIRONMENT|LABEL|DESCRIPTION|TITLE|"
+    r"ENDPOINT|HOST|HOSTNAME|PORT|DOMAIN|REGION|ADDRESS|USERNAME|OWNER)$")
 
 
 def _env_is_strong(ident):
@@ -3195,8 +3203,10 @@ _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
 # / $(...)) is a passthrough reference, not a literal secret (Codex round 17:
 # 'DB_PASSWORD=${DB_PASSWORD}' is weekly deployment config).
 _ENV_INTERP_RE = re.compile(
-    r"^(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_][A-Za-z0-9_]*%"
-    r"|#\{[^}\n]*\}|\$\([^)\n]*\))$")
+    r"^(?:\$[A-Za-z_][A-Za-z0-9_]*"          # $VAR
+    r"|\$\{[^}\n]*\}"                          # ${VAR}, ${VAR:-default}, ${VAR/…}
+    r"|%[A-Za-z_][A-Za-z0-9_]*%"              # %VAR%
+    r"|#\{[^}\n]*\}|\$\([^)\n]*\))$")         # #{...} / $(...)
 # Secret-ish punctuation in a value marks it a literal credential rather than a
 # code reference — deliberately EXCLUDES '/' (paths) and code brackets.
 _SECRET_VALUE_HINT_RE = re.compile(r"[@#$%^&*!=~]")
@@ -3219,14 +3229,19 @@ _CODE_REF_ASSIGN_RE = re.compile(
 # password ('DB_PASSWORD=p(ass)w0rd!') are NOT cleared — they lack the clean
 # call/dotted-ref shape (Codex round 16).
 _ENV_CODE_VALUE_RE = re.compile(
-    # A function/method CALL value is always code, any spacing:
-    r"[:=]\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*"
-    r"\([^)\n]*\)\s*;?\s*$"
+    # A value that CALLS or SUBSCRIPTS is code, any spacing — a function call
+    # ('X = os.getenv("K")') or a subscript ('X = os.environ["K"]', the canonical
+    # Django read). The lookahead requires a '(' or '[' so a plain dotted '.env'
+    # value is not swept in here. An optional 'as Type' cast (TS) may trail:
+    r"[:=]\s*(?=[A-Za-z_][\w.\[\]()\"' ]*[\[(])"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]\n]*\]|\([^)\n]*\))+"
+    r"(?:\s+as\s+[\w<>\[\].]+)?\s*;?\s*$"
     # A DOTTED-reference value is code only with SPACES around the operator
     # (code style) — NOT '.env' 'KEY=prod.db.password' with no spaces, which is
-    # a real secret (Codex round 13 vs 16):
+    # a real secret (Codex round 13 vs 16). An 'as Type' cast may trail (TS
+    # 'process.env.TOKEN as string'):
     r"|[ \t][:=][ \t]+[A-Za-z_][A-Za-z0-9_]*"
-    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+\s*;?\s*$")
+    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+(?:\s+as\s+[\w<>\[\].]+)?\s*;?\s*$")
 
 
 def _env_assignment_is_secret(line):
