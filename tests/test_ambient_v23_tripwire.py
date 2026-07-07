@@ -163,6 +163,14 @@ def test_round7_azure_sas_signature_caught():
     assert amb._line_has_secret(line) is True
 
 
+def test_round8_http_basic_auth_caught():
+    assert amb._line_has_secret("Authorization: Basic YWxpY2U6U3VwZXJTZWNyZXQxMjMheHl6") is True
+
+
+def test_round8_basic_word_not_false_positive():
+    assert amb._line_has_secret("Basic understanding of the system is required") is False
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="

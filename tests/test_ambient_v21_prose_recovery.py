@@ -137,14 +137,24 @@ def test_numbered_finding_is_parsed_not_faked_clean():
     assert obj["findings"][0]["file"] == "a.py"
 
 
-def test_clean_audit_quoting_example_format_is_not_rejected():
-    # Codex round 3: a clean SHIP that QUOTES an example finding format (no dash
-    # before the file:line) must stay clean, not fall to raw.
-    txt = ("No defects found. Example finding format:\n"
-           "  HIGH (confidence: HIGH) at foo.py:1 means a real issue.\n"
+def test_clean_prose_without_fileline_stays_clean():
+    # A clean SHIP that names a severity WITHOUT a file:line stays clean
+    # (the round-2 guarantee — no false rejection on "no HIGH issues").
+    txt = ("No defects found. No HIGH (confidence: HIGH) severity issues.\n"
            "Verdict: SHIP\n")
     obj = amb.parse_prose_findings(txt)
     assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
+
+
+def test_severity_with_fileline_biases_to_raw_not_fake_clean():
+    # Codex round 8: a line with severity + confidence + file:line (any
+    # separator) can't be reliably told apart from a real colon/comma finding —
+    # so we bias to the SAFE raw envelope rather than risk faking a clean SHIP.
+    for txt in (
+        "HIGH (confidence: HIGH) at a.py:7: auth bypass — real\nVerdict: SHIP\n",
+        "HIGH (confidence: HIGH), a.py:7, auth bypass\nVerdict: SHIP\n",
+    ):
+        assert amb.parse_prose_findings(txt) is None
 
 
 @pytest.mark.parametrize("txt", [

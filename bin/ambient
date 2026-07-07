@@ -3086,6 +3086,7 @@ SECRET_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)bearer\s+[A-Za-z0-9_.\-]{20,}"),
+    re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/]{20,}={0,2}"),  # HTTP Basic auth
     re.compile(r"(?:github_pat|gh[pousr])_[A-Za-z0-9_]{20,}"),
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),
@@ -6981,13 +6982,16 @@ _PROSE_VERDICT_RE = re.compile(
 # file:line, so it stays a real clean SHIP — Codex round 3), while a real
 # '- HIGH … — f:1 — …' header still trips it → safe raw envelope, never a
 # silent drop.
-# The severity may appear ANYWHERE on the line, not just first after the lead
-# (Codex round 7: a labeled '### Finding 1: HIGH (confidence: HIGH) — a.py:7 —'
-# heading buried the severity). The dash + file:line requirement still keeps it
-# off clean prose that merely names a severity ("no HIGH issues remain").
+# A finding-shaped line we failed to parse: severity + (confidence: …) + a
+# file:line, in any order and with ANY separator (dash, colon, comma — Codex
+# round 8 found colon/comma findings faking clean). We deliberately bias toward
+# firing: the ONLY cost is falling to the raw envelope, whereas NOT firing hides
+# a real defect behind a clean SHIP. It still stays off clean prose that merely
+# names a severity with no file:line ("no HIGH (confidence: HIGH) issues
+# remain"). A file:line requires ':<optional space><digit>'.
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)^[^\n]*?\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:"
-    r"[^\n]*(?::[ \t]*\d[^\n]*[—–\-]|[—–\-][^\n]*:[ \t]*\d)")
+    r"(?im)^[^\n]*?\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*"
+    r"\(\s*confidence\s*:[^\n]*:[ \t]*\d")
 
 
 def _extract_labeled(body, label):
