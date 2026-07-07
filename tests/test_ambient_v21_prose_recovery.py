@@ -490,6 +490,31 @@ def test_coverage_stats_prose_stays_clean():
     assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
 
 
+def test_prose_regexes_are_redos_safe():
+    # A crafted 500KB adversarial line must not hang the prose scanner.
+    import time
+    for inp in ("Finding: " + "a/" * 250000 + ":x",
+                "HIGH (confidence: HIGH) — " + "a" * 500000,
+                "a/" * 300000 + ":5"):
+        t = time.monotonic()
+        amb._text_has_unparsed_finding(inp)
+        amb.parse_prose_findings(inp)
+        assert time.monotonic() - t < 2.0
+
+
+def test_no_severity_finding_with_scenario_field_not_clean():
+    # Codex round 35: a 'Finding:' heading + file:line + Scenario/Fix (no severity).
+    import io, contextlib, json as _j
+    raw = ('{"findings":[],"verdict":"SHIP"}\n'
+           'Finding: app/auth.py:42 missing auth check.\n'
+           'Scenario: GET /admin without login.\nFix: require auth.\nVerdict: SHIP\n')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    env = _j.loads(buf.getvalue())
+    assert env["verdict"] != "SHIP" and env["exit_code"] != 0
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

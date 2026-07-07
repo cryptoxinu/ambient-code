@@ -7088,10 +7088,27 @@ _PROSE_FINDING_HEADING_RE = re.compile(
 # severity level anywhere (Codex round 34: a 'Defect:'/'File:'+'Line:' field-list
 # with no Severity field).
 _PROSE_DEFECT_FIELD_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*\**(?:defect|vulnerabilit(?:y|ies)|weakness|flaw|exploit)"
+    r"(?im)^[\ \t>*•#\-]*\**(?:defect|vulnerabilit(?:y|ies)|weakness|flaw|exploit"
+    r"|scenario|impact|remediation|reproduction|steps\ to\ reproduce)"
     r"\**\s*[:—–\-]\s*\S")
+# A 'Finding/Issue/Bug:' heading LINE (any content) — anchored, linear.
+_PROSE_FINDING_HEAD_LINE_RE = re.compile(
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\**"
+    r"(?:finding|issue|bug|vulnerability|defect|weakness)s?\b[ \t]*\d*[ \t]*[:—–\-]")
+# A bare file:line reference (word:digit) — a single quantifier, linear.
+# Path-run bounded (real path length) AND anchored with a lookbehind to the
+# START of a path token, so 'word:digit' scanning is LINEAR with a small
+# constant — an unbounded '+' before ':', or a bound without the anchor,
+# restarts at every position and is O(n^2)/O(300n) on a crafted 'a/a/…/a:x'
+# line (ReDoS caught by the perf test).
+_PROSE_BARE_FILELINE_RE = re.compile(
+    r"(?im)(?<![A-Za-z0-9_./\-])[A-Za-z0-9_./\-]{1,300}:[ \t]*\d")
 _PROSE_FILE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**file\**\s*[:—–\-]")
 _PROSE_LINE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**lines?\**\s*[:—–\-]?[ \t]*\d")
+# Defensive cap on how much prose we scan: an audit response with findings has
+# them well within this; the bound keeps even a pathological single-line input
+# sub-second on top of the already-linear regexes.
+PROSE_SCAN_MAX = 262_144
 
 
 def _text_has_unparsed_finding(text):
@@ -7100,11 +7117,14 @@ def _text_has_unparsed_finding(text):
     Markdown table row with a severity level. Used both to avoid faking a clean
     verdict on an unparsed finding AND to distrust an EMPTY-findings JSON result
     whose surrounding text clearly reports a defect (Codex rounds 14-30)."""
+    text = text[:PROSE_SCAN_MAX]
     return bool(_PROSE_SEVERITY_HINT_RE.search(text)
                 or _PROSE_FIELD_SEV_RE.search(text)
                 or _PROSE_TABLE_ROW_RE.search(text)
                 or _PROSE_FINDING_HEADING_RE.search(text)
                 or _PROSE_DEFECT_FIELD_RE.search(text)
+                or (_PROSE_FINDING_HEAD_LINE_RE.search(text)  # 'Finding:' + a file:line
+                    and _PROSE_BARE_FILELINE_RE.search(text))
                 or (_PROSE_FILE_FIELD_RE.search(text)
                     and _PROSE_LINE_FIELD_RE.search(text)))
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
@@ -7117,7 +7137,7 @@ def _text_has_unparsed_finding(text):
 _PROSE_FIELD_LINE_RE = re.compile(
     r"(?im)(?:^[\ \t>*•#\-]*(?:file|location|path)\s*[:—–\-]"  # File/Location/Path label
     r"|^[\ \t>*•#\-]*lines?\b[^\n]*\d"                         # a 'Line[s] … <digit>' line
-    r"|[A-Za-z0-9_./\-]+:[ \t]*\d)")                           # or a bare file:line
+    r"|(?<![A-Za-z0-9_./\-])[A-Za-z0-9_./\-]{1,300}:[ \t]*\d)")  # or a bare file:line
 
 
 def _extract_labeled(body, label):
@@ -7142,6 +7162,7 @@ def parse_prose_findings(text):
     audits work on ANY reasoning model, not only those that honor json_schema."""
     if not isinstance(text, str) or not text.strip():
         return None
+    text = text[:PROSE_SCAN_MAX]  # bound the scan (findings appear early)
     matches = list(_PROSE_FINDING_RE.finditer(text))
     findings = []
     for i, m in enumerate(matches):
