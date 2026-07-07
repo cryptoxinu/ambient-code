@@ -670,6 +670,18 @@ class TestMapInterruptPrompt(unittest.TestCase):
     leaves the interpreter joining an in-flight complete() at exit (up to
     --timeout). cmd_map must flush stdout+stderr and os._exit(130)."""
 
+    def tearDown(self):
+        # These tests drive the Ctrl-C path with a MOCKED os._exit, so the pool's
+        # non-daemon workers survive the test (in production the real os._exit
+        # kills them). Drain them so a leaked worker can't pollute a later test
+        # by resolving a module-global that test re-patched (cross-test flake).
+        deadline = time.monotonic() + 10.0
+        for t in list(threading.enumerate()):
+            if (t is threading.main_thread() or not t.is_alive()
+                    or not t.name.startswith("ThreadPoolExecutor")):
+                continue
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+
     def _interrupt_run(self):
         """Drive cmd_map into the Ctrl-C path with one call still in flight.
         Returns (exit_codes, systemexit_code, elapsed, out_spy, err_spy)."""

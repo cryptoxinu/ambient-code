@@ -169,9 +169,28 @@ def _src_file(body="print('hi')\n"):
     return src
 
 
+def _drain_worker_threads(timeout=10.0):
+    """Wait for lingering ThreadPoolExecutor workers to finish. The fatal/Ctrl-C
+    tests below use shutdown(wait=False) + a MOCKED os._exit, so their workers
+    survive the test (in PRODUCTION the real os._exit kills them). If one is
+    still alive when the NEXT test re-patches the module-global run_one_audit,
+    it resolves that global at call-time and appends to the WRONG test's list —
+    the cross-test pollution that made this suite flaky on slow CI runners.
+    Bounded join: a signalled worker returns promptly; we never hang."""
+    deadline = time.monotonic() + timeout
+    for t in list(threading.enumerate()):
+        if (t is threading.main_thread() or not t.is_alive()
+                or not t.name.startswith("ThreadPoolExecutor")):
+            continue
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
 class TestConsensusFailFast(unittest.TestCase):
     """the FIRST fatal-category worker error (key/funds/auth) must cancel
     the queued siblings instead of billing them to completion."""
+
+    def tearDown(self):
+        _drain_worker_threads()
 
     def test_fatal_error_cancels_queued_models(self):
         # --parallel 1 → one worker: a fatal from model A must CANCEL the

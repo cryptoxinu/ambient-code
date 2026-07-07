@@ -475,6 +475,18 @@ class TestFix2WorkerGateRouting(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 class TestFix3WorkerFatalFailFast(unittest.TestCase):
+    def tearDown(self):
+        # Worker-fatal / Ctrl-C tests use a MOCKED os._exit, so pool workers
+        # survive the test (production's real os._exit kills them). Drain them so
+        # a leaked worker can't pollute a later test by resolving a module-global
+        # it re-patched (the cross-test thread-leak flake).
+        deadline = time.monotonic() + 10.0
+        for t in list(threading.enumerate()):
+            if (t is threading.main_thread() or not t.is_alive()
+                    or not t.name.startswith("ThreadPoolExecutor")):
+                continue
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+
     def test_map_reduce_worker_fatal_trips_cancel_and_stops_siblings(self):
         cancel = threading.Event()
         calls = []
