@@ -89,7 +89,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "1.0.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "1.0.1"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -458,19 +458,24 @@ def cmd_trust_url(args):
     if not sys.stdin.isatty():
         sys.exit("ambient: trust-url is interactive-only (a typed confirmation "
                  "proves a human made this decision)")
+    # M32: interactive prompts + status go to STDERR (input() defaults its
+    # prompt to stdout) so a caller capturing stdout gets clean, parseable output.
     print(
         f"Your Ambient API key will be sent in the Authorization header to\n"
         f"  {host}\non EVERY future call. Only do this for a gateway you run "
-        "or fully trust."
+        "or fully trust.", file=sys.stderr
     )
     try:
-        typed = input(f"Type the hostname ({host}) to confirm: ").strip().lower()
+        sys.stderr.write(f"Type the hostname ({host}) to confirm: ")
+        sys.stderr.flush()
+        typed = input().strip().lower()
     except (EOFError, KeyboardInterrupt):
         sys.exit("\nambient: cancelled")
     if typed != host:
         sys.exit("ambient: hostname mismatch — nothing saved")
     save_config_values({"AMBIENT_TRUSTED_URL": url, "AMBIENT_API_URL": url})
-    print(f"Trusted endpoint saved: {url}\nRevert any time: ambient trust-url --reset")
+    print(f"Trusted endpoint saved: {url}\nRevert any time: ambient trust-url --reset",
+          file=sys.stderr)
 
 
 def cmd_trust_url_reset():
@@ -525,18 +530,29 @@ def load_config():
     sys.exit(EXIT_UNCONFIGURED)
 
 
+_KEY_PLACEHOLDER = "[AMBIENT_API_KEY]"   # _StreamRedactor mirrors this exactly
+_MAX_ESCAPE_HOLD = 256                   # compact a held escape past this so
+_ESCAPE_KEEP_TAIL = 64                    # _raw (and each _stable_len rescan) stays
+#                                          small; a terminator is short + recent
+
+
 def redact(text, api_key):
     """Make model-derived text safe to print: strip the API key (endpoints
     echoing auth back must never land it in terminal output or transcripts)
     AND neutralize terminal-escape injection from untrusted model output.
     Keys shorter than 8 chars are not redacted: substring collisions would
-    mangle ordinary text (real keys are far longer)."""
+    mangle ordinary text (real keys are far longer).
+    ORDER MATTERS (M16): sanitize FIRST, then redact the key. A compromised
+    endpoint could echo the key with an embedded escape (sk-abc<ESC>[0mdef) so
+    the raw substring match misses it; stripping escapes first reassembles the
+    contiguous key so the replace catches it. Keys are validated alphanumeric,
+    so sanitizing can never corrupt a real key."""
     if not text:
         return text
-    if api_key and len(api_key) >= 8:
-        text = text.replace(api_key, "[AMBIENT_API_KEY]")
     if os.environ.get("AMBIENT_NO_SANITIZE") != "1":
         text = CTRL_RE.sub("", ANSI_RE.sub("", text))
+    if api_key and len(api_key) >= 8:
+        text = text.replace(api_key, _KEY_PLACEHOLDER)
     return text
 
 
@@ -549,6 +565,119 @@ def sanitize(text):
     if text is None or isinstance(text, str):
         return redact(text, "")
     return redact(str(text), "")
+
+
+class _StreamRedactor:
+    """Streaming-safe redaction (M43). Per-piece redact() misses an API key or
+    escape sequence that STRADDLES a provider chunk boundary — neither piece
+    holds the contiguous secret. Two concerns are handled SEPARATELY so neither
+    can defeat the other (an escape injected inside a boundary-split key was the
+    subtle failure of the naive rolling-tail):
+
+    1. Escapes: peel any INCOMPLETE trailing escape (an ESC not yet a full
+       sequence) back into the raw buffer; sanitize the rest into an
+       escape-free `_san` buffer.
+    2. Key: key-redact `_san` and emit all but its last (len(key)-1) chars — a
+       still-in-flight key prefix is at most that long and stays held until it
+       either completes (→ redacted placeholder) or is flushed.
+
+    `_san` holds only the UN-emitted tail: each _emit() drops the committed,
+    key-safe prefix, so redact() runs on a bounded window (~keep + delta) rather
+    than re-scanning the whole growing stream — O(total) instead of O(total^2)
+    over a long streamed answer (a hostile endpoint can't amplify that with many
+    tiny deltas)."""
+
+    def __init__(self, api_key):
+        self._key = api_key if (api_key and len(api_key) >= 8) else ""
+        self._keep = max(len(self._key) - 1, 0)
+        self._raw = ""        # not-yet-escape-stable input
+        self._san = ""        # sanitized (escape-free) UN-emitted tail
+
+    @staticmethod
+    def _stable_len(s):
+        """Index up to which `s` has no trailing INCOMPLETE escape sequence.
+        Conservative for streaming: an OSC/DCS/PM/APC without its string
+        terminator (BEL or ST=ESC\\) may still be arriving, so it is HELD — even
+        though ANSI_RE would match the unterminated form in a whole-string pass.
+        A CSI is stable only once it has a final byte (@-~)."""
+        i = s.rfind("\x1b")                   # DCS/OSC content has no ESC, so the
+        if i == -1:                           # last ESC starts the only open escape
+            return len(s)
+        tail = s[i:]
+        if len(tail) == 1:
+            return i                          # lone ESC — incomplete
+        c = tail[1]
+        if c == "[":                          # CSI: complete once it has a final byte
+            return len(s) if re.match(r"\x1b\[[0-?]*[ -/]*[@-~]", tail) else i
+        if c == "]":                          # OSC: BEL or ST (ESC\) terminates
+            return len(s) if ("\x07" in tail[2:] or "\x1b\\" in tail[2:]) else i
+        if c in "PX^_":                       # DCS/SOS/PM/APC: ST only (BEL is content)
+            return len(s) if "\x1b\\" in tail[2:] else i
+        return len(s)                         # 2-char ESC-x escape is complete
+
+    def feed(self, piece):
+        self._raw += piece
+        cut = self._stable_len(self._raw)
+        stable_raw, self._raw = self._raw[:cut], self._raw[cut:]
+        # Bound a pathological unterminated escape (a hostile endpoint streaming
+        # ESC[ + endless params) WITHOUT breaking its semantics. `_raw` here is
+        # exactly one still-open escape (starts with ESC); its CONTENT is
+        # discarded regardless, so drop the bloated MIDDLE while keeping the
+        # ESC-prefix + recent tail. `_raw` (and each _stable_len rescan) stays
+        # bounded, yet the escape remains "open" so when its terminator finally
+        # arrives — or at flush — it is removed exactly as redact() would,
+        # instead of leaking its middle as literal text. Any terminator is short
+        # and recent, so it can only be in the kept tail, never the dropped span.
+        if len(self._raw) > _MAX_ESCAPE_HOLD:
+            self._raw = self._raw[:2] + self._raw[-_ESCAPE_KEEP_TAIL:]
+        if stable_raw:
+            self._san += redact(stable_raw, "")   # sanitize only (escape-free)
+        return self._emit(hold=self._keep)
+
+    def _raw_commit_len(self, seg, red_target):
+        """RAW chars of escape-free `seg` whose key-redaction is <= red_target
+        redacted chars, stopping on a KEY BOUNDARY (never mid-key / mid-
+        placeholder). `seg` is escape-free so redact() only substitutes the
+        fixed key → placeholder; every other char maps 1:1."""
+        if not self._key:
+            return min(len(seg), red_target)
+        klen, plen, n = len(self._key), len(_KEY_PLACEHOLDER), len(seg)
+        raw_i = red_out = 0
+        while raw_i < n:
+            if seg.startswith(self._key, raw_i):
+                if red_out + plen > red_target:
+                    break                     # whole placeholder wouldn't fit
+                raw_i += klen
+                red_out += plen
+            else:
+                if red_out + 1 > red_target:
+                    break
+                raw_i += 1
+                red_out += 1
+        return raw_i
+
+    def _emit(self, hold):
+        # `_san` is only the un-emitted tail, so this redact() is O(tail).
+        # Redacting the whole tail makes a key straddling the hold boundary a
+        # stable placeholder; commit the largest key-safe raw prefix whose
+        # redaction fits within len(red)-hold, emit it, and DROP it from `_san`.
+        red = redact(self._san, self._key) if self._key else self._san
+        target = len(red) - hold if hold else len(red)
+        if target <= 0:
+            return ""
+        raw_i = self._raw_commit_len(self._san, target)
+        if raw_i <= 0:
+            return ""
+        out = (redact(self._san[:raw_i], self._key)
+               if self._key else self._san[:raw_i])
+        self._san = self._san[raw_i:]     # drop the committed, key-safe prefix
+        return out
+
+    def flush(self):
+        if self._raw:                 # commit any held (possibly incomplete) escape
+            self._san += redact(self._raw, "")
+            self._raw = ""
+        return self._emit(hold=0)
 
 
 def _stderr_is_tty():
@@ -958,7 +1087,7 @@ def api_request(api_url, api_key, path, payload=None, timeout=DEFAULT_TIMEOUT_S)
                 return err.code, {"error": {"message": body[:2000]}}
         except urllib.error.URLError as err:
             last_err = NetworkError(f"cannot reach {url} ({err.reason})")
-        except (OSError, http.client.IncompleteRead) as err:
+        except (OSError, http.client.HTTPException) as err:
             # A dropped/incomplete read is a transient network fault, not a crash
             # — treat like URLError so it retries/wraps.
             last_err = NetworkError(f"read from {url} failed ({err})")
@@ -974,6 +1103,19 @@ def api_request(api_url, api_key, path, payload=None, timeout=DEFAULT_TIMEOUT_S)
     raise last_err
 
 
+def _catalog_data(body):
+    """Model list from a /v1/models body, normalized to DICT entries with a
+    non-empty string `id` (same filter as fetch_models). A malformed 200
+    (non-object body, `data` that is a scalar/string or a list of non-objects /
+    id-less rows) yields [] instead of crashing a downstream models[0]["id"] or
+    a `for m in models` over a non-iterable."""
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, list):
+        return []
+    return [m for m in data
+            if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+
+
 def fetch_models(api_url, api_key):
     status, body = api_request(api_url, api_key, "/v1/models", timeout=30)
     if status != 200:
@@ -985,6 +1127,8 @@ def fetch_models(api_url, api_key):
     # assume dict entries with a string id (a bare-string or
     # id-less entry crashed _dedupe_catalog/auth_probe). Field VALUES are still
     # coerced at use (_as_pos_int etc.).
+    if not isinstance(body, dict):   # M29: a 200 with a non-object JSON body
+        return []
     data = body.get("data")
     if not isinstance(data, list):
         return []
@@ -1012,9 +1156,18 @@ def _as_pos_int(v, default):
         return default
 
 
+def _as_bool(v):
+    """Coerce an untrusted catalog READINESS flag. A raw truthiness test let a
+    drifted string `"false"`/`"0"` read as READY (any non-empty string is
+    truthy). bool → itself; str → false for the usual falsey words; else bool()."""
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "false", "0", "no", "off")
+    return bool(v)
+
+
 def ready_model_ids(models):
     return [m.get("id") for m in models
-            if isinstance(m, dict) and m.get("is_ready") and m.get("id")]
+            if isinstance(m, dict) and _as_bool(m.get("is_ready")) and m.get("id")]
 
 
 def safe_catalog(api_url, api_key):
@@ -1873,6 +2026,19 @@ def estimate_cost_fb(catalog, model, input_chars, n_calls, max_tokens,
     if per_call_tokens is None:
         per_call_tokens = getattr(args, "_fb_per_call_tokens", None)
     uniform = per_call_chars is None and per_call_tokens is None
+    # L9: a PROVIDED per-call vector whose length != n_calls is an internal
+    # inconsistency. zip() would silently truncate the pricing loop and
+    # UNDER-reserve — but there is also NO safe conservative re-price: the
+    # fallback uplift is not monotone in size (a larger synthetic size can
+    # select a different, cheaper-uplift candidate), so an omitted large item
+    # can't be bounded by any single synthetic size. Degrade to the base
+    # requested-model estimate (which fully gates the REAL spend; only the
+    # secondary --fallback uplift is skipped) and warn, rather than mis-reserve.
+    if (per_call_chars is not None and len(per_call_chars) != n_calls) or \
+            (per_call_tokens is not None and len(per_call_tokens) != n_calls):
+        _fleet_warn("per-call pricing vector length mismatch — reserving the "
+                    "base estimate without the fallback uplift")
+        return exp, bnd, asm
     sizes = (list(per_call_chars) if per_call_chars is not None
              else [input_chars / n_calls] * n_calls)
     budgets = (list(per_call_tokens) if per_call_tokens is not None
@@ -2144,7 +2310,7 @@ def pick_fallback_model(catalog, current, min_context=0, conf=None):
     candidates = []
     skipped_hidden = 0
     for m in catalog:
-        if not isinstance(m, dict) or not m.get("is_ready") \
+        if not isinstance(m, dict) or not _as_bool(m.get("is_ready")) \
                 or not m.get("id") or m.get("id") == current:
             continue
         out = m.get("output_modalities") or ["text"]
@@ -2210,7 +2376,7 @@ def resolve_auto_model(spec, catalog, conf, input_chars=0, args=None,
     allow, hide, show, _notes = curation(conf)
     candidates = []
     for m in catalog or []:
-        if not (isinstance(m, dict) and m.get("is_ready") and m.get("id")):
+        if not (isinstance(m, dict) and _as_bool(m.get("is_ready")) and m.get("id")):
             continue
         out_mod = m.get("output_modalities") or ["text"]
         if not isinstance(out_mod, list) or "text" not in out_mod:
@@ -2272,7 +2438,7 @@ def preflight_hint(model, catalog, conf, input_chars=0):
     if meta is None:
         return None  # unknown id: complete() gives the real [model] diagnosis
     problems = []
-    if not meta.get("is_ready"):
+    if not _as_bool(meta.get("is_ready")):
         problems.append(f"'{model}' isn't serving right now "
                         "(Ambient scales models with demand)")
     if input_chars:
@@ -2286,7 +2452,7 @@ def preflight_hint(model, catalog, conf, input_chars=0):
     allow, hide, show, _notes = curation(conf)
     alts = []
     for m in catalog:
-        if not (isinstance(m, dict) and m.get("is_ready") and m.get("id")) \
+        if not (isinstance(m, dict) and _as_bool(m.get("is_ready")) and m.get("id")) \
                 or m["id"] == model:
             continue
         out_mod = m.get("output_modalities") or ["text"]
@@ -2358,6 +2524,11 @@ def resolve_reduce_model(args, conf, map_model, catalog=None):
         chosen, source = mapped, "AMBIENT_MODEL_MAP reduce="
     if is_auto_model(chosen):
         if catalog:
+            # input_chars=0 is intentional: the reduce input (concatenated map
+            # extracts) is genuinely unknown here, and run_map_reduce clamps the
+            # hierarchical synthesis to the CHOSEN reduce model's own window
+            # (multi-level reduce) so a small model degrades, never 400s.
+            # auto:cheapest therefore honestly returns the cheapest READY model.
             return resolve_auto_model(chosen, catalog, conf, 0, args,
                                       label=source)
         # No catalog to resolve against: say so explicitly rather than
@@ -2588,7 +2759,10 @@ def apply_output_budget(args, profile, input_chars=None):
 def error_message(body):
     err = body.get("error") if isinstance(body, dict) else None
     if isinstance(err, dict):
-        return err.get("message", json.dumps(err)[:500])
+        msg = err.get("message")
+        # A non-string "message" (None / list / number) must not propagate — a
+        # caller does msg.lower()/redact(msg), which would crash on a non-str.
+        return msg if isinstance(msg, str) else json.dumps(err)[:500]
     return json.dumps(body)[:500]
 
 
@@ -2656,7 +2830,10 @@ def auth_probe(api_url, api_key, models):
     unauthenticated, so it proves nothing about the key). Returns
     (ok, category, detail). A not-serving 429 still proves auth passed."""
     ready = ready_model_ids(models)
-    probe_model = ready[0] if ready else (models[0]["id"] if models else DEFAULT_MODEL)
+    probe_model = ready[0] if ready else next(
+        (m["id"] for m in models
+         if isinstance(m, dict) and isinstance(m.get("id"), str)),
+        DEFAULT_MODEL)
     payload = {
         "model": probe_model,
         "messages": [{"role": "user", "content": "ping"}],
@@ -3053,19 +3230,19 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
         raise NetworkError(f"cannot reach {url} ({err.reason})") from err
     except TimeoutError as err:
         raise NetworkError(f"{url} timed out connecting after {timeout}s") from err
-    except (OSError, http.client.IncompleteRead) as err:
+    except (OSError, http.client.HTTPException) as err:
         # urlopen can also raise a bare OSError out of getresponse() — a
         # RemoteDisconnected/ConnectionReset before the headers arrive, or (on
         # py<=3.9) a socket.timeout that is NOT TimeoutError. Categorize it as
         # a network fault instead of letting it surface as.
         raise NetworkError(f"cannot reach {url} ({err})") from err
     with resp:
-        ctype = resp.headers.get("Content-Type", "")
+        ctype = resp.headers.get("Content-Type", "").lower()  # M20: media type is case-insensitive
         if "text/event-stream" not in ctype:
             # Endpoint answered non-streamed anyway — parse it as one body.
             try:
                 raw_body = resp.read()
-            except (OSError, http.client.IncompleteRead) as err:
+            except (OSError, http.client.HTTPException) as err:
                 # A reset/timeout mid-body is a transient network fault, not a
                 # crash — mirror api_request's hardening.
                 raise NetworkError(
@@ -3093,21 +3270,31 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                 obj = json.loads(payload_str)
             except json.JSONDecodeError:
                 return
-            if obj.get("usage"):
+            if not isinstance(obj, dict):   # M18: a valid non-object SSE event
+                return
+            if isinstance(obj.get("usage"), dict):
                 usage = obj["usage"]
-            for ch in obj.get("choices") or []:
-                delta = ch.get("delta") or {}
-                if delta.get("content"):
-                    content.append(delta["content"])
-                    if on_delta is not None: # live stdout streaming
-                        on_delta(delta["content"])
+            choices = obj.get("choices")
+            for ch in (choices if isinstance(choices, list) else []):
+                if not isinstance(ch, dict):   # a scalar/list choice entry
+                    continue
+                delta = ch.get("delta")
+                if not isinstance(delta, dict):
+                    delta = {}
+                # Only STRING values are streamable — a scalar delta value
+                # (e.g. {"content": 1}) would crash on "".join / on_delta.
+                piece = delta.get("content")
+                if isinstance(piece, str) and piece:
+                    content.append(piece)
+                    if on_delta is not None:   # live stdout streaming
+                        on_delta(piece)
                 # Providers differ: OpenAI-style uses "reasoning_content",
-                # Kimi/others stream "reasoning". Capture BOTH — dropping either
-                # loses the whole thinking trace of a reasoning model.
-                if delta.get("reasoning_content"):
-                    reasoning.append(delta["reasoning_content"])
-                if delta.get("reasoning"):
-                    reasoning.append(delta["reasoning"])
+                # Kimi/others stream "reasoning". Capture BOTH (string only) —
+                # dropping either loses a reasoning model's whole thinking trace.
+                for _rk in ("reasoning_content", "reasoning"):
+                    _rv = delta.get(_rk)
+                    if isinstance(_rv, str) and _rv:
+                        reasoning.append(_rv)
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
                     terminated = True
@@ -3122,7 +3309,7 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                     f"({sum(map(len, content))} chars received before the stall)",
                     "".join(content), "".join(reasoning),
                 )
-            except (OSError, http.client.IncompleteRead) as err:
+            except (OSError, http.client.HTTPException) as err:
                 # Connection reset mid-stream = truncation, not a crash — route
                 # the partial through the same retry/salvage ladder as EOF.
                 close_beat()
@@ -3345,6 +3532,16 @@ class AttemptState:
 MAX_COMPLETE_ATTEMPTS = 5
 
 
+def _reasoning_str(*vals):
+    """First non-empty STRING among candidate reasoning fields, stripped. An
+    untrusted response may carry a scalar `reasoning`/`reasoning_content`
+    (e.g. 1) — `(v or "").strip()` would AttributeError on it."""
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 def complete(api_key, api_url, model, messages, args, _stall_retried=False,
              _budget_retried=False, _fallback_retried=False,
              _budget_shrunk=False, on_delta=None, session=None):
@@ -3419,7 +3616,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                 # record instead of returning empty usage — spend must never
                 # under-count. Same char-based estimate as the
                 # missing-usage path below; reasoning counts as output.
-                in_tok = int(sum(len(m.get("content", "")) for m in messages)
+                in_tok = int(sum(len(m.get("content") or "") for m in messages)
                              / CHARS_PER_TOKEN)
                 out_tok = int((len(err.partial) + len(err.reasoning or ""))
                               / CHARS_PER_TOKEN)
@@ -3465,7 +3662,10 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     catalog = fetch_models(api_url, api_key)
                 except (NetworkError, SystemExit):
                     catalog = []
-                fb_conf = read_config_file()
+                # L8: prefer the session's already-loaded conf (honors any
+                # session-level overrides + skips a disk re-read in this retry
+                # path); fall back to reading the file only if none was threaded.
+                fb_conf = session.conf or read_config_file()
                 # SACRED override: callers running a model the user
                 # EXPLICITLY chose (a --consensus set member, a chat /model
                 # pick) set _no_fallback — the swap is disabled outright, even
@@ -3478,8 +3678,9 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     # to a model whose context can hold the input we're about
                     # to resend PLUS its own output budget + overhead, so the
                     # switch can't overflow context or induce a marathon.
-                    input_tok = int(sum(len(m.get("content", ""))
-                                        for m in messages) / CHARS_PER_TOKEN)
+                    input_chars_sum = sum(len(m.get("content") or "")
+                                          for m in messages)
+                    input_tok = int(input_chars_sum / CHARS_PER_TOKEN)
                     alt = pick_fallback_model(catalog, model,
                                               min_context=input_tok,
                                               conf=fb_conf)
@@ -3489,7 +3690,12 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                                       if spec._auto_budget
                                       else min(spec.max_tokens,
                                                alt_profile.max_output_length))
-                        if input_tok + alt_budget + 2500 \
+                        # L3: size the input against the ALT model's OWN observed
+                        # chars-per-token for the fit check — the global constant
+                        # can mis-size a model with a different tokenizer and let
+                        # a too-tight switch overflow context.
+                        alt_input_tok = int(input_chars_sum / _effective_cpt(alt))
+                        if alt_input_tok + alt_budget + 2500 \
                                 > alt_profile.context_length:
                             alt = None  # can't hold input+output — don't switch
                     if alt and alt_profile:
@@ -3536,7 +3742,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                             fb_expected, fb_bound, _fb_assumed = \
                                 estimate_cost(
                                     catalog, alt,
-                                    sum(len(m.get("content", ""))
+                                    sum(len(m.get("content") or "")
                                         for m in messages),
                                     1, alt_tokens)
                             _gate_amount(fb_expected, spec, fb_conf,
@@ -3563,10 +3769,17 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             if isinstance(body, dict) and body.get("_retry_after"):
                 err_obj.retry_after = body["_retry_after"]
             raise err_obj
+        if not isinstance(body, dict):
+            # A 200 with a non-object JSON body (scalar/list/str) — `"content"
+            # in body` would crash on an int. Treat as an unexpected shape.
+            raise ChatError(
+                "unknown",
+                "unexpected response shape: "
+                f"{redact(json.dumps(body)[:800], api_key)}")
         if "content" in body and "choices" not in body:
             # Streamed result (normal path).
             content = body.get("content")
-            reasoning_text = (body.get("reasoning") or "").strip()
+            reasoning_text = _reasoning_str(body.get("reasoning"))
             finish = body.get("finish_reason")
         else:
             # Classic JSON body (endpoint ignored streaming).
@@ -3579,18 +3792,28 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     "unexpected response shape: "
                     f"{redact(json.dumps(body)[:800], api_key)}",
                 )
+            if not isinstance(choice, dict) or not isinstance(message, dict):
+                raise ChatError(   # a non-object message → message.get would crash
+                    "unknown",
+                    "unexpected response shape: "
+                    f"{redact(json.dumps(body)[:800], api_key)}")
             content = message.get("content")
-            reasoning_text = (
-                message.get("reasoning_content") or message.get("reasoning")
-                or ""
-            ).strip()
+            reasoning_text = _reasoning_str(message.get("reasoning_content"),
+                                            message.get("reasoning"))
             finish = choice.get("finish_reason")
             # Surface finish_reason at the top level so every caller's
             # truncation check works on both the streamed and classic body
             # shapes.
             body.setdefault("finish_reason", finish)
-        usage = body.get("usage") or {}
-        if isinstance(content, str):
+        usage = body.get("usage")
+        if not isinstance(usage, dict):   # a non-object usage → dict(usage) crash
+            usage = {}
+        content_str = content if isinstance(content, str) else ""
+        # M19/L22: meter whenever we got content OR reasoning. A reasoning-only
+        # response has content=None but still SPENT output tokens — the old
+        # `isinstance(content, str)` gate skipped its metering entirely, so that
+        # billed reasoning never reached the ledger / --json usage.
+        if content_str or reasoning_text:
             # Ambient's stream does not reliably send a COMPLETE usage object
             # (probe finding — sometimes none, sometimes completion_tokens with
             # prompt_tokens=0), so metering + the --json envelope went blind on
@@ -3600,13 +3823,13 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # ignores it. Far better than recording/emitting a 0.
             filled = dict(usage)
             if not _as_pos_int(usage.get("prompt_tokens"), 0):
-                in_chars = sum(len(m.get("content", "")) for m in messages)
+                in_chars = sum(len(m.get("content") or "") for m in messages)
                 if in_chars > 0:  # min 1: a non-empty prompt is never 0 tokens
                     filled["prompt_tokens"] = max(
                         1, int(in_chars / CHARS_PER_TOKEN))
                     filled["_estimated"] = True
             if not _as_pos_int(usage.get("completion_tokens"), 0):
-                out_chars = len(content) + len(reasoning_text)
+                out_chars = len(content_str) + len(reasoning_text)
                 if out_chars > 0:
                     filled["completion_tokens"] = max(
                         1, int(out_chars / CHARS_PER_TOKEN))
@@ -3620,7 +3843,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
             # Real usage carries the observed input char count for the Phase
             # 8a telemetry EWMA (estimated usage is ignored inside log_usage).
             log_usage(model, usage,
-                      input_chars=sum(len(m.get("content", ""))
+                      input_chars=sum(len(m.get("content") or "")
                                       for m in messages))
         if not isinstance(content, str) or not content.strip():
             # All budget spent on reasoning, nothing emitted: escalate ONCE,
@@ -3644,7 +3867,7 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     budget_retried=True, attempt_no=state.attempt_no + 1)
                 continue
             reasoning = reasoning_text
-            input_chars = sum(len(m.get("content", "")) for m in messages)
+            input_chars = sum(len(m.get("content") or "") for m in messages)
             if len(reasoning) > 200 and input_chars < 20_000:
                 # Small input, so splitting can't help: the thinking exists
                 # even though the answer doesn't — a labeled draft beats an
@@ -3698,10 +3921,13 @@ def chat(api_key, api_url, model, messages, args, kind="ask", session=None):
     want_json = spec.json
     live_stream = sys.stdout.isatty() and not spec.raw and not want_json
     streamed_parts = []
+    _sr = _StreamRedactor(api_key)   # M43: boundary-split-safe streaming redaction
 
     def on_delta(piece):
-        sys.stdout.write(redact(piece, api_key))
-        sys.stdout.flush()
+        out = _sr.feed(piece)
+        if out:
+            sys.stdout.write(out)
+            sys.stdout.flush()
         streamed_parts.append(piece)
 
     try:
@@ -3710,9 +3936,13 @@ def chat(api_key, api_url, model, messages, args, kind="ask", session=None):
             on_delta=(on_delta if live_stream else None), session=session)
     except ChatError as err:
         if streamed_parts:
+            sys.stdout.write(_sr.flush())   # emit the buffered tail safely
             sys.stdout.write("\n")
             sys.stdout.flush()
         _fail(spec, kind, err, api_key)
+    if streamed_parts:                       # success: flush the redactor tail
+        sys.stdout.write(_sr.flush())
+        sys.stdout.flush()
     if want_json:
         served = body.get("_served_model", model)
         emit_json(
@@ -3856,9 +4086,9 @@ def read_files(paths):
         except OSError as err:
             print(f"ambient: skipping {path} ({err})", file=sys.stderr)
             continue
-        if b"\x00" in raw[:8192]:
+        if b"\x00" in raw:   # L11: a NUL ANYWHERE marks binary (was only [:8192],
             print(f"ambient: skipping {path} (looks binary)", file=sys.stderr)
-            continue
+            continue         # so a text-headed binary slipped through as garbage)
         text = raw.decode("utf-8", errors="replace")
         total += len(text)
         if total > ABS_MAX_CHARS:
@@ -4202,6 +4432,12 @@ def _reduce_response_format(rf, reduce_profile):
     return rf
 
 
+# L13: a distinctive sentinel for the per-chunk index — collision-safe, unlike
+# the old literal "{i}" which corrupted a user system prompt / code map that
+# happened to contain "{i}". Always substituted before the note is sent/hashed.
+_CHUNK_IDX_TOKEN = "AMBIENT_CHUNK_INDEX"
+
+
 def _map_note(map_system, code_map, n_chunks):
     """The per-chunk system prompt run_map_reduce sends (chunk index patched
     in per call). Factored out so the best-of audit miss-plan can
@@ -4209,9 +4445,9 @@ def _map_note(map_system, code_map, n_chunks):
     parity by construction, never by copy-paste."""
     return (map_system
             + (f"\n\n{code_map}" if code_map else "")
-            + f"\n\n(You are seeing chunk {{i}} of {n_chunks} of a larger "
-            "input. File boundaries may be split across chunks — flag suspected "
-            "split artifacts as such instead of guessing.)")
+            + f"\n\n(You are seeing chunk {_CHUNK_IDX_TOKEN} of {n_chunks} of a "
+            "larger input. File boundaries may be split across chunks — flag "
+            "suspected split artifacts as such instead of guessing.)")
 
 
 def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
@@ -4237,6 +4473,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     reduce-specific replaced spec (max_tokens/response_format re-derived) — a
     smaller-window reduce model must never receive merge prompts or token
     budgets sized for the map model."""
+    if not chunks:   # L12: no input → ThreadPoolExecutor(max_workers=0) raises
+        return "", False, "no input"
     session = _session_or(session, api_key, api_url)
     api_key, api_url = session.api_key, session.api_url
     # FAN-OUT lane: the caller's batch gate already reserved any --fallback
@@ -4279,6 +4517,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
     use_cache = not spec.no_cache
     cache_ttl = spec.cache_ttl or CACHE_TTL_DEFAULT
     cache_hits = [0]
+    cache_hits_lock = threading.Lock()   # L14: workers increment concurrently
 
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
@@ -4289,7 +4528,7 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
             # whose result gets discarded anyway.
             raise ChatError("cancelled",
                             "fan-out cancelled before this chunk started")
-        system = map_note.replace("{i}", str(i + 1))
+        system = map_note.replace(_CHUNK_IDX_TOKEN, str(i + 1))
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": chunks[i]},
@@ -4304,7 +4543,8 @@ def run_map_reduce(api_key, api_url, model, map_system, chunks, args,
         if use_cache:
             cached = _cache_get(key, cache_ttl)
             if cached is not None:
-                cache_hits[0] += 1
+                with cache_hits_lock:
+                    cache_hits[0] += 1
                 return cached, False
         # Ride out transient rate-limits during a fan-out instead of turning a
         # brief 429 burst into a permanent coverage gap. The gate (when shared
@@ -4703,8 +4943,12 @@ def _humanize_ctx(n):
 
 
 def _model_badges(m):
-    feats = m.get("supported_features") or []
-    ins = m.get("input_modalities") or []
+    # Catalog fields are untrusted network data — a scalar (e.g. 42) would crash
+    # the `"reasoning" in feats` membership test; coerce to a list first.
+    feats = m.get("supported_features")
+    feats = feats if isinstance(feats, (list, tuple)) else []
+    ins = m.get("input_modalities")
+    ins = ins if isinstance(ins, (list, tuple)) else []
     badges = []
     if "reasoning" in feats:
         badges.append("reason")
@@ -4721,7 +4965,7 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
     # Same vocabulary as `ambient models`' section headers: a model is either
     # serving now (READY) or spins up on demand — never a bare mystery glyph.
     # Both labels render 9 columns wide so every row stays aligned.
-    flag = (paint("READY", "32") + "    " if m.get("is_ready")
+    flag = (paint("READY", "32") + "    " if _as_bool(m.get("is_ready"))
             else paint("on-demand", "2"))
     marks = []
     if m["id"] == chat_default:
@@ -4731,7 +4975,8 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
     if hidden:
         marks.append("hidden")
     mark = f"  {','.join(marks)}" if marks else ""
-    name = (m.get("name") or "").strip()
+    _name = m.get("name")                       # untrusted: may be a non-str
+    name = _name.strip() if isinstance(_name, str) else ""
     badges = _model_badges(m)
     # id + name are catalog (network) data — sanitize before they hit the
     # terminal (A12); the raw values are still used for the comparisons above.
@@ -4766,7 +5011,7 @@ def _dedupe_catalog(models):
 def cmd_models(args, api_key, api_url, conf):
     models = [m for m in _dedupe_catalog(fetch_models(api_url, api_key))
               if isinstance(m, dict) and m.get("id")]
-    models.sort(key=lambda m: (not m.get("is_ready"), m.get("id") or ""))
+    models.sort(key=lambda m: (not _as_bool(m.get("is_ready")), m.get("id") or ""))
     chat_default = resolve_model(argparse.Namespace(model=None), conf, "chat")
     code_default = resolve_model(argparse.Namespace(model=None), conf, "code")
     configured = bool(resolve_key_and_backend(conf)[0])
@@ -4782,7 +5027,7 @@ def cmd_models(args, api_key, api_url, conf):
     if getattr(args, "json", False):
         out = [{
             "id": m["id"], "name": m.get("name"),
-            "ready": bool(m.get("is_ready")),
+            "ready": _as_bool(m.get("is_ready")),
             "context_length": m.get("context_length"),
             "max_output_length": m.get("max_output_length"),
             "features": m.get("supported_features") or [],
@@ -4794,8 +5039,8 @@ def cmd_models(args, api_key, api_url, conf):
         print(json.dumps({"schema_version": 1, "configured": configured,
                           "models": out}, indent=2))
         return
-    serving = [m for m in visible if m.get("is_ready")]
-    on_demand = [m for m in visible if not m.get("is_ready")]
+    serving = [m for m in visible if _as_bool(m.get("is_ready"))]
+    on_demand = [m for m in visible if not _as_bool(m.get("is_ready"))]
     if serving:
         print(f"Serving now ({len(serving)}) — ready for instant use:")
         for m in serving:
@@ -4833,7 +5078,7 @@ def cmd_models(args, api_key, api_url, conf):
 def cmd_use(args, api_key, api_url, conf):
     models = [m for m in fetch_models(api_url, api_key)
               if isinstance(m, dict) and m.get("id")]
-    models.sort(key=lambda m: (not m.get("is_ready"), m.get("id") or ""))
+    models.sort(key=lambda m: (not _as_bool(m.get("is_ready")), m.get("id") or ""))
     known_ids = [m["id"] for m in models]
     allow, hide, show, notes = curation(conf)
     chosen = args.model_id
@@ -4893,7 +5138,7 @@ def cmd_use(args, api_key, api_url, conf):
             file=sys.stderr,
         )
     picked = next((m for m in models if m["id"] == chosen), None)
-    if picked and not picked.get("is_ready"):
+    if picked and not _as_bool(picked.get("is_ready")):
         print(
             f"note: '{chosen}' isn't serving at this moment — saving anyway; "
             "Ambient brings models up as demand arrives (`ambient models` "
@@ -5145,16 +5390,19 @@ def cmd_ask(args, api_key, api_url, conf):
     # not --json). Reasoning shows as heartbeats first, then the answer streams.
     live_stream = sys.stdout.isatty() and not args.raw and not want_json
     streamed_parts = []
+    _sr = _StreamRedactor(api_key)   # M43: boundary-split-safe streaming redaction
 
     def on_delta(piece):
-        sys.stdout.write(redact(piece, api_key))
-        sys.stdout.flush()
+        out = _sr.feed(piece)
+        if out:
+            sys.stdout.write(out)
+            sys.stdout.flush()
         streamed_parts.append(piece)
 
     # the single-shot ask is real spend — gate + fleet-reserve
     # it up front like every fan-out lane (silent pass when under ceiling).
     _single_call_gate(catalog, model,
-                      sum(len(m.get("content", "")) for m in messages),
+                      sum(len(m.get("content") or "") for m in messages),
                       args, conf)
     try:
         content, usage, body = complete(
@@ -5162,6 +5410,7 @@ def cmd_ask(args, api_key, api_url, conf):
             on_delta=(on_delta if live_stream else None), session=session)
     except ChatError as err:
         if streamed_parts:
+            sys.stdout.write(_sr.flush())
             sys.stdout.write("\n")
             sys.stdout.flush()
         if err.category in ("empty", "context") and len(prompt) > 20_000:
@@ -5177,6 +5426,9 @@ def cmd_ask(args, api_key, api_url, conf):
             split_over_doc()
             return
         _fail(args, "ask", err, api_key)
+    if streamed_parts:          # M43: emit the buffered streaming tail on success
+        sys.stdout.write(_sr.flush())
+        sys.stdout.flush()
     if want_json:
         served = body.get("_served_model", model)
         emit_json(
@@ -5291,9 +5543,9 @@ def _best_of_chat(api_key, api_url, model, messages, args, k, catalog, conf,
     api_key, api_url = session.api_key, session.api_url
     spec = RequestSpec.from_args(args)
     want_json = spec.json
-    system_text = "".join(m.get("content", "") for m in messages
+    system_text = "".join(m.get("content") or "" for m in messages
                           if m.get("role") == "system")
-    user_text = "\n".join(m.get("content", "") for m in messages
+    user_text = "\n".join(m.get("content") or "" for m in messages
                           if m.get("role") != "system")
     rf = spec.response_format
     use_cache = not spec.no_cache
@@ -6221,8 +6473,11 @@ def _finding_sig(f):
     """(normalized-relative-path, line, title words) — the identity used to
     match the same bug reported by different chunks/models. Keyed on the full
     path, NOT the basename: src/utils.py and tests/utils.py are distinct files
-    and must not collapse into one finding (which silently drops the other)."""
-    path = str(f.get("file", "")).strip().replace("\\", "/").lstrip("./").lower()
+    and must not collapse into one finding (which silently drops the other).
+    Path case is PRESERVED (L23): case-folding merged case-distinct files on a
+    case-sensitive filesystem and dropped a real finding — a duplicate on a
+    case-insensitive FS is the safer failure than lost coverage."""
+    path = str(f.get("file", "")).strip().replace("\\", "/").lstrip("./")
     try:
         line = int(f.get("line") or 0)
     except (TypeError, ValueError):
@@ -6261,12 +6516,15 @@ def dedupe_findings(findings):
             kept.append(((path, line, title), f))
             continue
         prev = slot[1]
-        best = prev
-        if SEVERITY_ORDER.get(f.get("severity"), 9) < \
-                SEVERITY_ORDER.get(prev.get("severity"), 9):
-            best = f
-        if len(str(f.get("scenario", ""))) > len(str(best.get("scenario", ""))):
-            best = {**best, "scenario": f.get("scenario")}
+        best = f if (SEVERITY_ORDER.get(f.get("severity"), 9) <
+                     SEVERITY_ORDER.get(prev.get("severity"), 9)) else prev
+        # M36: keep the richest scenario from EITHER report. The old code only
+        # grafted f's scenario onto `best`, so escalating the severity to `f`
+        # (best=f) silently discarded prev's longer scenario.
+        richest = max(prev, f, key=lambda x: len(str(x.get("scenario", ""))))
+        if len(str(richest.get("scenario", ""))) > \
+                len(str(best.get("scenario", ""))):
+            best = {**best, "scenario": richest.get("scenario", "")}
         kept[kept.index(slot)] = (slot[0], best)
     result = [f for _, f in kept]
     result.sort(key=lambda f: SEVERITY_ORDER.get(f.get("severity"), 9))
@@ -6466,7 +6724,7 @@ def repo_walk(root, per_file_cap=REPO_FILE_MAX_BYTES):
         # opened. Resolve the whole path and require it to stay under the
         # resolved root — nothing outside --repo may ever be read.
         real = os.path.realpath(full)
-        if real != real_root and not real.startswith(real_root + os.sep):
+        if not _within_root(real, real_root):   # M9: correct at root '/'
             skipped["nonregular"] += 1
             continue
         if st.st_size == 0:
@@ -6688,8 +6946,8 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
     messages = [{"role": "system", "content": sp},
                 {"role": "user", "content": user}]
     try:
-        text, _usage, _body = complete(api_key, api_url, model, messages,
-                                       deep_spec, session=session)
+        text, _usage, body2 = complete(api_key, api_url, model, messages,
+                                        deep_spec, session=session)
     except (ChatError, NetworkError) as err:
         print(f"ambient: cross-file pass failed "
               f"({getattr(err, 'diagnosis', None) or err}) — pass-1 "
@@ -6708,8 +6966,18 @@ def run_cross_file_pass(final, labeled, model, profile, args, api_key,
     obj1 = extract_json(final) or {}
     merged = dedupe_findings(list(obj1.get("findings") or [])
                              + list(obj2.get("findings") or []))
-    unparsed = int(obj1.get("_unparsed_chunks") or 0)
-    repaired = int(obj1.get("_repaired_chunks") or 0)
+    # _as_pos_int coerces UNTRUSTED counts (obj2 is raw model JSON; a
+    # non-numeric _repaired_chunks would crash int()) to a safe non-negative int.
+    unparsed = _as_pos_int(obj1.get("_unparsed_chunks"), 0)
+    repaired = _as_pos_int(obj1.get("_repaired_chunks"), 0)
+    # M38: the second pass itself can be truncated/JSON-repaired — fold its
+    # state in, else the merged verdict over-states completeness (a truncated
+    # confirmation pass would read as clean).
+    if (obj2.get("_repaired") or obj2.get("_repaired_chunks")
+            or (isinstance(body2, dict)
+                and (body2.get("finish_reason") == "length"
+                     or body2.get("salvaged_partial")))):
+        repaired += _as_pos_int(obj2.get("_repaired_chunks"), 1)
     verdict = ("NEEDS WORK" if (unparsed or repaired)
                else _verdict_from(merged, False))
     return json.dumps({"findings": merged, "verdict": verdict,
@@ -6755,8 +7023,7 @@ def git_diff_inputs(staged, ref):
         # emits an absolute or ..-traversing path from an unusual/malicious tree.
         if real_root is not None:
             real_full = os.path.realpath(full)
-            if real_full != real_root \
-                    and not real_full.startswith(real_root + os.sep):
+            if not _within_root(real_full, real_root):   # M9: correct at root '/'
                 print(f"ambient: skipping {path} (outside repo root)",
                       file=sys.stderr)
                 continue
@@ -7168,7 +7435,11 @@ def _consensus_estimate(catalog, models, labeled, total,
         bound_sum += bnd_m
         assumed_any = assumed_any or assumed_m
         parts.append(m.split('/')[-1])
-        per_model_chunks[m] = n_calls_m
+        # M6/M37: best-of/consensus can list the SAME model id more than once
+        # (K samples). ACCUMULATE its calls — assigning overwrote earlier
+        # samples so the displayed n_chunks under-counted (cost was already
+        # correct via expected_sum +=).
+        per_model_chunks[m] = per_model_chunks.get(m, 0) + n_calls_m
     return expected_sum, bound_sum, parts, per_model_chunks, assumed_any
 
 
@@ -7213,7 +7484,7 @@ def _best_of_audit_misses(catalog, model, labeled, sys_prompt, args, k,
         note = _map_note(sp, code_map, len(packed))
         miss_calls, miss_input, miss_sizes = 0, 0, []
         for j, ch in enumerate(packed):
-            key = _cache_key(model, note.replace("{i}", str(j + 1)), ch,
+            key = _cache_key(model, note.replace(_CHUNK_IDX_TOKEN, str(j + 1)), ch,
                              a.max_tokens, a.temperature,
                              a.response_format, salt=a._cache_salt)
             if use_cache and _cache_get(key, ttl) is not None:
@@ -7937,7 +8208,7 @@ def cmd_audit(args, api_key, api_url, conf):
             {"role": "user", "content": files_block(labeled)},
         ]
         _single_call_gate(catalog, model,
-                          sum(len(m.get("content", "")) for m in messages),
+                          sum(len(m.get("content") or "") for m in messages),
                           args, conf)
         try:
             content, _usage, body = complete(api_key, api_url, model, messages,
@@ -8137,7 +8408,7 @@ def cmd_code(args, api_key, api_url, conf):
     # fleet-reserve it up front like every fan-out lane (silent pass when
     # under ceiling; any distillation passes above ran their own gates).
     _single_call_gate(catalog, model,
-                      sum(len(m.get("content", "")) for m in messages),
+                      sum(len(m.get("content") or "") for m in messages),
                       args, conf)
     chat(api_key, api_url, model, messages, args, kind="code",
          session=session)
@@ -8181,7 +8452,7 @@ def _trim_chat_history(history, budget_chars):
     kept = list(history)
 
     def size(msgs):
-        return sum(len(m.get("content", "")) for m in msgs)
+        return sum(len(m.get("content") or "") for m in msgs)
 
     while len(kept) > 2 and size(kept) > budget_chars:
         kept = kept[2:]
@@ -8287,7 +8558,7 @@ def cmd_chat(args, api_key, api_url, conf):
         # fits here (refused above), so a doomed over-window request is
         # never gated or billed.
         while history and sys_len + len(line) + sum(
-                len(m.get("content", "")) for m in history) \
+                len(m.get("content") or "") for m in history) \
                 > profile.single_shot_chars:
             history = history[1:]
         messages = ([{"role": "system", "content": args.system}]
@@ -8299,7 +8570,7 @@ def cmd_chat(args, api_key, api_url, conf):
         turn_spec = dataclasses.replace(
             RequestSpec.from_args(args), _no_fallback=model_pinned,
             max_tokens=args.max_tokens if explicit_max else None)
-        input_chars = sum(len(m.get("content", "")) for m in messages)
+        input_chars = sum(len(m.get("content") or "") for m in messages)
         turn_spec = turn_spec.with_output_budget(profile, input_chars)
         # Every turn is cost-gated + fleet-reserved like any other call
         # (ceiling, aggregate fleet budget, >0.50 TTY confirm) — quietly:
@@ -8311,10 +8582,13 @@ def cmd_chat(args, api_key, api_url, conf):
         except SystemExit:
             continue  # refused/declined turn — nothing sent, REPL survives
         streamed = []
+        _sr = _StreamRedactor(api_key)   # M43: per-turn boundary-safe redaction
 
-        def on_delta(piece):
-            sys.stdout.write(redact(piece, api_key))
-            sys.stdout.flush()
+        def on_delta(piece, _sr=_sr):
+            out = _sr.feed(piece)
+            if out:
+                sys.stdout.write(out)
+                sys.stdout.flush()
             streamed.append(piece)
 
         try:
@@ -8331,6 +8605,7 @@ def cmd_chat(args, api_key, api_url, conf):
             continue
         except (ChatError, NetworkError) as err:
             if streamed:
+                sys.stdout.write(_sr.flush())
                 sys.stdout.write("\n")
                 sys.stdout.flush()
             cat = getattr(err, "category", "network")
@@ -8338,6 +8613,9 @@ def cmd_chat(args, api_key, api_url, conf):
             print(redact(f"ambient [{cat}]: {diag}", api_key),
                   file=sys.stderr)
             continue
+        if streamed:                # M43: emit the buffered streaming tail
+            sys.stdout.write(_sr.flush())
+            sys.stdout.flush()
         clean_stream = bool(streamed) \
             and "".join(streamed).strip() == content
         if not clean_stream:
@@ -8431,6 +8709,17 @@ BUILD_JSON_INSTRUCTION_FILES = (
 )
 
 
+def _within_root(child_real, root_real):
+    """True if realpath `child_real` is inside (or equal to) `root_real`. Uses
+    commonpath so it is correct even when root_real is the filesystem root '/'
+    (M9: `child.startswith(root + os.sep)` fails there — nothing starts with
+    '//', wrongly rejecting every subdirectory)."""
+    try:
+        return os.path.commonpath([child_real, root_real]) == root_real
+    except ValueError:   # different drives (Windows) / mixed abs+rel → not within
+        return False
+
+
 def safe_relpath(path, root):
     """Path-traversal firewall for manifest writes. Model
     output is UNTRUSTED: any path it names must resolve to a plain relative
@@ -8477,8 +8766,7 @@ def safe_relpath(path, root):
     # A symlinked EXISTING ancestor can point outside while the lexical path
     # stays inside — realpath resolves what exists and keeps the rest lexical.
     parent_real = os.path.realpath(os.path.dirname(dest))
-    if parent_real != root_real and \
-            not parent_real.startswith(root_real + os.sep):
+    if not _within_root(parent_real, root_real):   # M9: correct at root '/'
         raise ValueError("resolves outside the target directory (symlink escape)")
     if os.path.islink(dest):
         raise ValueError("destination is an existing symlink")
@@ -8504,14 +8792,27 @@ def _save_build_state(root, state):
               file=sys.stderr)
 
 
-def _load_build_state(root, task_sha):
+def _load_build_state(root, task_sha, max_plan=512, max_file_bytes=None):
     """Resume state is UNTRUSTED data (any process could have written it):
     every path re-fires through the firewall and every record's hash is
     re-verified, or the state is discarded — a poisoned state file must not
-    become a --dir escape on the next --apply."""
+    become a --dir escape on the next --apply. task_sha matching is cache
+    IDENTITY, not integrity, so the user's own caps are re-enforced against the
+    loaded state: `max_plan` (= --max-files) bounds BOTH the accepted plan items
+    AND the resumed `done` files, and `max_file_bytes` (= --max-file-bytes)
+    drops any over-cap resumed file — a same-hash poisoned state cannot apply
+    more or bigger files than the current invocation allows."""
+    # Bound parse-time allocation from the untrusted state to a PLAUSIBLE size
+    # for the current caps (max_plan files × max_file_bytes, ×6 for worst-case
+    # JSON escaping, + overhead) — big enough for any legit state, small enough
+    # to refuse a bloated poisoned one.
+    read_cap = max(max_plan, 1) * max(max_file_bytes or 200_000, 1) * 6 + 2_000_000
     try:
         with open(_build_state_path(root), encoding="utf-8") as fh:
-            st = json.load(fh)
+            raw = fh.read(read_cap + 1)
+            if len(raw) > read_cap:
+                return None            # implausibly large state → discard
+            st = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return None
     if not (isinstance(st, dict) and st.get("version") == 1
@@ -8521,18 +8822,27 @@ def _load_build_state(root, task_sha):
         return None
     try:
         plan = []
-        for item in st["plan"][:512]:
+        for item in st["plan"][:max_plan]:
             if not isinstance(item, dict):
                 return None
             item = dict(item)
             item["path"] = safe_relpath(str(item.get("path", "")), root)
             plan.append(item)
+        plan_paths = {item["path"] for item in plan}
         done = {}
         for k, rec in st["done"].items():
             rel = safe_relpath(str(k), root)
+            # A resumed `done` file MUST be a completed item of the (capped)
+            # plan — else a poisoned state with a disjoint done set could apply
+            # files beyond --max-files / unplanned paths.
+            if rel not in plan_paths:
+                continue
             if not (isinstance(rec, dict)
                     and isinstance(rec.get("content"), str)):
                 return None
+            if max_file_bytes is not None and \
+                    len(rec["content"].encode()) > max_file_bytes:
+                continue                # respect --max-file-bytes on resumed files
             digest = hashlib.sha256(rec["content"].encode()).hexdigest()
             if rec.get("sha256") != digest:
                 return None  # tampered or torn — start fresh
@@ -8542,8 +8852,14 @@ def _load_build_state(root, task_sha):
               "ignoring it and starting fresh", file=sys.stderr)
         return None
     st["plan"], st["done"] = plan, done
-    if not isinstance(st.get("failed"), list):
-        st["failed"] = []
+    # M22/L6: `failed` items are dereferenced later (f["path"], f.get("reason"))
+    # — a torn/poisoned non-dict entry crashed the next build. Keep only
+    # well-formed records; drop the rest rather than crash.
+    failed = st.get("failed")
+    st["failed"] = ([f for f in failed
+                     if isinstance(f, dict) and isinstance(f.get("path"), str)
+                     and isinstance(f.get("reason"), str)]
+                    if isinstance(failed, list) else [])
     return st
 
 
@@ -8558,10 +8874,17 @@ def cmd_build(args, api_key, api_url, conf):
     if not task:
         usage_exit('describe what to build: '
                    'ambient build "a flask todo API with tests" --dir out')
+    # Validate the caps UP FRONT (before resume/catalog/spend). A non-positive
+    # --max-files becomes a negative Python slice (obj["plan"][:args.max_files])
+    # that keeps all-but-the-last file — an invalid "cap" that still proceeds.
+    if args.max_files < 1:
+        usage_exit("--max-files must be a positive integer")
+    if args.max_file_bytes < 1:
+        usage_exit("--max-file-bytes must be a positive integer")
     warn_if_stdin_ignored("`build` does not read stdin — pass context with -f FILE")
     refuse_if_secrets([("task", task)], args.allow_secrets)
     root = os.path.abspath(os.path.expanduser(args.dir or "."))
-    headless = not sys.stdin.isatty()
+    headless = not _stdin_is_tty()   # M24: a closed stdin must not crash isatty()
     if args.apply and headless:
         if not args.dir:
             usage_exit("headless --apply requires an explicit --dir "
@@ -8700,11 +9023,17 @@ def cmd_build(args, api_key, api_url, conf):
                        api_key=api_key)
         context = context[:max(1000, single // 2)]
 
+    # M21: fold the caps into the identity so lowering --max-files/--max-file-
+    # bytes invalidates a cached larger plan instead of resuming it verbatim.
     task_sha = hashlib.sha256(
         (f"{task}\0{model}\0{','.join(sorted(args.context or []))}"
-         f"\0{raw_context_sha}").encode()
+         f"\0{raw_context_sha}\0{args.max_files}\0{args.max_file_bytes}").encode()
     ).hexdigest()
-    state = None if args.no_resume else _load_build_state(root, task_sha)
+    # max_plan = the user's OWN --max-files: task_sha matching is cache identity,
+    # not integrity, so a poisoned same-hash state must not exceed the cap.
+    state = None if args.no_resume else _load_build_state(
+        root, task_sha, max_plan=args.max_files,
+        max_file_bytes=args.max_file_bytes)
     if state:
         print(f"ambient: previous run found for this exact task — resuming "
               f"({len(state['done'])} file(s) already generated; "
@@ -8878,15 +9207,50 @@ def cmd_build(args, api_key, api_url, conf):
                                              "resume where this stopped"})
             continue
         want = [p["path"] for p in batch]
+
+        def _mk_user(overview, already_blk, ctx):
+            u = (f"TASK: {task}\n\nFULL PLAN (for cross-file consistency):\n"
+                 f"{overview}\n\nALREADY GENERATED (do not repeat):\n"
+                 f"{already_blk}\n\nGENERATE NOW — complete content for exactly "
+                 "these files:\n"
+                 + "\n".join(f"  {p['path']} — {p.get('purpose', '')}"
+                             for p in batch))
+            return u + (f"\n\nContext:\n{ctx}" if ctx else "")
+
         already = "\n".join(f"  {k}" for k in done) or "  (none yet)"
-        user = (f"TASK: {task}\n\nFULL PLAN (for cross-file consistency):\n"
-                f"{plan_overview}\n\nALREADY GENERATED (do not repeat):\n"
-                f"{already}\n\nGENERATE NOW — complete content for exactly "
-                "these files:\n"
-                + "\n".join(f"  {p['path']} — {p.get('purpose', '')}"
-                            for p in batch))
-        if context:
-            user += f"\n\nContext:\n{context}"
+        user = _mk_user(plan_overview, already, context)
+        # M44: keep the generation prompt within the model's single-shot window.
+        # Splitting the BATCH can't help (task/plan/already/context are
+        # batch-independent), so shrink the INPUT: drop the already-list, then
+        # truncate context, then condense the plan to paths only.
+        head = len(BUILD_GEN_PROMPT + gen_extra) + 2000   # scaffold + margin
+        if head + len(user) > single:
+            user = _mk_user(plan_overview, "  (omitted to fit the window)", context)
+        if head + len(user) > single and context:
+            # _mk_user prepends an 11-char "\n\nContext:\n" before ctx — account
+            # for it, else context[:room] overshoots the window by 11 and this
+            # whole tier is a no-op that drops ALL context at the next guard.
+            room = max(0, single - head
+                       - len(_mk_user(plan_overview, "  (omitted)", ""))
+                       - len("\n\nContext:\n"))
+            user = _mk_user(plan_overview, "  (omitted)", context[:room])
+        if head + len(user) > single:
+            user = _mk_user("\n".join(f"  {p['path']}" for p in plan),
+                            "  (omitted)", "")
+        if head + len(user) > single:
+            # Still over even minimized. Split a multi-file batch BEFORE the API
+            # call (avoids a doomed 400 round-trip); a single-file batch that
+            # can't fit is an honest, non-splittable failure.
+            if len(batch) > 1:
+                mid = len(batch) // 2
+                queue.insert(0, batch[mid:])
+                queue.insert(0, batch[:mid])
+                continue
+            failed.append({"path": want[0],
+                           "reason": "prompt exceeds the model's context window "
+                                     "even minimized — split the task or use a "
+                                     "larger-context -m model"})
+            continue
         ga, _x = _ns_with(rf_files)
         gen_calls += 1
         try:
@@ -9006,8 +9370,7 @@ def cmd_build(args, api_key, api_url, conf):
                 #.ambient-build.bak.
                 root_real0 = os.path.realpath(root)
                 parent_real0 = os.path.realpath(os.path.dirname(dest))
-                if parent_real0 != root_real0 and \
-                        not parent_real0.startswith(root_real0 + os.sep):
+                if not _within_root(parent_real0, root_real0):   # M9: correct at root '/'
                     actions[rel] = "write-failed"
                     failed.append({"path": rel,
                                    "reason": "parent escaped the target "
@@ -9061,8 +9424,7 @@ def cmd_build(args, api_key, api_url, conf):
                     # firewall check.
                     root_real = os.path.realpath(root)
                     parent_real = os.path.realpath(os.path.dirname(dest))
-                    if parent_real != root_real and \
-                            not parent_real.startswith(root_real + os.sep):
+                    if not _within_root(parent_real, root_real):   # M9
                         raise OSError("parent escaped the target directory")
                     fd, tmp = tempfile.mkstemp(
                         dir=os.path.dirname(dest), prefix=".ambient-")
@@ -9235,7 +9597,7 @@ def _verify_and_store_key(key, conf, use_file):
             category, diagnosis = classify_error(status, body, key)
             sys.exit(f"ambient [{category}]: {diagnosis} Nothing was saved.\n"
                      f"{SUPPORT_LINE}")
-        models = body.get("data", [])
+        models = _catalog_data(body)   # normalized list of dict entries
         # /v1/models is unauthenticated, so really verify the key with a tiny
         # completion (fractions of a cent).
         ok, category, detail = auth_probe(api_url, key, models)
@@ -9349,6 +9711,16 @@ def cmd_setup(args):
             "  Remove:         ambient setup --remove"
         )
     if args.key_stdin:
+        # M11: --key-stdin is for a PIPED key. On a TTY, readline() echoes the
+        # typed key to the screen/scrollback — refuse and point at the hidden-
+        # input interactive path instead.
+        try:
+            stdin_is_tty = sys.stdin.isatty()
+        except Exception:  # noqa: BLE001 — closed/odd stdin is not a TTY
+            stdin_is_tty = False
+        if stdin_is_tty:
+            sys.exit("ambient: --key-stdin expects a piped key (echo-safe). "
+                     "For interactive entry with hidden input, run: ambient setup")
         key = sys.stdin.readline().strip()
         if key.lower().startswith("bearer "):
             key = key[7:].strip()
@@ -9403,7 +9775,8 @@ def cmd_doctor(args):
         report("service", False, diagnosis)
         print(f"\nDIAGNOSIS: {diagnosis}")
         sys.exit(1)
-    models = body.get("data", [])
+    # M12: a 200 with a non-object body must not crash the diagnosis.
+    models = _catalog_data(body)   # normalized list of dict entries
     ready = ready_model_ids(models)
     report("network", True,
            f"api reachable; {len(models)} models, {len(ready)} serving")
@@ -9502,6 +9875,8 @@ def cmd_doctor(args):
 
 def cmd_usage(args):
     """Local spend summary (Ambient exposes no balance endpoint)."""
+    if args.days <= 0:   # L18: validate the ARG first, before touching the ledger
+        usage_exit("--days must be a positive number of days")
     conf = read_config_file()
     records = []
     bad = 0
@@ -9699,6 +10074,19 @@ def _link_is_ours(dest):
     return "/ambient-code/" in target.replace("\\", "/")
 
 
+def _shim_is_ours(shim_path):
+    """Windows analogue of _link_is_ours for the `.cmd` shim (M14): true only if
+    the file is OUR exact `@python "<target>" %*` template AND the target has an
+    `/ambient-code/` component — so `--remove` never deletes a foreign shim."""
+    try:
+        with open(shim_path, encoding="utf-8") as fh:
+            body = fh.read().strip()
+    except OSError:
+        return False
+    m = re.fullmatch(r'@python "(.+)" %\*', body)
+    return bool(m) and "/ambient-code/" in m.group(1).replace("\\", "/")
+
+
 def cmd_link(args):
     """Put a stable `ambient` launcher on PATH. Marketplace installs live in a
     VERSIONED cache dir that changes on every update — a symlink in
@@ -9708,6 +10096,18 @@ def cmd_link(args):
     dest_dir = os.path.expanduser(getattr(args, "dir", None) or "~/.local/bin")
     dest = os.path.join(dest_dir, "ambient")
     if getattr(args, "remove", False):
+        if os.name == "nt":   # M14: install wrote ambient.cmd, not a symlink
+            shim = os.path.join(dest_dir, "ambient.cmd")
+            if os.path.exists(shim):
+                if _shim_is_ours(shim):
+                    os.remove(shim)
+                    print(f"removed: {shim}")
+                else:
+                    sys.exit(f"ambient: {shim} is not an ambient-code launcher "
+                             "— refusing to delete it")
+            else:
+                print(f"nothing to remove at {shim}")
+            return
         if os.path.islink(dest):
             if _link_is_ours(dest):
                 os.unlink(dest)
@@ -9763,8 +10163,11 @@ def cmd_cache(args):
     except OSError:
         entries = []
     if args.action == "clear":
-        cutoff = (time.time() - args.older_than * 86400
-                  if getattr(args, "older_than", None) else None)
+        ot = getattr(args, "older_than", None)
+        if ot is not None and ot < 0:   # M27: a negative cutoff is in the FUTURE
+            usage_exit("--older-than must be a non-negative number of days "
+                       "(a negative value would clear the entire cache)")
+        cutoff = (time.time() - ot * 86400 if ot else None)
         removed = 0
         for e in entries:
             p = os.path.join(CACHE_DIR, e)
@@ -9806,6 +10209,13 @@ def ensure_opencode_config(api_url, model):
         # meets an inexplicable opencode failure (doctor also flags this).
         print(
             f"ambient: {OPENCODE_CONFIG_PATH} could not be parsed — leaving it "
+            "alone; `ambient agent` may misbehave (see: ambient doctor)",
+            file=sys.stderr,
+        )
+        return
+    if not isinstance(cfg, dict):    # M13: valid JSON but not an object ([] / "x")
+        print(
+            f"ambient: {OPENCODE_CONFIG_PATH} is not a JSON object — leaving it "
             "alone; `ambient agent` may misbehave (see: ambient doctor)",
             file=sys.stderr,
         )
