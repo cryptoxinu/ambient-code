@@ -7161,6 +7161,15 @@ def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
     recorded per model so the next call starts from the working path."""
     obj = extract_json(raw) if isinstance(raw, str) else raw
     recovered_from_prose = False
+    # A model may emit an EMPTY '{"findings":[],"verdict":"SHIP"}' JSON AND then
+    # real PROSE findings (Codex round 29). Don't trust an empty JSON result if
+    # the surrounding text carries prose findings — recover them instead of
+    # faking a clean pass.
+    if (isinstance(raw, str) and obj and isinstance(obj.get("findings"), list)
+            and not obj["findings"]):
+        recovered = parse_prose_findings(raw)
+        if recovered and recovered.get("findings"):
+            obj, recovered_from_prose = recovered, True
     if not obj or not isinstance(obj.get("findings"), list):
         # The model ignored the JSON schema. Before giving up, recover findings
         # from its PROSE (the tool's own format) — the adaptive fallback that

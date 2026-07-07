@@ -416,6 +416,19 @@ def test_any_finding_overrides_ship_verdict(sev, want):
     assert _j.loads(buf.getvalue())["verdict"] == want
 
 
+def test_empty_json_plus_prose_finding_recovers(_isolate):
+    # Codex round 29: empty JSON '{"findings":[],"verdict":"SHIP"}' followed by a
+    # real prose finding must recover the finding, not fake clean.
+    import io, contextlib, json as _j
+    raw = ('{"findings":[],"verdict":"SHIP"}\n'
+           'HIGH (confidence: HIGH) — app/auth.py:42 — auth bypass.\nVerdict: FIX FIRST\n')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    env = _j.loads(buf.getvalue())
+    assert len(env["findings"]) == 1 and env["verdict"] != "SHIP"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
