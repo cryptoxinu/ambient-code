@@ -2952,6 +2952,14 @@ def classify_error(status, body, api_key):
                 f"the requested output budget exceeds this model's limit "
                 f"(HTTP {status}: {msg})."
             )
+        if "unknown model" in lower or "not a valid model" in lower \
+                or "model not found" in lower:
+            # A mistyped -m is a model problem, not an opaque 'unknown' — say so
+            # and point at the catalog so the fix is one command away.
+            return "model", (
+                f"'{msg}'. That model id isn't in the catalog — check the "
+                "spelling or run `ambient models` to see what's available."
+            )
     return "unknown", f"HTTP {status}: {msg}"
 
 
@@ -4996,6 +5004,15 @@ def emit_json(kind, *, model, api_key="", content=None, findings=None,
     if extra:
         env.update(extra)
     print(redact(json.dumps(env, indent=2), api_key))
+    if usage and model:
+        # The savings receipt goes to STDERR in --json mode too (F05d): stdout
+        # stays clean parseable JSON, and the value proposition is no longer
+        # invisible to anyone who runs with --json. savings_note owns the
+        # honesty rules (assumed pricing → no claim; est. label).
+        note = savings_note(model, usage)
+        print(f"[ambient {model} | in={usage.get('prompt_tokens')} "
+              f"out={usage.get('completion_tokens')} tokens{note}]",
+              file=sys.stderr)
     if code and exit_now:
         sys.exit(code)
     return code
@@ -5146,19 +5163,33 @@ def format_model_line(m, chat_default, code_default, note=None, hidden=False):
     return line
 
 
+# A catalog id the API also lists under a primary (branded) id → the primary.
+# The alias stays usable with an explicit -m; it is only collapsed from the
+# storefront + the model COUNTS so all surfaces agree (models/doctor/curate).
+CATALOG_ALIAS_OF = {"zai-org/GLM-5.1-FP8": "ambient/large"}
+
+
 def _dedupe_catalog(models):
     """Collapse a catalog row the API also lists under a second, more verbose
     id into the primary (branded) row, so the storefront never shows the same
     model twice. An explicit -m on either id still works."""
-    ALIAS_OF = {"zai-org/GLM-5.1-FP8": "ambient/large"}
     seen_alias = {m["id"] for m in models}
     out = []
     for m in models:
-        primary = ALIAS_OF.get(m["id"])
+        primary = CATALOG_ALIAS_OF.get(m["id"])
         if primary and primary in seen_alias:
             continue  # drop the alias if its primary is also listed
         out.append(m)
     return out
+
+
+def _dedupe_catalog_ids(ids):
+    """Id-level dedup matching _dedupe_catalog, so a count taken from bare ids
+    (doctor, curate) agrees with the deduped storefront count."""
+    ids = list(ids)
+    have = set(ids)
+    return [i for i in ids
+            if not (CATALOG_ALIAS_OF.get(i) and CATALOG_ALIAS_OF[i] in have)]
 
 
 def cmd_models(args, api_key, api_url, conf):
@@ -5350,7 +5381,7 @@ def cmd_curate(args):
             print("notes:")
             for k, v in sorted(user_notes.items()):
                 print(f"  {k}: {v}")
-        known = _catalog_ids()
+        known = _dedupe_catalog_ids(_catalog_ids())  # match the storefront count
         if known:
             vis = [i for i in known if not is_hidden(i, allow2, hide2, show2)]
             print(f"{len(vis)} surfaced / {len(known) - len(vis)} hidden "
@@ -6640,13 +6671,22 @@ def _finding_sig(f):
 
 
 def _titles_match(a, b):
-    """Same bug if the shorter title is a word-prefix of the longer, compared
-    over at most 4 significant words: 'SQL injection' matches 'SQL injection
-    here', but 'missing null check' does not match 'missing rate limit'."""
+    """Same bug if the shorter title is a word-prefix of the longer (over at
+    most 4 significant words), OR the titles share their first two words AND
+    overlap on at least half their words. The second clause merges the SAME
+    bug phrased two ways ('top_k returns one fewer element' vs 'top_k returns
+    k-1 elements' — best-of counted these as two findings), while 'missing null
+    check' and 'missing rate limit' still stay distinct."""
     n = min(len(a), len(b), 4)
     if n == 0:
         return not a and not b
-    return a[:n] == b[:n]
+    if a[:n] == b[:n]:
+        return True
+    if len(a) >= 2 and len(b) >= 2 and a[:2] == b[:2]:
+        sa, sb = set(a), set(b)
+        if len(sa & sb) >= max(2, (min(len(sa), len(sb)) + 1) // 2):
+            return True
+    return False
 
 
 def dedupe_findings(findings):
@@ -10036,7 +10076,7 @@ def cmd_doctor(args):
         print(f"\nDIAGNOSIS: {diagnosis}")
         sys.exit(1)
     # M12: a 200 with a non-object body must not crash the diagnosis.
-    models = _catalog_data(body)   # normalized list of dict entries
+    models = _dedupe_catalog(_catalog_data(body))  # match the storefront count
     ready = ready_model_ids(models)
     report("network", True,
            f"api reachable; {len(models)} models, {len(ready)} serving")
