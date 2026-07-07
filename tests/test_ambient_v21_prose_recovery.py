@@ -477,6 +477,19 @@ def test_findings_none_summary_stays_clean():
     assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
 
 
+def test_no_severity_fieldlist_finding_does_not_fake_clean():
+    # Codex round 34: a field-list finding with Defect/File/Line but NO severity.
+    txt = ("Finding 1:\nFile: app/auth.py\nLine: 42\nDefect: missing auth check.\n"
+           "Scenario: x.\nFix: require auth.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
+def test_coverage_stats_prose_stays_clean():
+    o = amb.parse_prose_findings(
+        "File coverage: 95%. Line coverage: 90%. All good.\nVerdict: SHIP\n")
+    assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

@@ -7084,6 +7084,14 @@ _PROSE_FINDING_HEADING_RE = re.compile(
     r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\**"
     r"(?:finding|issue|bug|vulnerability|defect|weakness)s?\b[ \t]*\d*[ \t]*"
     r"[:—–\-]\**[ \t]*(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
+# Finding-specific FIELD labels a clean audit never writes — even with no
+# severity level anywhere (Codex round 34: a 'Defect:'/'File:'+'Line:' field-list
+# with no Severity field).
+_PROSE_DEFECT_FIELD_RE = re.compile(
+    r"(?im)^[\ \t>*•#\-]*\**(?:defect|vulnerabilit(?:y|ies)|weakness|flaw|exploit)"
+    r"\**\s*[:—–\-]\s*\S")
+_PROSE_FILE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**file\**\s*[:—–\-]")
+_PROSE_LINE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**lines?\**\s*[:—–\-]?[ \t]*\d")
 
 
 def _text_has_unparsed_finding(text):
@@ -7095,7 +7103,10 @@ def _text_has_unparsed_finding(text):
     return bool(_PROSE_SEVERITY_HINT_RE.search(text)
                 or _PROSE_FIELD_SEV_RE.search(text)
                 or _PROSE_TABLE_ROW_RE.search(text)
-                or _PROSE_FINDING_HEADING_RE.search(text))
+                or _PROSE_FINDING_HEADING_RE.search(text)
+                or _PROSE_DEFECT_FIELD_RE.search(text)
+                or (_PROSE_FILE_FIELD_RE.search(text)
+                    and _PROSE_LINE_FIELD_RE.search(text)))
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
 # A field-list finding always carries a LOCATION field. Match the LABEL
