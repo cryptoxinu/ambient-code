@@ -1280,6 +1280,124 @@ def _cost_cpt(model):
     return min(observed_cpt(model) or CHARS_PER_TOKEN, CHARS_PER_TOKEN)
 
 
+# --- Adaptive capability learning --------------------------------
+# The catalog's advertised features are a HYPOTHESIS; a model's OBSERVED
+# behavior is the truth. We record per-model outcomes for capability
+# "dimensions" (e.g. structured_json, build_plan) from real runs and let the
+# tool start from the path that actually worked last time — instead of
+# hard-coding each model's quirks. Learned state RECOVERS on a later success
+# (models improve as network capacity ramps), so nothing is permanently
+# blacklisted. AMBIENT_TELEMETRY=off disables learning → the tool falls back to
+# advertised features, byte-identical to a fresh install.
+CAPABILITY_PATH = os.path.expanduser("~/.config/ambient/capabilities.json")
+CAP_RECENT_K = 4          # outcomes remembered per (model, dimension)
+CAP_FAIL_THRESHOLD = 2    # recent fails (with no recent ok) => "unreliable"
+_CAP_CACHE = None
+
+
+def _load_caps():
+    """The learned capability store, read ONCE per process (memoized). A
+    missing/corrupt store yields an empty table — learning restarts clean,
+    never an error. Disabled telemetry yields an empty table (no history)."""
+    global _CAP_CACHE
+    if _CAP_CACHE is not None:
+        return _CAP_CACHE
+    table = {}
+    if _telemetry_enabled():
+        try:
+            with open(CAPABILITY_PATH, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if isinstance(raw, dict):
+                table = raw
+        except (OSError, ValueError):
+            pass  # missing/corrupt store → start fresh
+    _CAP_CACHE = table
+    return table
+
+
+def _cap_recent(model, dim):
+    """The last-K outcomes for (model, dim) as a list of 0/1, or [] if none/
+    malformed — the one place that tolerates a hand-edited or corrupt store."""
+    rec = (_load_caps().get(model) or {}).get(dim)
+    if not isinstance(rec, dict):
+        return []
+    recent = rec.get("recent")
+    if not isinstance(recent, list):
+        return []
+    return [1 if x else 0 for x in recent][-CAP_RECENT_K:]
+
+
+def cap_state(model, dim):
+    """Learned state for (model, dimension): 'ok' | 'unreliable' | 'unknown'.
+    'unknown' when learning is off or there is no history (the caller then
+    tries the optimistic path). Hysteresis: any recent SUCCESS => 'ok' (trust
+    it again — models improve); else >= CAP_FAIL_THRESHOLD recent fails =>
+    'unreliable'; otherwise 'unknown'."""
+    if not model or not _telemetry_enabled():
+        return "unknown"
+    recent = _cap_recent(model, dim)
+    if not recent:
+        return "unknown"
+    if any(recent):
+        return "ok"
+    if len(recent) >= CAP_FAIL_THRESHOLD:
+        return "unreliable"
+    return "unknown"
+
+
+def _write_caps(table):
+    """Atomic rewrite (mkstemp + replace, 0600) — same discipline as the
+    reservation/cache stores; a crash mid-write never leaves a torn file."""
+    d = os.path.dirname(CAPABILITY_PATH)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".caps-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(table, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CAPABILITY_PATH)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def record_cap(model, dim, ok):
+    """Append one real outcome (ok: bool) for (model, dimension) and persist.
+    Best-effort and fully swallowed on error — a QA/telemetry write must NEVER
+    break a real result the user is waiting on. No-op when learning is off."""
+    if not model or not _telemetry_enabled():
+        return
+    try:
+        table = dict(_load_caps())
+        model_rec = dict(table.get(model) or {})
+        dim_rec = dict(model_rec.get(dim) or {})
+        recent = _cap_recent(model, dim)
+        recent.append(1 if ok else 0)
+        dim_rec["recent"] = recent[-CAP_RECENT_K:]
+        dim_rec["updated"] = time.time()
+        model_rec[dim] = dim_rec
+        table[model] = model_rec
+        _write_caps(table)
+        global _CAP_CACHE
+        _CAP_CACHE = table
+    except Exception:
+        pass  # never propagate a telemetry failure into the caller
+
+
+def adaptive_response_format(model, profile, schema):
+    """response_format for a structured call, adjusted by LEARNED behavior.
+    If `model` has proven UNRELIABLE at honoring structured output, skip the
+    strict json_schema it ignores and return None so the caller takes the
+    prose+parser path directly (no wasted first call). Otherwise identical to
+    response_format_for (optimistic: try strict first, learn from the result)."""
+    if cap_state(model, "structured_json") == "unreliable":
+        return None
+    return response_format_for(profile, schema)
+
+
 def estimate_cost(catalog, model, input_chars, n_calls, max_tokens):
     """(expected, bound, assumed) dollar estimates for a run. `bound` assumes
     every call emits its FULL max_tokens budget (the old, 10-30x-pessimistic
