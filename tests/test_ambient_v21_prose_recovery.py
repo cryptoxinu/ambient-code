@@ -281,6 +281,18 @@ def test_fieldlist_plural_lines_range_does_not_fake_clean():
     assert amb.parse_prose_findings(txt) is None
 
 
+@pytest.mark.parametrize("loc", [
+    "Location: app/auth.py, line number 42",
+    "Location: app/auth.py lines 42-45",
+    "File: app/auth.py:42",
+    "Line: 42",
+])
+def test_fieldlist_any_location_phrasing_does_not_fake_clean(loc):
+    # Codex round 15-18: any location phrasing in a field-list finding.
+    txt = f"Finding:\nSeverity: HIGH\n{loc}\nDefect: bug.\nVerdict: SHIP\n"
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

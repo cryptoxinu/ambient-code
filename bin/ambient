@@ -3146,15 +3146,20 @@ CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]*:[^@\s]{6,}@")
 # matching quotes around the key ("AWS_SECRET_ACCESS_KEY": "…") and an optional
 # opening quote on the value. Group 1 = key quote (or ''), 2 = identifier,
 # 3 = value quote (or ''), 4 = value.
+# The identifier may use '_' (env), '-' (kebab/K8s/YAML: mysql-root-password),
+# or '.' (dotted properties: spring.datasource.password) as component separators
+# (Codex round 18).
 ENV_ASSIGN_RE = re.compile(
     r"(?:^|[\{,\s])(['\"]?)(?:export[ \t]+)?"
-    r"([A-Za-z][A-Za-z0-9_]*[A-Za-z0-9])\1?"
+    r"([A-Za-z][A-Za-z0-9_.\-]*[A-Za-z0-9])\1?"
     r"[ \t]*[:=][ \t]*(['\"]?)([^\s'\"]*)")
-# A credential keyword as a full snake_case/UPPER component (db_password,
-# AWS_SECRET_ACCESS_KEY) OR as a camelCase token (DbPassword) — but NOT buried
-# in a longer lowercase word (Tokenizer must not read as TOKEN — Codex round 3).
+# A credential keyword as a full component (db_password, mysql-root-password,
+# spring.datasource.password, AWS_SECRET_ACCESS_KEY) — separators '_', '-', '.' —
+# OR a camelCase token (DbPassword), but NOT buried in a longer lowercase word
+# (Tokenizer must not read as TOKEN — Codex round 3).
 _ENV_STRONG_COMPONENT_RE = re.compile(
-    r"(?i)(^|_)(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY)(_|$)")
+    r"(?i)(^|[_.\-])(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY)"
+    r"([_.\-]|$)")
 _ENV_STRONG_CAMEL_RE = re.compile(
     r"(?:Secret|Token|Password|Passwd|Credential|Credentials|ApiKey)(?![a-z])")
 
@@ -3164,7 +3169,7 @@ _ENV_STRONG_CAMEL_RE = re.compile(
 # PASSWORD_POLICY, TOKEN_EXPIRATION, …). KEY/TOKEN/SECRET/PASSWORD themselves are
 # NOT in this list, so DB_PASSWORD / API_SECRET / ACCESS_TOKEN stay secrets.
 _ENV_CONFIG_SUFFIX_RE = re.compile(
-    r"(?i)_(NAME|PATH|POLICY|EXPIR\w*|ID|TTL|TIMEOUT|LENGTH|COUNT|URL|URI|FILE|"
+    r"(?i)[_.\-](NAME|PATH|POLICY|EXPIR\w*|ID|TTL|TIMEOUT|LENGTH|COUNT|URL|URI|FILE|"
     r"DIR|DIRECTORY|TYPE|ENABLED|DISABLED|REQUIRED|FORMAT|HEADER|PREFIX|SUFFIX|"
     r"ROTATION|LIFETIME|GRACE|ALGORITHM|ALGO|ISSUER|AUDIENCE|SCOPES?|LOCATION|"
     r"SOURCE|PROVIDER|METHOD|MODE|VERSION|LIMIT|MAX|MIN|ATTEMPTS|WINDOW|AGE|"
@@ -3180,9 +3185,9 @@ def _env_is_strong(ident):
 # An ambiguous *_KEY trips only when a SENSITIVE component precedes KEY (schema
 # columns like PRIMARY_KEY/FOREIGN_KEY/CACHE_KEY are NOT secrets — Codex).
 _ENV_SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(^|_)(ACCESS|PRIVATE|ENCRYPT|ENCRYPTION|SIGN|SIGNING|AUTH|SESSION|"
-    r"CLIENT|MASTER|ROOT|APP|SERVICE)_KEY$")
-_PUBLIC_KEY_IDENT_RE = re.compile(r"(?i)(^|_)PUBLIC_KEY$")
+    r"(?i)(^|[_.\-])(ACCESS|PRIVATE|ENCRYPT|ENCRYPTION|SIGN|SIGNING|AUTH|SESSION|"
+    r"CLIENT|MASTER|ROOT|APP|SERVICE)[_.\-]KEY$")
+_PUBLIC_KEY_IDENT_RE = re.compile(r"(?i)(^|[_.\-])PUBLIC[_.\-]KEY$")
 # A high-entropy key value: 20+ base64/hex chars. Pure lowercase-hex (a git SHA
 # / hash) and dashed UUIDs are excluded — they aren't credentials (Codex).
 _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
@@ -7062,9 +7067,13 @@ _PROSE_FIELD_SEV_RE = re.compile(
     r"(?im)^[\ \t>*•#\-]*severity\s*:?\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
+# A field-list finding always carries a LOCATION field. Match the LABEL
+# (File:/Location:/Path:/Line:/Lines:) or a bare file:line — robust against every
+# line-number phrasing ('line 42', 'lines 42-45', 'line number 42' — Codex round
+# 15-18), instead of enumerating them. Paired with a 'Severity: <level>' label,
+# this is an unparsed finding, never a clean SHIP.
 _PROSE_FIELD_LINE_RE = re.compile(
-    r"(?im)(?:^[\ \t>*•#\-]*(?:lines?|file|location|path)\b[^\n]*?\blines?[ \t]*\d"
-    r"|^[\ \t>*•#\-]*(?:lines?|file|location|path)\s*:?\s*\S*:?[ \t]*\d"
+    r"(?im)(?:^[\ \t>*•#\-]*(?:lines?|file|location|path)\s*:"
     r"|[A-Za-z0-9_./\-]+:[ \t]*\d)")
 
 

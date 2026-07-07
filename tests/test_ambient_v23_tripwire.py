@@ -274,6 +274,23 @@ def test_round17_variable_passthrough_not_false_positive(line):
     assert amb._line_has_secret(line) is False
 
 
+@pytest.mark.parametrize("line", [
+    "mysql-root-password: p@ssw0rd!",            # K8s/YAML kebab-case
+    "client-secret: p@ssw0rd!",                  # OAuth
+    "spring.datasource.password: p@ssw0rd!",     # Java dotted properties
+])
+def test_round18_kebab_dotted_config_secrets_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
+@pytest.mark.parametrize("line", [
+    "spring.datasource.url: jdbc://localhost/db",   # config, not a secret
+    "mysql-max-connections: 100",
+])
+def test_round18_kebab_dotted_config_not_false_positive(line):
+    assert amb._line_has_secret(line) is False
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="
