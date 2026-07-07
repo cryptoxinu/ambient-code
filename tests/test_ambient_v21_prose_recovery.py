@@ -466,6 +466,17 @@ def test_severity_word_in_clean_prose_stays_clean():
     assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
 
 
+@pytest.mark.parametrize("h", ["Finding 1: HIGH", "Issue: CRITICAL", "Bug 3 - MEDIUM", "Vulnerability: HIGH"])
+def test_finding_heading_with_level_does_not_fake_clean(h):
+    # Codex round 33: severity in the 'Finding'/'Issue'/'Bug' heading, not a label.
+    assert amb.parse_prose_findings(f"{h}\nFile: a.py\nLine: 42\nVerdict: SHIP\n") is None
+
+
+def test_findings_none_summary_stays_clean():
+    o = amb.parse_prose_findings("Findings: none. No HIGH-severity issues.\nVerdict: SHIP\n")
+    assert o is not None and o["findings"] == [] and o["verdict"] == "SHIP"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

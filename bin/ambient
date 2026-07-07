@@ -7077,6 +7077,13 @@ _PROSE_FIELD_SEV_RE = re.compile(
 # has no level, so it does not trip.
 _PROSE_TABLE_ROW_RE = re.compile(
     r"(?im)^[\ \t>]*\|[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\|")
+# A 'Finding 1: HIGH' / 'Issue: CRITICAL' heading whose VALUE is a severity
+# level (Codex round 33) — the level must follow the heading's separator, so a
+# clean 'Findings: none' does not trip.
+_PROSE_FINDING_HEADING_RE = re.compile(
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\**"
+    r"(?:finding|issue|bug|vulnerability|defect|weakness)s?\b[ \t]*\d*[ \t]*"
+    r"[:—–\-]\**[ \t]*(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
 
 
 def _text_has_unparsed_finding(text):
@@ -7087,7 +7094,8 @@ def _text_has_unparsed_finding(text):
     whose surrounding text clearly reports a defect (Codex rounds 14-30)."""
     return bool(_PROSE_SEVERITY_HINT_RE.search(text)
                 or _PROSE_FIELD_SEV_RE.search(text)
-                or _PROSE_TABLE_ROW_RE.search(text))
+                or _PROSE_TABLE_ROW_RE.search(text)
+                or _PROSE_FINDING_HEADING_RE.search(text))
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
 # A field-list finding always carries a LOCATION field. Match the LABEL
