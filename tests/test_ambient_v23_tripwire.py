@@ -36,6 +36,10 @@ _HI = "aQ7pR2xL9mZ4kT8vB1nC6wY3jD5sF0hG7uE2iO4a"  # 40 synthetic high-entropy ch
     f"MY_APP_ACCESS_TOKEN = {_HI}",
     f'STRIPE_SECRET_KEY="{_HI}"',
     f"SERVICE_CREDENTIAL: {_HI}",
+    "PASSWORD=p@ssw0rd!",                       # bare strong name, short value
+    "TOKEN=p@ssw0rd!",
+    "AWS_SECRET_PUBLIC_KEY=p@ssw0rd!",          # strong name, not exempted
+    f"API_KEY={_HI}",                           # plain _KEY w/ high-entropy value
 ])
 def test_env_secret_assignment_is_detected(line):
     assert amb._line_has_secret(line) is True
@@ -47,7 +51,10 @@ def test_env_secret_assignment_is_detected(line):
     f"RSA_PUBLIC_KEY={_HI}",
     "API_KEY=short",               # value too short / low entropy
     "MY_KEY=1",
-    "SOME_TOKEN=todo",
+    "SOME_TOKEN=todo",             # strong name but value < 8
+    'PRIMARY_KEY = "customer_id"',  # schema column, not a secret
+    'FOREIGN_KEY = "account_id"',
+    "PARTITION_KEY = user_region",
     "def make_key(name):",         # not an assignment at all
     "the secret sauce is love",    # prose
 ])

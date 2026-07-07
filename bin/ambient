@@ -1353,6 +1353,36 @@ def cap_state(model, dim):
     return "unknown"
 
 
+def _try_caps_lock(conf_dir):
+    """Best-effort NON-BLOCKING exclusive lock for the capability store, so a
+    telemetry write never hangs. Returns an fd on success, else None (caller
+    proceeds unlocked). POSIX uses flock(LOCK_NB); elsewhere an O_EXCL lock file
+    that self-heals if stale (>30s)."""
+    lock_path = os.path.join(conf_dir, ".caps.lock")
+    if fcntl is not None:
+        try:
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            try:
+                os.close(fd)
+            except (OSError, NameError, UnboundLocalError):
+                pass
+            return None
+    try:
+        return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(lock_path) > 30:
+                os.unlink(lock_path)  # break a stale lock (crashed writer)
+        except OSError:
+            pass
+        return None
+    except OSError:
+        return None
+
+
 def _write_caps(table):
     """Atomic rewrite (mkstemp + replace, 0600) — same discipline as the
     reservation/cache stores; a crash mid-write never leaves a torn file."""
@@ -1379,32 +1409,40 @@ def record_cap(model, dim, ok):
     if not model or not _telemetry_enabled():
         return
     global _CAP_CACHE
+    lock_fd = None
     try:
         conf_dir = os.path.dirname(CAPABILITY_PATH)
         os.makedirs(conf_dir, exist_ok=True)
-        # Read-modify-write UNDER the shared config lock and re-read fresh from
-        # disk inside it, so two concurrent processes can't clobber each other's
-        # outcomes (Codex: unlocked RMW lost outcomes).
-        with _config_lock(conf_dir):
-            table = _read_caps_file()
-            model_rec = dict(table.get(model) if isinstance(table.get(model), dict) else {})
-            dim_rec = model_rec.get(dim)
-            dim_rec = dict(dim_rec) if isinstance(dim_rec, dict) else {}
-            prior = dim_rec.get("recent")
-            recent = [1 if x else 0 for x in prior] if isinstance(prior, list) else []
-            recent.append(1 if ok else 0)
-            dim_rec["recent"] = recent[-CAP_RECENT_K:]
-            dim_rec["updated"] = time.time()
-            model_rec[dim] = dim_rec
-            table[model] = model_rec
-            _write_caps(table)
+        # NON-BLOCKING lock: a telemetry write must NEVER hang the real result a
+        # caller is waiting on (Codex round 2: the blocking config lock could
+        # stall record_cap). If a sibling holds it, we skip the lock and do a
+        # best-effort read-modify-write — at worst one outcome races, never a
+        # hang. Re-read fresh from disk so a held lock's writer isn't clobbered
+        # when we DID get the lock.
+        lock_fd = _try_caps_lock(conf_dir)
+        table = _read_caps_file()
+        model_rec = dict(table.get(model) if isinstance(table.get(model), dict) else {})
+        dim_rec = model_rec.get(dim)
+        dim_rec = dict(dim_rec) if isinstance(dim_rec, dict) else {}
+        prior = dim_rec.get("recent")
+        recent = [1 if x else 0 for x in prior] if isinstance(prior, list) else []
+        recent.append(1 if ok else 0)
+        dim_rec["recent"] = recent[-CAP_RECENT_K:]
+        dim_rec["updated"] = time.time()
+        model_rec[dim] = dim_rec
+        table[model] = model_rec
+        _write_caps(table)
         _CAP_CACHE = table
-    except SystemExit:
-        # _config_lock sys.exits if it cannot open the lock — a telemetry write
-        # must never abort the real result the caller is waiting on.
-        pass
     except Exception:
         pass  # never propagate a telemetry failure into the caller
+    finally:
+        if lock_fd is not None:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+            except OSError:
+                pass
 
 
 def adaptive_response_format(model, profile, schema):
@@ -1428,6 +1466,17 @@ def downgrade_response_format(rf, profile):
             and "json_mode" in (getattr(profile, "features", None) or [])):
         return {"type": "json_object"}
     return None
+
+
+def _served_model_of(meta, default):
+    """The model that actually served a completion, from its metadata — or
+    `default`. Guards a malformed/non-dict `meta` and a non-string served id
+    (Codex round 2: a bogus _b could crash or record under a junk key)."""
+    if isinstance(meta, dict):
+        served = meta.get("_served_model")
+        if isinstance(served, str) and served:
+            return served
+    return default
 
 
 def build_plan_rf_ladder(model, profile):
@@ -3061,25 +3110,44 @@ SECRET_PATTERNS = [
 # on minified/hex blobs). _line_has_secret gates it on
 # the literal '://' and scans only a bounded window around each occurrence.
 CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{6,}@")
-# A value assigned to an ALL-CAPS env identifier whose last component names a
-# credential (AWS_SECRET_ACCESS_KEY=…, DB_PASSWORD=…, GITHUB_TOKEN=…). The
-# keyword-abuts-'=' pattern above MISSES these — the token right before '=' is a
-# bare KEY/TOKEN component, not the keyword — which let a creds.txt holding a
-# real secret reach the network (stress test F02). Anchored and linear-time ('_'
-# is a hard delimiter so the quantifiers can't overlap). The identifier itself
-# signals credential intent, so the value guard is broad (any 8+ run of
-# non-space, non-quote chars — catches punctuated/base64 secrets and short
-# passwords a 16-alnum guard missed). A *_PUBLIC_KEY identifier is excluded by
-# the caller (a public key is not a secret) — but ONLY when PUBLIC_KEY is the
-# actual trailing component, not merely a substring (NEXT_PUBLIC_AWS_SECRET_KEY
-# is still a secret).
-_ENV_CRED_IDENT = (
-    r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_"
-    r"(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL|CREDENTIALS|KEY)")
-ENV_SECRET_ASSIGN_RE = re.compile(
-    r"^[ \t]*(?:export[ \t]+)?(" + _ENV_CRED_IDENT + r")"
-    r"[ \t]*[:=][ \t]*['\"]?[^\s'\"]{8,}")
+# An ALL-CAPS env identifier assigned a value (AWS_SECRET_ACCESS_KEY=…,
+# DB_PASSWORD=…, GITHUB_TOKEN=…). The keyword-abuts-'=' pattern above misses
+# these (the token before '=' is a bare KEY/TOKEN component). We classify the
+# IDENTIFIER, then apply the right value guard:
+#   * STRONG (contains SECRET/TOKEN/PASSWORD/PASSWD/CREDENTIAL/APIKEY as a
+#     component, anywhere): the name alone signals a secret → any 8+ non-space
+#     value trips (catches punctuated/short passwords and 'PASSWORD=…' with no
+#     prefix). A strong name is NEVER exempted by a trailing _PUBLIC_KEY
+#     (AWS_SECRET_PUBLIC_KEY is still a secret).
+#   * a plain *_KEY (no strong token): ambiguous — PRIMARY_KEY/FOREIGN_KEY are
+#     schema columns, not secrets — so it trips ONLY on a high-entropy value
+#     (20+ base64/hex run) and a genuine *_PUBLIC_KEY is exempt.
+# Anchored + linear-time ('_' is a hard delimiter so the quantifiers can't
+# overlap).
+ENV_ASSIGN_RE = re.compile(
+    r"^[ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]*[A-Z0-9])[ \t]*[:=]"
+    r"[ \t]*['\"]?([^\s'\"]*)")
+_ENV_STRONG_RE = re.compile(
+    r"(^|_)(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY)(_|$)")
+_ENV_KEY_TAIL_RE = re.compile(r"(^|_)KEY$")
 _PUBLIC_KEY_IDENT_RE = re.compile(r"(^|_)PUBLIC_KEY$")
+_ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
+
+
+def _env_assignment_is_secret(line):
+    """True if `line` is an env-style assignment whose identifier + value read
+    as a real credential (see ENV_ASSIGN_RE commentary)."""
+    m = ENV_ASSIGN_RE.search(line)
+    if not m:
+        return False
+    ident, val = m.group(1), m.group(2)
+    if _ENV_STRONG_RE.search(ident):
+        return len(val) >= 8                      # strong name → any real value
+    if _ENV_KEY_TAIL_RE.search(ident):
+        if _PUBLIC_KEY_IDENT_RE.search(ident):
+            return False                          # a genuine public key
+        return bool(_ENV_HIGH_ENTROPY_RE.match(val))  # only a high-entropy key
+    return False
 # Credential-named files refused regardless of content (the
 # old check missed .envrc/.netrc/.npmrc/.pgpass/id_rsa/*.pem/credentials.json).
 SECRET_NAMES_RE = re.compile(
@@ -3091,8 +3159,7 @@ SECRET_NAMES_RE = re.compile(
 def _line_has_secret(line):
     if any(p.search(line) for p in SECRET_PATTERNS):
         return True
-    m = ENV_SECRET_ASSIGN_RE.search(line)
-    if m and not _PUBLIC_KEY_IDENT_RE.search(m.group(1)):  # *_PUBLIC_KEY only
+    if _env_assignment_is_secret(line):
         return True
     if "://" not in line:
         return False
@@ -6184,10 +6251,10 @@ def _ask_consensus(args, api_key, api_url, conf, catalog, question, doc,
             print(paint("⚠ PARTIAL (salvaged/truncated)", "1;33"))
         print(redact(content, api_key) + "\n")
         if usage:
-            print(f"[ambient {served} | in={usage.get('prompt_tokens')} "
-                  f"out={usage.get('completion_tokens')} tokens"
-                  f"{savings_note(served, usage, catalog, conf)}]",
-                  file=sys.stderr)
+            print(redact(f"[ambient {served} | in={usage.get('prompt_tokens')} "
+                         f"out={usage.get('completion_tokens')} tokens"
+                         f"{savings_note(served, usage, catalog, conf)}]",
+                         api_key), file=sys.stderr)
     for m, e in failed:
         print(redact(f"=== {m} ===\n(failed [{e.category}]: {e.diagnosis})\n",
                      api_key))
@@ -6820,10 +6887,12 @@ def findings_reducer(texts):
 # model that follows the prose spec (even one that ignores the JSON schema, like
 # GLM 5.2 on Ambient) still produces recoverable structured findings.
 # Leading noise a finding/verdict line may carry: whitespace, blockquote,
-# markdown bold, and list bullets (-, *, +, •) — a bulleted header must still
-# parse (Codex: '- HIGH (confidence…)' was dropped, then a verdict line faked a
-# clean SHIP).
-_PROSE_LEAD = r"[\ \t>*•+\-]*"
+# markdown bold, and '*'/'•' bullets. Deliberately EXCLUDES '-' and '+': those
+# are diff markers, and a quoted '+ HIGH (confidence…) — f:1' inside a ```diff
+# block must NOT be parsed as a live finding (Codex round 2). A genuinely
+# bulleted '- HIGH …' header simply falls to the raw envelope via the
+# severity-hint guard below — safe, never a silent drop.
+_PROSE_LEAD = r"[\ \t>*•]*"
 _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
@@ -6836,11 +6905,17 @@ _PROSE_FINDING_RE = re.compile(
 _PROSE_VERDICT_RE = re.compile(
     r"(?im)^" + _PROSE_LEAD + r"verdict\b\s*[:\-—]?\s*\**\s*"
     r"(SHIP|FIX FIRST|NEEDS WORK)\b")
-# A finding-SHAPED line (severity + confidence) — used to detect that a reply
-# DID contain findings we failed to parse, so we never mistake a partial parse
-# for a clean "no defects" verdict.
+# A genuine finding HEADER we failed to fully parse: a line that STARTS with a
+# severity (after any bullet/diff/blockquote lead — BROADER than the finding
+# regex, so a '- '/'+ ' header the finding regex skipped is still recognized),
+# carries a (confidence: …), AND a file:line (":<digit>"). Used to avoid
+# mistaking a partial parse for a clean "no defects" verdict. It must NOT fire
+# on prose like "no HIGH (confidence: HIGH) issues remain" — that line does not
+# START with a severity and has no file:line, so it stays a real clean SHIP
+# (Codex round 2 false-rejection).
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)\b(CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:")
+    r"(?im)^[\ \t>*•+\-]*"
+    r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\(\s*confidence\s*:[^\n]*:\d")
 
 
 def _extract_labeled(body, label):
@@ -6964,6 +7039,13 @@ def render_findings(raw, fmt, api_key, partial=False, reason="", model=None):
     verdict = obj.get("verdict") or _verdict_from(findings, partial)
     if partial and verdict == "SHIP":  # a partial audit can never be a clean pass
         verdict = "NEEDS WORK"
+    # A model-stated SHIP can't coexist with a HIGH/CRITICAL finding (Codex
+    # round 2): a self-contradicting reply must not let the pre-commit hook
+    # wave through a real defect — force a non-clean verdict.
+    if verdict == "SHIP" and any(
+            isinstance(f, dict) and f.get("severity") in ("CRITICAL", "HIGH")
+            for f in findings):
+        verdict = "FIX FIRST"
     if fmt == "json":
         extra = {"coverage_complete": not partial}
         if recovered_from_prose:
@@ -8989,10 +9071,10 @@ def cmd_chat(args, api_key, api_url, conf):
             served = body.get("_served_model", model) \
                 if isinstance(body, dict) else model
             # per-turn receipt: cost + vs-frontier saving.
-            print(f"[ambient {served} | in={usage.get('prompt_tokens')} "
-                  f"out={usage.get('completion_tokens')} tokens"
-                  f"{savings_note(served, usage, catalog, conf)}]",
-                  file=sys.stderr)
+            print(redact(f"[ambient {served} | in={usage.get('prompt_tokens')} "
+                         f"out={usage.get('completion_tokens')} tokens"
+                         f"{savings_note(served, usage, catalog, conf)}]",
+                         api_key), file=sys.stderr)
 
 
 BUILD_PLAN_SCHEMA = {
@@ -9432,23 +9514,24 @@ def cmd_build(args, api_key, api_url, conf):
                     [{"role": "system", "content": BUILD_PLAN_PROMPT + extra},
                      {"role": "user", "content": user}], pa, session=session)
             except ChatError as err:
-                # Terminal failures (bad key, no funds, network) won't improve on
-                # a looser rung — abort now. Otherwise a structured-output
-                # rejection often clears on the next rung, so fall through.
-                if err.category in ("key", "funds", "network") \
-                        or attempt == len(attempts):
-                    record_cap(model, "build_plan", False)
+                # Only a structured-output REJECTION (a generic 400 → 'unknown')
+                # is worth downgrading for. Every other category — rate, model,
+                # context, budget, key, funds, network, service — won't improve
+                # on a looser rung, so abort now and surface the real cause
+                # instead of a misleading 'no usable plan' (Codex round 2).
+                if err.category != "unknown" or attempt == len(attempts):
+                    record_cap(served_model, "build_plan", False)
                     _fail(args, "build",
                           ChatError(err.category,
                                     f"planning failed — {err.diagnosis}"),
                           api_key)
                 continue
+            # Track the model that ACTUALLY served on EVERY successful call (even
+            # a non-JSON one) so a --fallback served model gets the credit/blame,
+            # not the requested model — on the failure path too (Codex round 2).
+            served_model = _served_model_of(_b, model)
             obj = extract_json(content)
             if obj and isinstance(obj.get("plan"), list) and obj["plan"]:
-                # Record under the model that ACTUALLY served (opt-in --fallback
-                # may have served a different one — don't pollute the requested
-                # model's learning).
-                served_model = (_b or {}).get("_served_model") or model
                 break
             obj = None
             if attempt < len(attempts):
@@ -9457,7 +9540,7 @@ def cmd_build(args, api_key, api_url, conf):
                 user += ("\n\nREMINDER: return ONLY the JSON object, no prose, "
                          "no fences.")
         if not (obj and isinstance(obj.get("plan"), list) and obj["plan"]):
-            record_cap(model, "build_plan", False)
+            record_cap(served_model, "build_plan", False)
             pmsg = (f"{model} did not produce a usable build plan even after "
                     "loosening the output format — it may not support "
                     f"structured build output. Try -m {DEFAULT_CODE_MODEL} "
@@ -11277,12 +11360,18 @@ def _parse_args_with_stdin_dash(parser):
     """parse_args, but rescue a lone stdin sentinel '-' that argparse's greedy
     nargs='*' positional orphans when it TRAILS a value option — e.g.
     `ask "prompt" -m MODEL -`, the most natural order, which otherwise errors
-    with 'unrecognized arguments: -' (stress test F03). Identical to parse_args
-    in every other case: any other leftover is still a real usage error."""
+    with 'unrecognized arguments: -' (stress test F03). For `ask` the '-' is
+    injected into the prompt (its handler reads stdin as extra context); for
+    every other command a lone trailing '-' is simply DROPPED — audit/map
+    already auto-read piped stdin, and code takes no stdin — so the natural
+    order never errors on any command (Codex round 2). Any OTHER leftover is
+    still a real usage error, exactly like parse_args."""
     args, extras = parser.parse_known_args()
-    if extras == ["-"] and isinstance(getattr(args, "prompt", None), list):
-        if "-" not in args.prompt:
-            args.prompt.append("-")   # honor the stdin sentinel in any order
+    if extras == ["-"]:
+        if isinstance(getattr(args, "prompt", None), list):
+            if "-" not in args.prompt:
+                args.prompt.append("-")   # ask: honor the stdin sentinel
+        # else: a redundant '-' on a command that doesn't use it — drop it.
     elif extras:
         parser.error("unrecognized arguments: " + " ".join(extras))
     return args

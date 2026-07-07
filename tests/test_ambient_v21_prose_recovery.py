@@ -84,20 +84,19 @@ def test_garbage_returns_none():
 
 
 # --- Codex-found prose bugs ----------------------------------------------
-def test_bulleted_finding_header_is_parsed():
-    # Codex: '- HIGH (confidence…)' was dropped, then the verdict faked a clean
-    # SHIP. The bulleted header must parse into a real finding.
+def test_bulleted_finding_header_falls_to_raw_not_faked_clean():
+    # A '- ' bulleted finding header is a diff/list marker we DON'T parse as a
+    # live finding — but its severity+confidence+file:line means we must NOT
+    # fake a clean SHIP either; it falls to the raw envelope (returns None).
     txt = ("- HIGH (confidence: HIGH) — stats.py:10 — off-by-one bug.\n"
            "Scenario: x.\nVerdict: SHIP\n")
-    obj = amb.parse_prose_findings(txt)
-    assert obj is not None and len(obj["findings"]) == 1
-    assert obj["findings"][0]["file"] == "stats.py"
+    assert amb.parse_prose_findings(txt) is None
 
 
 def test_unparsable_finding_lines_do_not_fake_clean_verdict():
-    # A finding-shaped line we CAN'T fully parse must NOT be reported as a clean
-    # verdict with zero findings.
-    txt = ("HIGH (confidence: HIGH): something is wrong but no file:line here\n"
+    # A finding-shaped header (severity + confidence + file:line) we CAN'T fully
+    # parse must NOT be reported as a clean SHIP with zero findings.
+    txt = ("HIGH (confidence: HIGH) at a.py:42 malformed, no proper markers\n"
            "Verdict: SHIP\n")
     assert amb.parse_prose_findings(txt) is None
 
@@ -109,6 +108,33 @@ def test_last_verdict_wins_over_quoted_one():
            "Verdict: FIX FIRST\n")
     obj = amb.parse_prose_findings(txt)
     assert obj["verdict"] == "FIX FIRST"
+
+
+def test_clean_ship_prose_mentioning_severity_is_not_rejected():
+    # Codex round 2: "no HIGH (confidence: HIGH) issues remain" has no file:line
+    # → it is a real clean SHIP, not an unparseable finding.
+    txt = "No defects found. No HIGH (confidence: HIGH) issues remain.\nVerdict: SHIP\n"
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
+
+
+def test_diff_plus_line_is_not_parsed_as_finding():
+    # Codex round 2: a quoted '+ HIGH (confidence…) — f:1' inside a diff must not
+    # become a live finding (it now falls to the safe raw envelope instead).
+    txt = ("```diff\n+ HIGH (confidence: HIGH) — README.md:1 — old quoted output\n"
+           "```\nVerdict: SHIP\n")
+    obj = amb.parse_prose_findings(txt)
+    assert obj is None or len(obj["findings"]) == 0
+
+
+def test_high_finding_forces_non_ship_verdict():
+    # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
+    clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
+                                       "file": "a.py", "line": 1, "title": "bug",
+                                       "defect": "d", "scenario": "s", "fix": "f"}],
+                        "verdict": "SHIP"})
+    env = _render_json(clean, "m")
+    assert env["verdict"] == "FIX FIRST"
 
 
 def test_reducer_output_does_not_train_structured_ok(_isolate, monkeypatch):

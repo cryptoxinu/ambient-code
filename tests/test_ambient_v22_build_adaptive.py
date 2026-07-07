@@ -160,13 +160,14 @@ def test_terminal_chaterror_aborts_without_burning_the_ladder():
 
 
 def test_nonterminal_chaterror_downgrades_and_can_succeed():
+    # Only a generic 400 ('unknown' — a structured-output rejection) downgrades.
     plan = json.dumps({"plan": [{"path": "tool.py", "purpose": "x"}]})
     state = {"n": 0}
 
     def flaky(api_key, api_url, model, messages, args, **kw):
         state["n"] += 1
         if state["n"] == 1:
-            raise amb.ChatError("service", "transient 400 on json_schema")
+            raise amb.ChatError("unknown", "HTTP 400: response_format rejected")
         return (plan, {}, {})
 
     out, code = _run_build("m", flaky)
@@ -194,6 +195,33 @@ def test_fallback_served_model_gets_the_credit_not_requested():
     assert amb.cap_state("actual/server", "build_plan") == "ok"
     # the requested model that never produced it is not credited
     assert amb.cap_state("requested/model", "build_plan") != "ok"
+
+
+def test_rate_limit_aborts_immediately_not_downgrade():
+    # Codex round 2: only a generic 400 ('unknown') is downgradeable; a rate
+    # limit must abort on the first attempt, not burn the ladder + record False.
+    calls = []
+
+    def rate_limited(api_key, api_url, model, messages, args, **kw):
+        calls.append(1)
+        raise amb.ChatError("rate", "slow down")
+
+    out, code = _run_build("m", rate_limited)
+    assert code == 1 and len(calls) == 1
+    env = json.loads(out)
+    assert env["category"] == "rate"          # surfaces the REAL cause
+
+
+def test_malformed_completion_meta_does_not_crash():
+    # Codex round 2: a non-dict _b (e.g. a string) must not crash served-model
+    # attribution.
+    plan = json.dumps({"plan": [{"path": "tool.py", "purpose": "x"}]})
+
+    def weird_meta(api_key, api_url, model, messages, args, **kw):
+        return (plan, {}, "not-a-dict")
+
+    out, code = _run_build("m", weird_meta)
+    assert amb.cap_state("m", "build_plan") == "ok"  # recorded under requested
 
 
 def test_valid_plan_is_recorded_ok():

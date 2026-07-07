@@ -47,6 +47,17 @@ def test_real_unrecognized_argument_still_errors(monkeypatch):
         _parse(["ask", "hi", "--totally-bogus-flag"], monkeypatch)
 
 
+@pytest.mark.parametrize("argv", [
+    ["audit", "file.py", "-m", "z-ai/glm-5.2", "-"],   # audit auto-reads stdin
+    ["code", "build a thing", "-m", "z-ai/glm-5.2", "-"],  # code takes no stdin
+    ["map", "summarize", "a.py", "-m", "z-ai/glm-5.2", "-"],
+])
+def test_trailing_dash_dropped_not_errored_on_other_commands(argv, monkeypatch):
+    # Codex round 2: the natural order must not exit 64 on code/audit/map either.
+    args = _parse(argv, monkeypatch)  # must NOT raise SystemExit
+    assert args is not None
+
+
 def test_dash_handler_semantics_unchanged(monkeypatch):
     # cmd_ask's want_stdin logic (words filter + '-' detection) must read the
     # injected sentinel the same as a normally-parsed one.
