@@ -389,6 +389,19 @@ def test_severity_label_any_prefix_does_not_fake_clean(pre):
     assert amb.parse_prose_findings(txt) is None
 
 
+def test_markdown_table_finding_does_not_fake_clean():
+    # Codex round 27: a Markdown table finding row.
+    txt = ("| Severity | File | Line | Defect |\n|---|---|---|---|\n"
+           "| HIGH | app/auth.py | 42 | Auth bypass. |\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
+
+
+def test_benign_table_without_severity_stays_clean():
+    txt = "| File | Status |\n|---|---|\n| auth.py | OK |\nVerdict: SHIP\n"
+    obj = amb.parse_prose_findings(txt)
+    assert obj is not None and obj["findings"] == [] and obj["verdict"] == "SHIP"
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

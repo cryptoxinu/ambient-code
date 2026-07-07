@@ -7069,6 +7069,11 @@ _PROSE_SEVERITY_HINT_RE = re.compile(
 _PROSE_FIELD_SEV_RE = re.compile(
     r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\**severity\**\s*[:—–\-]?\**\s*"  # '1. **Severity:**'
     r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
+# A Markdown TABLE row carrying a severity level ('| HIGH | app/auth.py | 42 |
+# … |') is a finding row (Codex round 27) — a header row ('| Severity | File |')
+# has no level, so it does not trip.
+_PROSE_TABLE_ROW_RE = re.compile(
+    r"(?im)^[\ \t>]*\|[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*\|")
 # A location for a field-list finding: 'Line: 42', 'File: a.py:42',
 # 'Location: a.py:42', or any word/path followed by ':<digit>' (Codex round 15).
 # A field-list finding always carries a LOCATION field. Match the LABEL
@@ -7138,7 +7143,9 @@ def parse_prose_findings(text):
         # so it needs NO location match: this closes the whole file:line-notation
         # tail (Codex rounds 14-25) at the root. The single-line hint covers
         # inline 'HIGH … file:line' findings.
-        if _PROSE_SEVERITY_HINT_RE.search(text) or _PROSE_FIELD_SEV_RE.search(text):
+        if (_PROSE_SEVERITY_HINT_RE.search(text)
+                or _PROSE_FIELD_SEV_RE.search(text)
+                or _PROSE_TABLE_ROW_RE.search(text)):
             return None
         return {"findings": [], "verdict": vlast} if vlast else None
     return {"findings": findings, "verdict": vlast or _verdict_from(findings, False)}
