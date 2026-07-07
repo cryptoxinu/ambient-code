@@ -347,11 +347,18 @@ def test_github_anchor_finding_parses():
 @pytest.mark.parametrize("loc", ["line number 42", "line no. 42", "line no 42", "#L42", "line 42", ":42"])
 def test_all_single_line_fileline_notations_parse(loc):
     # Codex round 22-24: every file:line notation must parse, not fake clean.
-    sep = "" if loc.startswith(":") else " "
+    sep = "" if loc[0] in ":#" else " "
     o = amb.parse_prose_findings(
         f"HIGH (confidence: HIGH) — app/auth.py{sep}{loc} — auth bypass.\nVerdict: SHIP\n")
     assert o is not None and len(o["findings"]) == 1
     assert o["findings"][0]["line"] == 42
+
+
+def test_bold_markdown_fieldlist_does_not_fake_clean():
+    # Codex round 25: markdown-bold field labels ('**Severity:** HIGH').
+    txt = ("Finding 1:\n**Severity:** HIGH\n**File:** app/auth.py\n**Line:** 42\n"
+           "**Defect:** auth bypass.\nVerdict: SHIP\n")
+    assert amb.parse_prose_findings(txt) is None
 
 
 def test_high_finding_forces_non_ship_verdict():
