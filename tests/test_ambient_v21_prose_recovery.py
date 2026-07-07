@@ -241,6 +241,16 @@ def test_colon_no_confidence_finding_parses():
     assert obj["findings"][0]["file"] == "app/auth.py"
 
 
+@pytest.mark.parametrize("txt", [
+    "### Finding 1: HIGH — app/auth.py:42 — auth bypass\nVerdict: SHIP\n",
+    "- HIGH — app/auth.py:42 — auth bypass\nVerdict: SHIP\n",
+])
+def test_no_confidence_labeled_findings_do_not_fake_clean(txt):
+    # Codex round 13: no-confidence labeled/bulleted finding headers the parser
+    # can't reach must fall to raw, not fake a clean SHIP.
+    assert amb.parse_prose_findings(txt) is None
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

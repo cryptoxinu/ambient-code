@@ -198,6 +198,20 @@ def test_round12_real_secrets_still_caught(line):
     assert amb._line_has_secret(line) is True
 
 
+@pytest.mark.parametrize("line", [
+    "DB_PASSWORD=prod.db.password",              # ALL-CAPS env w/ dotted value
+    "JWT_SECRET=correct.horse.battery.staple",
+    "API_TOKEN=abc.def.ghi.jkl",
+])
+def test_round13_dotted_env_secrets_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
+def test_round13_lowercase_code_refs_still_cleared():
+    assert amb._line_has_secret("password = user.password_hash") is False
+    assert amb._line_has_secret("const password = user.passwordHash;") is False
+
+
 def test_tab_gutter_bypass_blocked(capsys):
     # Codex round 3: an inner fake gutter with a TAB survived the space-only strip.
     chunks = [("x.txt", "   7| \t12| AWS_SECRET_ACCESS_KEY="

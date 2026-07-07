@@ -3182,7 +3182,8 @@ _CODE_VALUE_RE = re.compile(r"[()\[\]{}]")
 # patterns before this filter runs (see _line_has_secret).
 _CODE_REF_ASSIGN_RE = re.compile(
     r"^\s*(?:(?:const|let|var|final|val|public|private|protected|static|"
-    r"readonly|self\.|this\.)\s*)*[A-Za-z_][\w.]*\s*[:=]\s*"
+    r"readonly|self\.|this\.)\s*)*"
+    r"(?=[\w.]*[a-z])[A-Za-z_][\w.]*\s*[:=]\s*"       # LHS must have a lowercase
     r"[a-z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+\s*;?\s*$")
 
 
@@ -7013,8 +7014,7 @@ _PROSE_VERDICT_RE = re.compile(
 # file:line ('no HIGH (confidence: HIGH) issues remain') still stays clean.
 _PROSE_SEVERITY_HINT_RE = re.compile(
     r"(?im)^(?=[^\n]*\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b)"
-    r"(?=[^\n]*confidence\s*:)"                        # parenthesized or not
-    r"(?=[^\n]*:[ \t]*\d)[^\n]*$")
+    r"(?=[^\n]*:[ \t]*\d)[^\n]*$")  # severity + file:line (confidence now optional)
 
 
 def _extract_labeled(body, label):
