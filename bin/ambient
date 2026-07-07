@@ -11131,7 +11131,9 @@ def _registry_handler(name):
     return globals()[name]
 
 
-def main():
+def build_parser():
+    """Construct the fully-configured top-level parser (extracted so tests and
+    main share one definition)."""
     parser = _Parser(
         prog="ambient", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -11142,6 +11144,26 @@ def main():
                                 metavar="<command>", parser_class=_Parser)
     for _spec in COMMANDS:
         _spec["configure"](sub)
+    return parser
+
+
+def _parse_args_with_stdin_dash(parser):
+    """parse_args, but rescue a lone stdin sentinel '-' that argparse's greedy
+    nargs='*' positional orphans when it TRAILS a value option — e.g.
+    `ask "prompt" -m MODEL -`, the most natural order, which otherwise errors
+    with 'unrecognized arguments: -' (stress test F03). Identical to parse_args
+    in every other case: any other leftover is still a real usage error."""
+    args, extras = parser.parse_known_args()
+    if extras == ["-"] and isinstance(getattr(args, "prompt", None), list):
+        if "-" not in args.prompt:
+            args.prompt.append("-")   # honor the stdin sentinel in any order
+    elif extras:
+        parser.error("unrecognized arguments: " + " ".join(extras))
+    return args
+
+
+def main():
+    parser = build_parser()
 
     # Never accept a key as a command-line argument: argv lands in shell
     # history and process listings. Refuse BEFORE argparse
@@ -11163,7 +11185,7 @@ def main():
                     "`ambient setup` (interactive, hidden input) instead, and "
                     f"ROTATE that key at {KEY_CONSOLE_URL}."
                 )
-    args = parser.parse_args()
+    args = _parse_args_with_stdin_dash(parser)
     spec = next((s for s in COMMANDS if s["name"] == args.command), None)
     if spec is not None and spec.get("pre_env"):
         # `ambient version` must work even before HOME/config resolve.
