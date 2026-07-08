@@ -90,7 +90,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "1.1.2"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "1.2.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -139,20 +139,69 @@ HEARTBEAT_S = 20  # stderr liveness ping while a long generation streams
 # the budget itself, once, up to this ceiling (a bounded amount of extra output
 # on the priciest model — visible on stderr).
 MAX_AUTO_BUDGET_TOKENS = 65536
+def _env_pos_int(name, default, floor=1):
+    """A positive-int env override; a missing/invalid/too-small value keeps the
+    default (with a sane floor so a fat-fingered '0' can't disable a guard)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(floor, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
 # Completions STREAM: liveness is judged by data flow, not total duration. A
 # healthy generation can run for ages; silence beyond the per-op timeout
 # (args.timeout, default 300s) means a hung worker and is caught immediately.
-HARD_WALL_S = 5400  # absolute ceiling on one streamed generation
+# AMBIENT_HARD_WALL_S / AMBIENT_NOPROGRESS_S let a very long build raise these.
+HARD_WALL_S = _env_pos_int("AMBIENT_HARD_WALL_S", 5400, floor=60)
 # A wedged worker can keep the socket alive (empty deltas / keep-alives) while
 # emitting NO new content or reasoning — that fools a pure silence timeout. If
 # nothing useful grows for this long, treat it as a stall.
-NOPROGRESS_S = 150
+NOPROGRESS_S = _env_pos_int("AMBIENT_NOPROGRESS_S", 150, floor=10)
 # Cap one streamed SSE line so a stream that sends bytes but NEVER a newline can
 # neither buffer without bound nor starve the hard-wall / no-progress checks that
 # live AFTER readline() — readline(N) returns after N bytes even with no '\n', so
 # the loop keeps ticking. Far larger than any real single delta line, so a valid
 # stream is never split/corrupted.
 STREAM_LINE_MAX = 8 * 1024 * 1024
+# The streamed heartbeat ("…writing (N chars, Xs)") and the build phase lines
+# ("generating <paths> [X/Y]") are pure UX. This toggle gates ONLY their DISPLAY —
+# the smart-timeout guards above (HARD_WALL_S / NOPROGRESS_S / stall) are safety
+# and stay enforced no matter what, so silencing progress never weakens them.
+# Default ON. Precedence: --progress/--no-progress flag > AMBIENT_PROGRESS env >
+# config file > on. Resolved once by main(); a module holder keeps stream_completion
+# (which has no args/conf) from re-reading config on every ~1s tick.
+_PROGRESS_DISPLAY = {"resolved": None}
+
+
+def _progress_from_env_or_conf(conf):
+    """AMBIENT_PROGRESS=off|0|false|no (env, then config) silences the display."""
+    raw = os.environ.get("AMBIENT_PROGRESS")
+    if raw is None:
+        raw = conf.get("AMBIENT_PROGRESS") if conf else None
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in ("off", "0", "false", "no")
+
+
+def _resolve_progress_display(args, conf):
+    """flag beats env beats config beats the on-default (see _PROGRESS_DISPLAY)."""
+    flag = getattr(args, "progress", None)   # store_true/false; absent → None
+    if flag is not None:
+        return bool(flag)
+    return _progress_from_env_or_conf(conf)
+
+
+def progress_display_enabled():
+    """Whether to SHOW streamed progress. Uses the value main() resolved; before
+    that (e.g. a direct unit-test call) it honors AMBIENT_PROGRESS so the env alone
+    always works. NEVER affects the hard-wall / no-progress / stall guards."""
+    v = _PROGRESS_DISPLAY["resolved"]
+    return _progress_from_env_or_conf(None) if v is None else v
+
+
 # No hard "no": inputs above a model's single-shot budget are automatically
 # map-reduced — split on file boundaries, processed as parallel chunk calls,
 # then merged by budget-aware synthesis. The single-shot/chunk budgets are
@@ -935,8 +984,9 @@ def build_banner():
     key, backend = resolve_key_and_backend(conf)
     ns = argparse.Namespace(model=None)
     if key:
-        status = (f"status: key configured ({backend}) · delegate "
-                  f"{(conf.get('AMBIENT_DELEGATE') or 'off').lower()} · "
+        _mode = (conf.get('AMBIENT_DELEGATE') or 'off').lower()
+        _mode_str = "TAKEOVER" if _mode == "takeover" else f"delegate {_mode}"
+        status = (f"status: key configured ({backend}) · {_mode_str} · "
                   f"model {resolve_model(ns, conf, 'chat')}")
     else:
         status = (f"status: no API key yet — run: ambient setup   "
@@ -959,7 +1009,7 @@ Do work
 Keep it healthy
   ambient doctor           pinpoint key / funds / model-availability / network trouble
   ambient usage            local spend summary (--days N)
-  ambient mode on|off      delegate mode for Claude Code sessions
+  ambient mode on|off|takeover   delegate / full-takeover mode for Claude Code
 
 {status}
 more:   ambient -h · ambient audit -h · /ambient inside Claude Code"""
@@ -1003,6 +1053,7 @@ def print_welcome_panel(models, where, probe_detail, conf, funds_issue=False):
     ambient setup --force  rotate/replace your key · --remove deletes it
 
   In Claude Code:  /ambient opens the control panel · /ambient on = delegate mode
+                   · ambient mode takeover = Ambient does everything (/ambient off)
 """)
     print(f"Default model: {chat_model} — change any time: ambient use")
 
@@ -3880,10 +3931,12 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                     "progress",
                     "".join(content), "".join(reasoning),
                 )
-            if now - last_beat >= HEARTBEAT_S:
+            if progress_display_enabled() and now - last_beat >= HEARTBEAT_S:
                 # Visible liveness so a long generation never LOOKS hung. On a
                 # TTY, rewrite ONE line in place (no scroll spam); off-TTY (CI
                 # logs) keep newline-per-beat so lines stay greppable (B5).
+                # --no-progress / AMBIENT_PROGRESS=off silences this; the wall/
+                # no-progress guards ABOVE still run every tick regardless.
                 got = sum(map(len, content)) or sum(map(len, reasoning))
                 phase = "writing" if content else "thinking"
                 msg = (f"ambient: …{phase} ({got:,} chars, "
@@ -10319,6 +10372,15 @@ def cmd_build(args, api_key, api_url, conf):
             continue
         ga, _x = _ns_with(rf_files)
         gen_calls += 1
+        # C1: name WHICH files this call generates and how far along the plan we
+        # are, on top of the streaming char-heartbeat — a long build must show
+        # progress, never look stuck. stderr only; --json stdout is untouched.
+        # Silenced by --no-progress / AMBIENT_PROGRESS=off (error/retry lines
+        # below are diagnostics, not progress, so they are NEVER silenced).
+        if progress_display_enabled():
+            print(f"ambient: generating {', '.join(want)}  "
+                  f"[{len(done)}/{len(plan_paths)} of the plan done]",
+                  file=sys.stderr)
         try:
             content, _u, body = complete(
                 api_key, api_url, model,
@@ -10575,10 +10637,18 @@ def cmd_build(args, api_key, api_url, conf):
 
 
 def cmd_mode(args):
-    """Delegate-mode flag. Works without credentials (config-file only)."""
-    if args.state in ("on", "off"):
+    """Delegate-mode flag — an ordered level: off < on < takeover (takeover
+    implies delegate). Works without credentials (config-file only)."""
+    if args.state in ("on", "off", "takeover"):
         save_config_values({"AMBIENT_DELEGATE": args.state})
-        print(f"Ambient delegate mode: {args.state.upper()}")
+        if args.state == "takeover":
+            print("Ambient Takeover: ON — Claude will route EVERYTHING (chat, "
+                  "questions, building, reviews) through Ambient, so you spend "
+                  "Ambient tokens instead of Claude's.\n"
+                  "Turn it off any time:  ambient mode off   "
+                  "(or /ambient off in Claude Code)")
+        else:
+            print(f"Ambient delegate mode: {args.state.upper()}")
         return
     conf = read_config_file()
     ns = argparse.Namespace(model=None)
@@ -11508,6 +11578,21 @@ def add_common_flags(parser):
         help="max concurrent chunk/model calls, 1-16 (default "
              f"{MAX_PARALLEL_CHUNKS}; or set AMBIENT_MAX_PARALLEL)",
     )
+    # Progress DISPLAY only — the smart timeout runs regardless. Both share dest
+    # `progress`; SUPPRESS leaves the attr absent when neither is given, so the
+    # env/config default wins (see _resolve_progress_display).
+    parser.add_argument(
+        "--progress", dest="progress", action="store_true",
+        default=argparse.SUPPRESS,
+        help="force the live progress display on (heartbeat + build phase "
+             "lines); default on (or AMBIENT_PROGRESS=on)",
+    )
+    parser.add_argument(
+        "--no-progress", dest="progress", action="store_false",
+        default=argparse.SUPPRESS,
+        help="silence the streamed progress display — the smart stall/hard-wall "
+             "timeout still runs (or AMBIENT_PROGRESS=off)",
+    )
 
 
 def _add_best_of_flag(parser):
@@ -11615,9 +11700,12 @@ def _configure_usage(sub):
 
 
 def _configure_mode(sub):
-    p = sub.add_parser("mode", help="delegate mode: on / off / status")
-    p.add_argument("state", nargs="?", choices=["on", "off"], default=None,
-                   help="on/off; omit to print current status")
+    p = sub.add_parser("mode", help="delegate mode: on / off / takeover / status")
+    p.add_argument("state", nargs="?", choices=["on", "off", "takeover"],
+                   default=None,
+                   help="off · on (Ambient writes code, Claude plans/reviews) · "
+                        "takeover (Ambient does everything on your tokens); "
+                        "omit to print current status")
 
 
 def _configure_doctor(sub):
@@ -12080,6 +12168,10 @@ def main():
             _registry_handler(alt)(args)
             return
     api_key, api_url, conf = load_config()
+    # Fold --progress/--no-progress + AMBIENT_PROGRESS (env, then config) into the
+    # module holder now that conf is loaded — every streaming command reaches this
+    # line before it streams, so the display gate has a resolved value.
+    _PROGRESS_DISPLAY["resolved"] = _resolve_progress_display(args, conf)
     try:
         _registry_handler(spec["handler"])(args, api_key, api_url, conf)
     except ChatError as err:

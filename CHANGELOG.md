@@ -2,6 +2,37 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 1.2.0 — 2026-07-08
+
+Three founder-requested features. No breaking changes; every prior default is
+byte-identical unless you opt in.
+
+### Added
+
+- **Ambient Takeover mode** (`ambient mode takeover`, or `/ambient takeover` in
+  Claude Code) — a full-delegate level above `on` (ordered: off < on < takeover).
+  Claude routes every substantive turn through Ambient (chat → `ask`, code →
+  `build`, review → `audit`) so you spend Ambient tokens, not Claude's; Claude
+  stays a thin router/safety/integration layer. Always shows how to leave
+  (`/ambient off`), which turns off both delegate and takeover.
+- **Streamed build/audit progress** — `ambient build` prints a per-batch
+  `generating <paths> [X/Y of the plan done]` line alongside the existing char
+  heartbeat, so a long generation never looks stuck. The skill now dispatches long
+  jobs (`build`, `audit --repo`, `map`) in the background so they are never killed
+  by an outer tool timeout.
+- **User-toggleable progress display** — silence the heartbeat + phase lines per
+  call with `--no-progress` (force on with `--progress`) on any streaming command
+  (ask/audit/map/code/chat/build), or persistently with `AMBIENT_PROGRESS=off`
+  (env or config). Gates ONLY the display — the smart stall / hard-wall timeout
+  always runs, so a quiet build can never silently hang.
+
+### Changed
+
+- The smart streaming timeout is now tunable: `AMBIENT_HARD_WALL_S` (default 5400,
+  floor 60) and `AMBIENT_NOPROGRESS_S` (default 150, floor 10) let a very long
+  build raise the ceilings. The floors mean a mistyped `0` can never disable a
+  guard.
+
 ## 1.1.2 — 2026-07-08
 
 Production-hardening pass (from a Codex + team-share audit) before wider sharing.

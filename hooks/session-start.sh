@@ -35,9 +35,28 @@ fi
 
 conf="$HOME/.config/ambient/env"
 [ -f "$conf" ] || exit 0
-# Last assignment wins, matching the CLI's config parser — a duplicate
+# Last assignment wins AND key/value whitespace is trimmed, matching the CLI's
+# config parser (key.strip()/val.strip()) — a duplicate OR hand-spaced
 # AMBIENT_DELEGATE line must not make the hook disagree with `ambient mode`.
-if [ "$(sed -n 's/^AMBIENT_DELEGATE=//p' "$conf" 2>/dev/null | tail -1)" = "on" ]; then
+mode="$(sed -n 's/^[[:space:]]*AMBIENT_DELEGATE[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null \
+        | sed 's/[[:space:]]*$//' | tail -1)"
+if [ "$mode" = "takeover" ]; then
+  cat <<'MSG'
+Ambient TAKEOVER mode is ON (persisted setting). Per the ambient skill's takeover
+contract, route EVERY substantive turn through Ambient so the user spends AMBIENT
+tokens, not Claude's: conversation/questions/explanations via `ambient ask` (use
+`ambient chat` only for a user-opened interactive terminal); code via `ambient
+build`/`ambient code`; reviews via `ambient audit`. Claude stays the thin
+router/safety/integration layer — it briefs Ambient, runs the outbound secret
+tripwire, reviews + tests + integrates the result, and keeps its OWN token use
+minimal. Keep these with Claude (never route to Ambient): trivial one-liners; any
+safety-critical/destructive/irreversible turn (auth, crypto, secret handling, rm,
+force-push, migrations, prod ops); and NEVER send secrets or user/health data.
+Begin each substantive turn with exactly this one line:
+🟢 Ambient Takeover ON — running on your Ambient tokens · /ambient off to stop
+The user turns it off with /ambient off.
+MSG
+elif [ "$mode" = "on" ]; then
   cat <<'MSG'
 Ambient delegate mode is ON (persisted setting). Per the ambient skill's delegate
 contract: the user plans with Claude, Ambient (default Kimi) writes the code, Claude

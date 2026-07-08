@@ -17,14 +17,15 @@ always points at the active install, so never hardcode a path.
 
 | Invocation | What to do |
 |---|---|
-| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else run `ambient models --json` once and show a compact panel: (1) the mental model, one line — "Claude plans, reviews, and integrates; Ambient does the heavy token work (bulk code writing, audits, digests) at ~10-40x lower cost"; (2) delegate-mode state + lane defaults; (3) the headline `Serving now: <models with ready==true && hidden==false>` plus one positive catalog line — "`+N more` catalog models spin up on demand (`ambient models --all` shows everything)". Never enumerate non-serving models in the default panel (see **Plain-language status**). Then an AskUserQuestion action picker: toggle delegate mode / switch model (**Model picking UX** below) / audit something / build something / spawn terminal. If NOTHING is serving this minute: say "All catalog models are between demand cycles right now — they spin up when called for; check `ambient models` in a few minutes", keep the non-model actions, and never present a model as serving when it isn't. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
+| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else run `ambient models --json` once and show a compact panel: (1) the mental model, one line — "Claude plans, reviews, and integrates; Ambient does the heavy token work (bulk code writing, audits, digests) at ~10-40x lower cost"; (2) delegate-mode state + lane defaults; (3) the headline `Serving now: <models with ready==true && hidden==false>` plus one positive catalog line — "`+N more` catalog models spin up on demand (`ambient models --all` shows everything)". Never enumerate non-serving models in the default panel (see **Plain-language status**). Then an AskUserQuestion action picker: toggle delegate mode / turn on **Ambient Takeover** (Ambient does everything on your tokens — **Ambient Takeover contract** below) / switch model (**Model picking UX** below) / audit something / build something / spawn terminal. (`ambient mode` reports `delegate=takeover` when that level is active; the bare `ambient` banner renders it as a `TAKEOVER` badge.) If NOTHING is serving this minute: say "All catalog models are between demand cycles right now — they spin up when called for; check `ambient models` in a few minutes", keep the non-model actions, and never present a model as serving when it isn't. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
 | `/ambient on` | `ambient mode on`, announce the delegate contract (below), follow it all session. |
-| `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). |
+| `/ambient takeover` | `ambient mode takeover`, announce the **Ambient Takeover contract** (below), then route EVERY substantive turn through Ambient for the rest of the session (Ambient tokens, not Claude's). Show the takeover banner each turn. |
+| `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). Turns off BOTH delegate and takeover — the single, always-available exit from either mode. |
 | `/ambient model` | Model picking UX below. |
 | `/ambient audit <target>` | `git diff \| ambient audit` or `ambient audit <files> [--focus X] --json`, then verify + report. Whole codebase: `ambient audit --repo <dir> [--focus X] --json` — git-aware walker (`.gitignore` respected; binaries/lockfiles/vendored dirs skipped) that reports files + chars BEFORE spending; under `--json` a one-line `{"status":"plan",…}` object precedes the standard envelope. A repo over the input ceiling is refused unless `--allow-cost`/`--allow-partial` (which audits what fits and reports the rest as an explicit coverage gap). `--parallel`/`--reduce-model`/`--consensus`/the cost gate apply unchanged; a bounded cross-file confirmation pass (ONE extra gated call max) is on by default for `--repo` — `--no-deep` skips it, and under `--consensus` it is always skipped (multi-model corroboration replaces it; `--deep`/`--no-deep` have no effect there). |
 | `/ambient map <prompt> <items>` | Bulk lane: `ambient map "<prompt>" <files> --json` (or pipe one item per line; `--jsonl` for objects). One prompt, applied independently per item, one JSONL envelope per item out. |
 | `/ambient chat` | The user's interactive REPL (`ambient chat` in THEIR terminal — it requires a TTY; scripted use routes to `ambient ask`). Streams replies, prints a per-turn savings receipt (relative % only), `/model` switches models mid-session (explicit + printed), `/clear` resets history, Ctrl-C interrupts only the current turn. Every turn is cost-gated + fleet-reserved. |
-| `/ambient build <task>` | Native build lane: write a precise brief, run `ambient build "<brief>" --dir <target> [-f context] --json --apply --yes`, read the manifest, review every file, run tests yourself. |
+| `/ambient build <task>` | Native build lane: write a precise brief, run `ambient build "<brief>" --dir <target> [-f context] --json --apply --yes`, read the manifest, review every file, run tests yourself. Anything beyond a trivial build → dispatch it in the BACKGROUND and relay progress (see **Long-running dispatch** — never wrap a real build in a Bash timeout). |
 | `/ambient agent` | Interactive opencode TUI for the user (`ambient agent`); headless one-offs via `ambient agent run "task"`. The key enters opencode's process env — never ask the agent to print its environment. |
 | `/ambient curate ...` | User model curation: `ambient curate` (status) / `hide <id\|glob>` / `show <id>` / `only <ids>` / `note <id> "text"` / `reset`. Curation shapes menus + automatic selection only — explicit `-m` always works. |
 | `/ambient setup` | First-run setup below (key rotation: `setup --force`; removal: `setup --remove`). |
@@ -37,6 +38,12 @@ X" / "have ambient build X" → `/ambient build <task>`; "use ambient to audit X
 "have ambient audit X" / "get a second opinion on X" → `/ambient audit <target>`;
 "ask ambient <question>" / "run this on ambient" → `ambient ask` (or the closest
 row). Don't make the user learn the commands.
+
+**Long jobs run in the background (MANDATORY):** `ambient build`, `ambient audit
+--repo`, and `ambient map` over many files are genuinely long — dispatch them with
+Bash `run_in_background` and NEVER a Bash `timeout`, then relay their streamed
+progress. See **Long-running dispatch** for why (the CLI already times them
+smartly) and how (poll → relay → read the final JSON envelope).
 
 **Plain-language status (MANDATORY user-facing wording):** when showing model
 status to the user — the panel, the model list, or any narration — NEVER mention internal network mechanics or jargon. The
@@ -80,6 +87,56 @@ opts out). An item bigger than the model's single-shot window is a per-item
 error (route big files to `ambient audit`); a fatal key/funds/network failure
 cancels the queue instantly and exits 1 via the error envelope.
 
+## Long-running dispatch (background + smart timeout)
+
+`ambient build`, `ambient audit --repo`, and `ambient map` over many files are
+GENUINELY long — the model is streaming a whole file-set or auditing a repo. This
+is NOT a case for a hard timeout, because the CLI already times these smartly: it
+keeps running as long as content is flowing and aborts ONLY on a real stall (no new
+content for ~150s, `AMBIENT_NOPROGRESS_S`) or a safety hard-wall (~90 min,
+`AMBIENT_HARD_WALL_S`). Every streaming call shows a stderr heartbeat
+(`ambient: …writing/thinking (N chars, Xs)`); `ambient build` ALSO prints a
+per-batch line (`ambient: generating <paths> [X/Y of the plan done]`), and
+`audit --repo`/`map` show their own map-reduce / per-item progress. So the only
+timeout that can wrongly kill a healthy build is CLAUDE'S OWN Bash-tool wall clock
+(minutes) when the command is run in the foreground.
+
+Therefore, for these three commands ALWAYS:
+1. **Run in the BACKGROUND** — Bash `run_in_background: true`, and NEVER pass a Bash
+   `timeout`. A background job isn't subject to the Bash-tool clock, so the CLI's
+   own smart, progress-aware timeout is the only one in force.
+2. **Poll and RELAY** — read the job's streamed output and tell the user, in plain
+   words, where it is (`Ambient is on file 3/7 — <path>…`), so a multi-minute build
+   never looks hung. Say once, plainly: "This runs in the background and keeps going
+   as long as Ambient is actively producing — I'll relay progress; it stops only on
+   a true stall, not a fixed clock."
+3. **Read the FINAL result from stdout** — `build --json` / `audit --json` print a
+   pretty-printed (multi-line) JSON object, so parse the whole trailing object, not
+   a single line. `audit --repo --json` prints a compact `{"status":"plan",…}` line
+   FIRST, then the result object — use the result object. `map --json` is JSONL: one
+   envelope per item, no aggregate — parse each line. Then review by exit code:
+   0 → act on it; 2 → PARTIAL, report the result AND the coverage gap; 1 → relay the
+   classified error (`ambient [category]:` or the JSON error envelope); 3 → no API
+   key (setup needed); 64 → a usage/flag error on your side.
+4. **Only a genuine stall is a stall** — on a real data-flow stall the CLI retries
+   once, then either salvages partial output (marked PARTIAL, exit 2) or exits with
+   `ambient [stall]`; don't pre-empt it or restart a live job.
+
+Small `ambient ask` / `ambient code` / single-file jobs usually stay foreground;
+background them too if the prompt/context/output is large enough to map-reduce. To
+let a very long build run even longer, raise `AMBIENT_NOPROGRESS_S` /
+`AMBIENT_HARD_WALL_S` (seconds; floors 10 / 60) before the call — tell the user you
+did and why.
+
+**Progress display is user-toggleable.** The live heartbeat + `generating …` lines
+default ON, but a user who wants a quiet run can silence them per call with
+`--no-progress` (or force them on with `--progress`) on any streaming command
+(ask/audit/map/code/chat/build), or persistently with `AMBIENT_PROGRESS=off` (env,
+or in `~/.config/ambient/env`). This gates ONLY the display — the smart stall /
+hard-wall timeout still runs, so a quiet build is never a build that can hang. If a
+user asks to "turn off the streaming / progress output," set `--no-progress` (or
+tell them the env knob); if they want it back, `--progress` / `AMBIENT_PROGRESS=on`.
+
 ## Delegate mode contract ("Ambient codes everything")
 
 While `ambient mode` reports `delegate=on` (a SessionStart hook also reminds you):
@@ -107,6 +164,54 @@ Per task:
 Stays with Claude even in delegate mode: one-liners, renames, config tweaks,
 anything security-critical (auth, crypto, secrets handling), and final integration.
 Mode persists across sessions until `/ambient off`.
+
+## Ambient Takeover contract ("Ambient runs everything")
+
+While `ambient mode` reports the **takeover** level (`AMBIENT_DELEGATE=takeover`;
+the SessionStart hook also injects this contract), the user has chosen to spend
+**Ambient tokens, not Claude's**, for as much as is safe. Takeover is the delegate
+contract one level further: Claude stays the interface — it can't literally be
+replaced — but it delegates ALL generation and reasoning-heavy work to Ambient and
+keeps its own token use minimal. This is `on` ⊂ `takeover`: everything true in
+delegate mode still holds; takeover additionally routes conversation and reasoning,
+not just code.
+
+**Always-on banner (MANDATORY every takeover turn).** Begin each substantive reply
+with exactly this line, so the user always knows the mode is live and how to leave:
+`🟢 Ambient Takeover ON — running on your Ambient tokens · /ambient off to stop`
+
+**Routing — every substantive turn goes to Ambient:**
+- **Conversation / questions / explanations** → `ambient ask "<the question>"`
+  (attach context via stdin: `cat <files> | ambient ask "…" -`). Relay Ambient's
+  answer; don't silently re-answer it yourself at length.
+- **Writing / changing code** → the delegate build lane — `ambient build …`
+  (multi-file) or `ambient code …` (single file), dispatched in the background per
+  **Long-running dispatch**. Review + integrate the diff yourself (that review is
+  safety work, not regeneration).
+- **Review / second opinion** → `ambient audit …`.  **Bulk over many items** →
+  `ambient map …`.
+Write the brief, run Ambient, verify, integrate — and keep YOUR prose short, since
+the whole point is that premium tokens aren't spent on work Ambient can do.
+
+**Claude stays the thin router / safety / integration layer — do NOT delegate:**
+- Routing itself and the one-line briefs you hand to Ambient.
+- The outbound secret tripwire — NEVER send `.env`, credentials, keys, or
+  user/health data to Ambient, takeover or not (the CLI tripwire is a backstop, not
+  a guarantee).
+- Safety-critical / destructive / irreversible turns (auth, crypto, secret
+  handling, `rm`/force-push/migrations/production ops): SURFACE them and get
+  confirmation — never silently route these through Ambient.
+- Final integration, running the tests/build, and the go/no-go judgment on Ambient's
+  output (untrusted until you verified it).
+- Trivial one-liners where a round-trip to Ambient costs more than it saves.
+
+**Off is always one step away:** `/ambient off` (or `ambient mode off`) ends
+takeover immediately and returns to normal on-demand use; the mode persists across
+sessions until then. If an Ambient route fails, relay the `ambient [category]:`
+diagnosis (a `model` category = the model is just spinning up on demand, not an
+outage), offer a serving alternative or a short retry, and — if it keeps failing —
+do that one turn yourself and SAY so. Never loop, and never hide a failure behind
+Claude quietly taking the work back.
 
 ## Proactive delegation (delegate mode OFF)
 
