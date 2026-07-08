@@ -7138,7 +7138,8 @@ _PROSE_LEAD = r"[\ \t>#]*(?:\d+[.)])?[\ \t]*[*•]*[\ \t]*"
 # LINEAR (an unbounded '+' before ':' is O(n^2) under search-restart — ReDoS).
 _PROSE_FILELINE = (r"(?<![A-Za-z0-9_./\-])"
                    r"(?:[A-Za-z0-9_\-]{1,80}[./]){1,40}[A-Za-z0-9_.\-]{0,80}"
-                   r":[ \t]*\d+(?![-\d/])")  # single line, not a '12-88' range
+                   # 'file:42', 'file:120-135' (range), or MSVC 'file(142)'/'file(142,7)':
+                   r"(?::[ \t]*\d+(?:-\d+)?(?![\d/])|\([ \t]*\d+(?:,[ \t]*\d+)?\))")
 # The severity vocabulary — the named levels PLUS the priority/severity NUMERIC
 # taxonomies (P0-P4, Sev0-Sev5) and Jira Blocker, which real audits use (Workflow
 # findings). '-severity' anchored so 'severe' doesn't match.
@@ -7154,6 +7155,12 @@ _SEV_ADJ = r"(?:risk|severity|sev|priority|prio|impact|criticality)"
 # summary:') is NOT a label — a non-severity word, not a separator, follows.
 _PROSE_SEV_LABEL_RE = re.compile(
     r"(?im)(?<![A-Za-z])" + _SEV_WORD + r"(?:-" + _SEV_ADJ + r"\b|[ \t]*[:—–,(])")
+# A severity on its own HEADING line — '## CRITICAL', '**HIGH**', 'P0' — with the
+# defect + file:line on a LATER line (Workflow: models group findings under a
+# severity heading). Combined with a location/defect elsewhere it is a finding.
+_PROSE_SEV_HEADING_RE = re.compile(
+    r"(?im)^[ \t>]{0,20}(?:#{1,6}[ \t]{0,20})?\*{0,4}(?<![A-Za-z])" + _SEV_WORD
+    + r"\*{0,4}[ \t]{0,20}:?[ \t]{0,20}$")  # whitespace bounded — overlapping '*' runs are ReDoS
 _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
@@ -7173,7 +7180,7 @@ _PROSE_FINDING_RE = re.compile(
     r"\s*[—–\-]\s*"                                   # sep -> title
     r"(.{1,2000}?)\s*$")                              # 5 title (rest of line)
 _PROSE_VERDICT_RE = re.compile(
-    r"(?im)^" + _PROSE_LEAD + r"verdict\b\s*[:\-—]?\s*\**\s*"
+    r"(?im)^" + _PROSE_LEAD + r"verdict\b\s*[:\-—]?\s*\*{0,4}\s*"
     r"(SHIP|FIX FIRST|NEEDS WORK)\b")
 # A genuine finding HEADER we failed to fully parse: a line that STARTS with a
 # severity (after any bullet/diff/number/blockquote lead — BROADER than the
@@ -7230,9 +7237,9 @@ _PROSE_DEFECT_VERB_RE = re.compile(
 # label naming a real level PLUS a 'Line:' label with a digit is an unparsed
 # finding → must not fake a clean SHIP.
 _PROSE_FIELD_SEV_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\**"
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\*{0,4}"
     r"(?:severity|priority|risk\s+level|sev)\b"             # a Severity/Priority field label…
-    r"[^\n:—–]*[:—–\-]\**[ \t]*"                           # …'level'/'rating'/… then a sep
+    r"[^\n:—–]*[:—–\-]\*{0,4}[ \t]*"                           # …'level'/'rating'/… then a sep
     r"(?:CRITICAL|HIGH|MEDIUM|LOW|BLOCKER|MAJOR|MINOR)\b")  # then the level as the value
 # A Markdown TABLE row carrying a severity level ('| HIGH | app/auth.py | 42 |
 # … |') is a finding row (Codex round 27) — a header row ('| Severity | File |')
@@ -7247,20 +7254,20 @@ _PROSE_TABLE_ROW_RE = re.compile(
 # level (Codex round 33) — the level must follow the heading's separator, so a
 # clean 'Findings: none' does not trip.
 _PROSE_FINDING_HEADING_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\**"
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\*{0,4}"
     r"(?:finding|issue|bug|vulnerability|defect|weakness)s?\b[ \t]*\d*[ \t]*"
-    r"[:—–\-]\**[ \t]*(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
+    r"[:—–\-]\*{0,4}[ \t]*(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
 # Finding-specific FIELD labels a clean audit never writes — even with no
 # severity level anywhere (Codex round 34: a 'Defect:'/'File:'+'Line:' field-list
 # with no Severity field).
 _PROSE_DEFECT_FIELD_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*\**(?:defect|vulnerabilit(?:y|ies)|weakness|flaw|exploit"
+    r"(?im)^[\ \t>*•#\-]*\*{0,4}(?:defect|vulnerabilit(?:y|ies)|weakness|flaw|exploit"
     r"|scenario|impact|remediation|reproduction|steps\ to\ reproduce)"
-    r"\**\s*[:—–\-]\s*\S")
+    r"\*{0,4}\s*[:—–\-]\s*\S")
 # A NUMBERED 'Finding 1:' / 'Issue #3:' heading LINE — the number distinguishes a
 # specific finding from a clean 'Findings: none' summary. Anchored, linear.
 _PROSE_FINDING_HEAD_LINE_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\**"
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][ \t]*)?\*{0,4}"
     r"(?:finding|issue|bug|vulnerability|defect|weakness)s?[ \t]*#?[ \t]*\d+[ \t]*[:—–\-]")
 # A bare severity level in parentheses ('(CRITICAL)') — a finding annotation.
 _PROSE_PAREN_SEV_RE = re.compile(r"(?i)\(\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\)")
@@ -7269,12 +7276,12 @@ _PROSE_ANY_SEV_RE = re.compile(r"(?i)\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b")
 # at line start. Paired with a file-like file:line it marks a finding; a clean
 # 'reviewed config.py:12' with NO label does not (Workflow false positive).
 _PROSE_LOC_LABEL_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*\**(?:file|location|path|affected(?:\s+file)?|source|where|at)"
-    r"\**\s*[:—–\-]")
+    r"(?im)^[\ \t>*•#\-]*\*{0,4}(?:file|location|path|affected(?:\s+file)?|source|where|at)"
+    r"\*{0,4}\s*[:—–\-]")
 # A bare file:line reference (word:digit) — a single quantifier, linear.
 _PROSE_BARE_FILELINE_RE = re.compile(r"(?im)" + _PROSE_FILELINE)
-_PROSE_FILE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**file\**\s*[:—–\-]")
-_PROSE_LINE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\**lines?\**\s*[:—–\-]?[ \t]*\d")
+_PROSE_FILE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\*{0,4}file\*{0,4}\s*[:—–\-]")
+_PROSE_LINE_FIELD_RE = re.compile(r"(?im)^[\ \t>*•#\-]*\*{0,4}lines?\*{0,4}\s*[:—–\-]?[ \t]*\d")
 # Defensive cap on how much prose we scan: an audit response with findings has
 # them well within this; the bound keeps even a pathological single-line input
 # sub-second on top of the already-linear regexes.
@@ -7282,6 +7289,23 @@ PROSE_SCAN_MAX = 262_144
 
 
 _CODE_FENCE_RE = re.compile(r"(?ms)^[ \t]*```.*?^[ \t]*```[ \t]*$")
+# A title that says the finding is already RESOLVED — not a live defect (Workflow).
+_PROSE_RESOLVED_TITLE_RE = re.compile(
+    r"(?i)^\s*(?:RESOLVED|FIXED|N/?A|NO LONGER|ALREADY (?:FIXED|RESOLVED|ADDRESSED)"
+    r"|WAS FIXED|NOW (?:USES|CORRECT|FIXED|SAFE))\b")
+# The same resolution marker appearing as the TITLE segment of an inline finding
+# ('HIGH — auth.py:88 — RESOLVED: …') — blank the whole line so the coarse hint
+# does not re-flag a fixed issue in a re-audit (Workflow).
+_PROSE_RESOLVED_LINE_RE = re.compile(
+    r"(?i)[—–\-][ \t]*(?:RESOLVED|FIXED|NO LONGER|ALREADY (?:FIXED|RESOLVED|ADDRESSED)"
+    r"|NOW (?:USES|CORRECT|FIXED|SAFE))\b")
+# A lead-in that marks the following lines as an ILLUSTRATIVE example or a
+# HISTORICAL reference, not a live finding (Workflow false positives).
+_PROSE_HYPOTHETICAL_RE = re.compile(
+    r"(?im)^[^\n]*\b(?:would have looked like|for illustration|for example"
+    r"|example of a (?:finding|vulnerability|defect)|sample finding|format (?:is|would be)"
+    r"|previous(?:ly)?[ \t]+(?:audit|reported|round)|prior audit|last (?:audit|round)"
+    r"|in a previous|the earlier (?:audit|round)|had reported)\b[^\n]*$")
 
 
 def _strip_code_fences(text):
@@ -7292,13 +7316,48 @@ def _strip_code_fences(text):
     return _CODE_FENCE_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
 
 
+def _strip_illustrative(text):
+    """Blank the finding-shaped lines that FOLLOW an illustrative/historical
+    lead-in ('for illustration, a finding would have looked like:', 'the previous
+    audit reported:') so a clean audit that QUOTES or RECALLS a finding is not
+    read as a live one (Workflow false positives #6/#8). Blanks up to 3 non-empty
+    lines after each marker, stopping at a blank line or a verdict line."""
+    lines = text.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        if _PROSE_RESOLVED_LINE_RE.search(lines[i]):
+            out.append("")             # a '… — RESOLVED: …' line is a fixed issue
+            i += 1
+            continue
+        out.append(lines[i])
+        if _PROSE_HYPOTHETICAL_RE.match(lines[i]):
+            i += 1
+            blanked = 0
+            while i < len(lines) and blanked < 3:
+                ln = lines[i]
+                if _PROSE_VERDICT_RE.match(ln):
+                    break
+                if not ln.strip():
+                    out.append(ln)      # keep a separator blank line…
+                    if blanked:
+                        break            # …but a blank AFTER blanking ends the block
+                    i += 1
+                    continue
+                out.append("")          # blank this quoted/recalled finding line
+                blanked += 1
+                i += 1
+            continue
+        i += 1
+    return "\n".join(out)
+
+
 def _text_has_unparsed_finding(text):
     """True if `text` contains a finding-shaped structure — an inline
     severity+file:line, a line-anchored 'Severity: <level>' field label, or a
     Markdown table row with a severity level. Used both to avoid faking a clean
     verdict on an unparsed finding AND to distrust an EMPTY-findings JSON result
     whose surrounding text clearly reports a defect (Codex rounds 14-30)."""
-    text = _strip_code_fences(text[:PROSE_SCAN_MAX])
+    text = _strip_illustrative(_strip_code_fences(text[:PROSE_SCAN_MAX]))
     has_loc = bool(_PROSE_BARE_FILELINE_RE.search(text)
                    or _PROSE_LINEREF_RE.search(text))
     return bool(_PROSE_SEVERITY_HINT_RE.search(text)      # sev LABEL + file:line (1 line)
@@ -7308,6 +7367,8 @@ def _text_has_unparsed_finding(text):
                 or _PROSE_FINDING_HEADING_RE.search(text)  # 'Finding 1: HIGH'
                 or _PROSE_DEFECT_FIELD_RE.search(text)    # 'Defect:'/'Scenario:'
                 or (_PROSE_SEV_LABEL_RE.search(text) and has_loc)  # 'HIGH-risk:' + a location
+                or (_PROSE_SEV_HEADING_RE.search(text)             # '## CRITICAL' heading + …
+                    and (has_loc or _PROSE_DEFECT_VERB_RE.search(text)))
                 or (_PROSE_CWE_RE.search(text) and has_loc)        # 'CWE-798' + a location
                 or (_PROSE_DEFECT_VERB_RE.search(text) and has_loc)  # 'timing attack' + a location
                 or (_PROSE_FINDING_HEAD_LINE_RE.search(text)  # 'Finding 1:' + a severity
@@ -7353,7 +7414,10 @@ def parse_prose_findings(text):
     audits work on ANY reasoning model, not only those that honor json_schema."""
     if not isinstance(text, str) or not text.strip():
         return None
-    text = _strip_code_fences(text[:PROSE_SCAN_MAX])  # bound scan; ignore examples
+    # bound scan; ignore fenced examples AND lines quoted/recalled after an
+    # illustrative/historical lead-in ('would have looked like:', 'previously
+    # reported:') so a clean audit is not credited a phantom finding (Workflow).
+    text = _strip_illustrative(_strip_code_fences(text[:PROSE_SCAN_MAX]))
     matches = list(_PROSE_FINDING_RE.finditer(text))
     findings = []
     for i, m in enumerate(matches):
@@ -7361,6 +7425,8 @@ def parse_prose_findings(text):
         body = text[m.end():(matches[i + 1].start() if i + 1 < len(matches)
                              else len(text))]
         title = title.strip().strip("*").strip().rstrip(".").strip()
+        if _PROSE_RESOLVED_TITLE_RE.match(title):
+            continue  # 'HIGH — auth.py:88 — RESOLVED: …' is not a live defect
         findings.append({
             "severity": sev.upper(),
             # confidence is optional in the prose (Codex R11); an unstated one

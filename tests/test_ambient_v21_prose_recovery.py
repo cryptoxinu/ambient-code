@@ -582,6 +582,45 @@ def test_workflow_r3_high_level_summary_stays_clean():
     assert e["verdict"] == "SHIP" and not e.get("findings") and e["exit_code"] == 0
 
 
+@pytest.mark.parametrize("raw", [
+    '{"findings": [], "verdict": "SHIP"}\nHIGH \u2014 db/query.py:120-135 \u2014 SQL injection.\nVerdict: SHIP',
+    '{"findings": [], "verdict": "SHIP"}\nHIGH \u2014 src/auth.c(142) \u2014 command injection.\nVerdict: SHIP',
+    '{"findings": [], "verdict": "SHIP"}\n\n## CRITICAL\n\nThe reset handler at api/reset.py:88 trusts the token.',
+    'Reviewed.\n\n**HIGH**\n\nThe token at auth/session.py:120 is compared with ==.\nVerdict: SHIP',
+])
+def test_workflow_r4_range_msvc_heading_findings_not_clean(raw):
+    import io, contextlib, json as _j
+    b = io.StringIO()
+    with contextlib.redirect_stdout(b):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    e = _j.loads(b.getvalue())
+    assert not (e["verdict"] == "SHIP" and not e.get("findings") and e["exit_code"] == 0)
+
+
+@pytest.mark.parametrize("raw", [
+    'I found no defects.\n\nFor illustration, a finding would have looked like:\n\nHIGH (confidence: HIGH) \u2014 example.py:10 \u2014 some issue.\nVerdict: SHIP',
+    'Re-audit after fixes:\n\nHIGH (confidence: HIGH) \u2014 auth.py:88 \u2014 RESOLVED: constant-time now used.\nVerdict: SHIP',
+    '{"findings": [], "verdict": "SHIP"}\n\nNote: the previous audit round reported:\n\nHIGH (confidence: HIGH) \u2014 auth.py:42 \u2014 token compared with ==.',
+])
+def test_workflow_r4_illustrative_resolved_historical_stay_clean(raw):
+    import io, contextlib, json as _j
+    b = io.StringIO()
+    with contextlib.redirect_stdout(b):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    e = _j.loads(b.getvalue())
+    assert e["verdict"] == "SHIP" and not e.get("findings") and e["exit_code"] == 0
+
+
+def test_prose_regexes_redos_safe_on_repeated_punctuation():
+    import time
+    for ch in ("*", " ", "-", "#"):
+        inp = "**HIGH" + ch * 200000
+        t = time.monotonic()
+        amb.parse_prose_findings(inp)
+        amb._text_has_unparsed_finding(inp)
+        assert time.monotonic() - t < 2.5
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",
