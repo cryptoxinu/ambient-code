@@ -3090,6 +3090,7 @@ SECRET_PATTERNS = [
     re.compile(r"(?:github_pat|gh[pousr])_[A-Za-z0-9_]{20,}"),
     re.compile(r"glpat-[A-Za-z0-9_\-]{20,}"),  # GitLab personal access token
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}"),  # Stripe secret/restricted key
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),
     # Unlabeled high-value creds the label pattern above misses. Both are
     # tightly anchored (fixed prefix + separators) so they stay linear on long
@@ -3185,9 +3186,22 @@ _ENV_CONFIG_SUFFIX_RE = re.compile(
     r"ENDPOINT|HOST|HOSTNAME|PORT|DOMAIN|REGION|ADDRESS|USERNAME|OWNER)$")
 
 
+# A key that NAMES a Kubernetes/Helm Secret resource rather than holding a value —
+# 'existingSecret', 'secretName', 'secretKeyRef', 'secretRef' (Workflow false
+# positive: its value is a resource NAME, not a credential).
+_ENV_SECRET_REF_RE = re.compile(
+    r"(?i)^(?:existing[_.\-]?secret|secret[_.\-]?(?:name|ref|key[_.\-]?ref)"
+    r"|[a-z0-9]*[_.\-]?secretname)$")
+# The same, as a whole-LINE key: 'existingSecret: my-app-secrets' names a k8s
+# Secret RESOURCE, so its value is a name, not a credential (Workflow).
+_ENV_SECRET_REF_LINE_RE = re.compile(
+    r"(?i)^[\ \t\-]*['\"]?(?:existing[_.\-]?secret|secret[_.\-]?(?:name|ref|key[_.\-]?ref))"
+    r"['\"]?[ \t]*[:=]")
+
+
 def _env_is_strong(ident):
-    if _ENV_CONFIG_SUFFIX_RE.search(ident):
-        return False  # config ABOUT a secret, not a secret value
+    if _ENV_CONFIG_SUFFIX_RE.search(ident) or _ENV_SECRET_REF_RE.match(ident):
+        return False  # config ABOUT a secret / a k8s Secret NAME, not a value
     return bool(_ENV_STRONG_COMPONENT_RE.search(ident)
                 or _ENV_STRONG_CAMEL_RE.search(ident))
 # An ambiguous *_KEY trips only when a SENSITIVE component precedes KEY (schema
@@ -3228,20 +3242,32 @@ _CODE_REF_ASSIGN_RE = re.compile(
 # BARE identifier value ('DB_PASSWORD=aQ7pR2xL9mZ4kT8v') and a real bracketed
 # password ('DB_PASSWORD=p(ass)w0rd!') are NOT cleared — they lack the clean
 # call/dotted-ref shape (Codex round 16).
+# The tail a code value may carry before end-of-line: a TS 'as Type' cast, a
+# non-null '!', an '|| default' / '?? default' fallback, a ';'/',' terminator,
+# and/or a trailing '#'/'//' comment (Workflow false positives — env reads with
+# a comment / fallback / trailing comma were wrongly flagged).
+_CODE_TAIL = (r"(?:[ \t]*as[ \t]+[\w<>\[\].]+)?(?:[ \t]*!)?"
+              r"(?:[ \t]*(?:\|\||\?\?)[ \t]*[^\n]*?)?[ \t]*[;,]?[ \t]*"
+              r"(?:(?://|\#)[^\n]*)?$")
 _ENV_CODE_VALUE_RE = re.compile(
     # A value that CALLS or SUBSCRIPTS is code, any spacing — a function call
     # ('X = os.getenv("K")') or a subscript ('X = os.environ["K"]', the canonical
     # Django read). The lookahead requires a '(' or '[' so a plain dotted '.env'
-    # value is not swept in here. An optional 'as Type' cast (TS) may trail:
+    # value is not swept in here.
     r"[:=]\s*(?=[A-Za-z_][\w.\[\]()\"' ]*[\[(])"
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]\n]*\]|\([^)\n]*\))+"
-    r"(?:\s+as\s+[\w<>\[\].]+)?\s*;?\s*$"
-    # A DOTTED-reference value is code only with SPACES around the operator
-    # (code style) — NOT '.env' 'KEY=prod.db.password' with no spaces, which is
-    # a real secret (Codex round 13 vs 16). An 'as Type' cast may trail (TS
-    # 'process.env.TOKEN as string'):
-    r"|[ \t][:=][ \t]+[A-Za-z_][A-Za-z0-9_]*"
-    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+(?:\s+as\s+[\w<>\[\].]+)?\s*;?\s*$")
+    + _CODE_TAIL +
+    # A DOTTED-reference value is code only with a SPACE AFTER the operator (code
+    # / JSON style: 'X = process.env.Y', '"apiKey": process.env.Y') — NOT '.env'
+    # 'KEY=prod.db.password' with no space, which is a real secret (round 13/16).
+    # The char BEFORE the ':' may be a space or a closing quote (JSON key):
+    r"|[\"'\t ][ \t]*[:=][ \t]+[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+" + _CODE_TAIL)
+# A value that is a shell command substitution ('$(openssl rand -hex 32)') or a
+# backtick command — code that PRODUCES a secret at runtime, not a literal
+# (Workflow false positive; ENV_ASSIGN_RE's value stops at the first space).
+_ENV_CMDSUB_RE = re.compile(r"[:=][ \t]*(?:\$\([^\n]*\)|`[^\n]*`)[ \t]*;?[ \t]*"
+                            r"(?:(?://|\#)[^\n]*)?$")
 
 
 def _env_assignment_is_secret(line):
@@ -3312,8 +3338,11 @@ def _line_has_secret(line):
     # even if the line also reads like a code reference.
     if any(p.search(scan) for p in _PRECISE_SECRET_PATTERNS):
         return True
-    if _CODE_REF_ASSIGN_RE.match(scan) or _ENV_CODE_VALUE_RE.search(scan):
-        return False  # `x = a.b.c` / `X = getenv(...)` is code, not a credential
+    if (_CODE_REF_ASSIGN_RE.match(scan) or _ENV_CODE_VALUE_RE.search(scan)
+            or _ENV_CMDSUB_RE.search(scan) or _ENV_SECRET_REF_LINE_RE.match(scan)):
+        # code (`x=a.b.c`, `getenv(...)`, `$(cmd)`) or a k8s Secret NAME reference
+        # ('existingSecret: my-secret') — a reference, not a credential value.
+        return False
     if _LOOSE_LABEL_RE.search(scan) and not _LOOSE_CODE_VALUE_RE.search(scan):
         return True  # labeled secret, but not a bare code call/reference value
     if _env_assignment_is_secret(scan):

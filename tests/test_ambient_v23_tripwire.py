@@ -391,3 +391,37 @@ def test_canonical_secret_plumbing_is_not_flagged(line):
 ])
 def test_real_secrets_still_caught_after_fp_guards(line):
     assert amb._line_has_secret(line) is True
+
+
+# --- Workflow round-2 security findings (2026-07-07) ---
+
+
+@_pytest.mark.parametrize("line", [
+    'STRIPE_KEY=sk_live_EXAMPLEONLYnotreal01',
+    "const stripe = require('stripe')('sk_live_EXAMPLEONLYnotreal01')",
+    'rk_test_abcdefghij1234567890XY',
+])
+def test_stripe_underscore_key_is_a_leak(line):
+    assert amb._line_has_secret(line) is True
+
+
+@_pytest.mark.parametrize("line", [
+    'SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]  # set via env, never commit',
+    'const apiKey = process.env.OPENAI_API_KEY || "";',
+    '"apiKey": process.env.FIREBASE_API_KEY,',
+    'export SECRET_KEY=$(openssl rand -hex 32)',
+    'existingSecret: "postgres-credentials"',
+    'secretName: my-app-secrets',
+    'secretKeyRef: db-creds',
+    'const t = process.env.TOKEN as string;',
+])
+def test_env_plumbing_variants_not_flagged(line):
+    assert amb._line_has_secret(line) is False
+
+
+@_pytest.mark.parametrize("line", [
+    'api_key: aQ7pR2xL9mZ4kT8vNN  # prod',   # a labeled secret WITH a comment still fires
+    'DATABASE_PASSWORD=SuperSecret123!@#',
+])
+def test_labeled_secret_with_comment_still_caught(line):
+    assert amb._line_has_secret(line) is True
