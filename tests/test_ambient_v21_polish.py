@@ -89,6 +89,15 @@ class TestAgentSpendDisclosure(unittest.TestCase):
             record["stderr_at_handoff"] = err.getvalue()
             raise _Handoff()
 
+        def fake_run(cmd, **kw):
+            # Windows path: cmd_agent runs opencode as a child (subprocess.run)
+            # instead of execvpe. Record the same way (basename, so a which()-
+            # resolved absolute path still reads as "opencode").
+            record["prog"] = os.path.basename(cmd[0])
+            record["argv"] = cmd
+            record["stderr_at_handoff"] = err.getvalue()
+            raise _Handoff()
+
         args = argparse.Namespace(model="deepseek-ai/DeepSeek-V3",
                                   agent_args=[])
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +106,7 @@ class TestAgentSpendDisclosure(unittest.TestCase):
                  patched(amb.shutil, which=lambda name:
                          "/usr/bin/opencode" if name == "opencode" else None), \
                  patched(amb.os, execvpe=fake_execvpe), \
+                 patched(amb.subprocess, run=fake_run), \
                  contextlib.redirect_stderr(err):
                 with self.assertRaises(_Handoff):
                     amb.cmd_agent(args, KEY, "https://api.example.invalid",
