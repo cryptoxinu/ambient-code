@@ -3135,7 +3135,10 @@ _LOOSE_CODE_VALUE_RE = re.compile(
 # the literal '://' and scans only a bounded window around each occurrence.
 # Credentials embedded in a URL: scheme://[user]:password@host. The username may
 # be EMPTY (redis://:password@host is common — Codex round 9).
-CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]*:[^@\s]{6,}@")
+# Password in a URL — but the credential must not be a template PLACEHOLDER
+# ('{password}', '${password}'): an f-string / templated DSN is not a leak
+# (Workflow false positive). '{', '}', '$' excluded from the password run.
+CREDS_IN_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/\s:@]*:[^@\s{}$]{6,}@")
 # An ALL-CAPS env identifier assigned a value (AWS_SECRET_ACCESS_KEY=…,
 # DB_PASSWORD=…, GITHUB_TOKEN=…). The keyword-abuts-'=' pattern above misses
 # these (the token before '=' is a bare KEY/TOKEN component). We classify the
@@ -3213,11 +3216,15 @@ _PUBLIC_KEY_IDENT_RE = re.compile(r"(?i)(^|[_.\-])PUBLIC[_.\-]KEY$")
 # A high-entropy key value: 20+ base64/hex chars. Pure lowercase-hex (a git SHA
 # / hash) and dashed UUIDs are excluded — they aren't credentials (Codex).
 _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
+# A password-shaped value: 8+ chars mixing at least one letter and one digit
+# ('Pa55word123'). A pure word ('postgres') or pure number is NOT password-shaped.
+_ENV_PASSWORDISH_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{8,}$")
 # A value that is a pure variable interpolation ($VAR / ${VAR} / %VAR% / #{...}
 # / $(...)) is a passthrough reference, not a literal secret (Codex round 17:
 # 'DB_PASSWORD=${DB_PASSWORD}' is weekly deployment config).
 _ENV_INTERP_RE = re.compile(
     r"^(?:\$[A-Za-z_][A-Za-z0-9_]*"          # $VAR
+    r"|\$\{\{[^}\n]*\}\}"                      # ${{ secrets.X }} (GitHub Actions)
     r"|\$\{[^}\n]*\}"                          # ${VAR}, ${VAR:-default}, ${VAR/…}
     r"|%[A-Za-z_][A-Za-z0-9_]*%"              # %VAR%
     r"|#\{[^}\n]*\}|\$\([^)\n]*\))$")         # #{...} / $(...)
@@ -3255,7 +3262,10 @@ _ENV_CODE_VALUE_RE = re.compile(
     # Django read). The lookahead requires a '(' or '[' so a plain dotted '.env'
     # value is not swept in here.
     r"[:=]\s*(?=[A-Za-z_][\w.\[\]()\"' ]*[\[(])"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]\n]*\]|\([^)\n]*\))+"
+    # a chain of .attr / [subscript] / (call) — the call allows ONE nested level
+    # so 'os.environ.get("K", token_urlsafe(32))' is recognized as code (Workflow):
+    r"[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]\n]*\]|\((?:[^()\n]|\([^()\n]*\))*\))+"
     + _CODE_TAIL +
     # A DOTTED-reference value is code only with a SPACE AFTER the operator (code
     # / JSON style: 'X = process.env.Y', '"apiKey": process.env.Y') — NOT '.env'
@@ -3307,6 +3317,13 @@ def _env_assignment_is_secret(line):
                     return True
                 if _CODE_VALUE_RE.search(val):
                     continue
+                # A password-shaped value — 8+ chars mixing letters AND digits
+                # ('Pa55word123', 'Welcome2024') — is a real credential even for a
+                # lowercase dotted key ('spring.datasource.password=…', Workflow).
+                # A pure dictionary word ('postgres') has no digit and stays the
+                # documented not-flagged case.
+                if _ENV_PASSWORDISH_RE.match(val):
+                    return True
                 if _ENV_HIGH_ENTROPY_RE.match(val) and re.search(r"[A-Z0-9]", val):
                     return True
                 continue
@@ -7089,15 +7106,18 @@ _PROSE_FILELINE = (r"(?<![A-Za-z0-9_./\-])"
 # The severity vocabulary — the named levels PLUS the priority/severity NUMERIC
 # taxonomies (P0-P4, Sev0-Sev5) and Jira Blocker, which real audits use (Workflow
 # findings). '-severity' anchored so 'severe' doesn't match.
-_SEV_WORD = (r"(?:CRITICAL|HIGH|MEDIUM|LOW|BLOCKER"
+_SEV_WORD = (r"(?:CRITICAL|HIGH|MEDIUM|LOW|BLOCKER|MAJOR|MINOR|TRIVIAL"
              r"|P[0-4](?![0-9A-Za-z])|SEV(?:ERITY)?[ ]?[0-5](?![0-9A-Za-z]))")
-# A severity acting as a LABEL: the level (optionally a '-risk'/'-severity'
-# hyphen-adjective) DIRECTLY followed by a separator — 'HIGH-risk:', 'Critical —',
-# 'P0:'. A bare adjective in prose ('Critical sections audited:', 'a low-risk
-# change') is NOT a label because a WORD, not a separator, follows the level
-# (Workflow: distinguishes a real finding from a clean 'areas audited' sentence).
+# The severity-related hyphen-adjectives ('HIGH-risk', 'high-severity') — a
+# severity glued to one of THESE is itself a label. A severity glued to any OTHER
+# word ('High-level summary', 'Low-latency path') is NOT (Workflow false positive).
+_SEV_ADJ = r"(?:risk|severity|sev|priority|prio|impact|criticality)"
+# A severity acting as a LABEL: the level followed EITHER by a severity-adjective
+# ('HIGH-risk', 'high-severity') OR directly by a separator ('Critical —', 'P0:',
+# 'Minor:'). A bare adjective in prose ('Critical sections audited:', 'High-level
+# summary:') is NOT a label — a non-severity word, not a separator, follows.
 _PROSE_SEV_LABEL_RE = re.compile(
-    r"(?im)(?<![A-Za-z])" + _SEV_WORD + r"[ \t]*(?:[:—–,(]|-)")
+    r"(?im)(?<![A-Za-z])" + _SEV_WORD + r"(?:-" + _SEV_ADJ + r"\b|[ \t]*[:—–,(])")
 _PROSE_FINDING_RE = re.compile(
     r"(?im)"
     r"^" + _PROSE_LEAD +                              # leading noise / bullet
@@ -7142,7 +7162,8 @@ _PROSE_LINEREF_RE = re.compile(
 # — verified' (adjective, not label) off the backstop while still catching
 # 'HIGH-risk: SQLi in db/query.py:88' (Workflow). Order-independent lookaheads.
 _PROSE_SEVERITY_HINT_RE = re.compile(
-    r"(?im)^(?=[^\n]*(?<![A-Za-z])" + _SEV_WORD + r"[ \t]*(?:[:—–,(]|-))"  # sev LABEL
+    r"(?im)^(?=[^\n]*(?<![A-Za-z])" + _SEV_WORD
+    + r"(?:-" + _SEV_ADJ + r"\b|[ \t]*[:—–,(]))"                 # a sev LABEL
     r"(?=[^\n]*(?:" + _PROSE_FILELINE +                          # a FILE-LIKE file:line
     r"|(?:[A-Za-z0-9_.\-]{1,80})?[#][ \t]*L?[ \t]*\d"            # or file#L42
     r"|\blines?[ \t]+(?:number[ \t]+|no\.?[ \t]+|#)?\d))[^\n]*$")  # or 'line N'
@@ -7154,14 +7175,27 @@ _PROSE_XML_SEV_RE = re.compile(
 # A CWE/CVE reference — a security auditor's finding vocabulary; a clean audit does
 # not cite one against a specific location (Workflow).
 _PROSE_CWE_RE = re.compile(r"\b(?:CWE-\d+|CVE-\d{4}-\d+)\b")
+# A concrete DEFECT phrase — a model may describe a real vulnerability in a plain
+# sentence with no severity token ('… timing attack …', '… leaks credentials …').
+# Paired with a file:line this is a finding a clean audit would not affirm. Scoped
+# to strong, unambiguous vulnerability phrases to stay off 'reviewed X, sound'.
+_PROSE_DEFECT_VERB_RE = re.compile(
+    r"(?i)\b(?:sql[ ]?injection|sqli\b|xss\b|csrf\b|ssrf\b|\brce\b"
+    r"|timing attack|race condition|buffer overflow|integer overflow"
+    r"|use[ -]after[ -]free|path traversal|directory traversal|command injection"
+    r"|auth(?:entication|orization)?[ -]bypass|privilege escalation|open redirect"
+    r"|insecure deserialization|hard[ -]?coded[ ](?:secret|password|api[ -]?key|key|credential|token)"
+    r"|plaintext[ ](?:password|secret|credential)s?"
+    r"|leaks?[ ](?:the[ ]|a[ ])?(?:secret|password|credential|token|session)s?)\b")
 # A field-LIST finding splits the fields across lines ('Severity: HIGH' /
 # 'Line: 42') — the single-line hint misses it (Codex round 14). A 'Severity:'
 # label naming a real level PLUS a 'Line:' label with a digit is an unparsed
 # finding → must not fake a clean SHIP.
 _PROSE_FIELD_SEV_RE = re.compile(
-    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\**severity\b"  # a 'Severity' field label…
+    r"(?im)^[\ \t>*•#\-]*(?:\d+[.)][\ \t]*)?\**"
+    r"(?:severity|priority|risk\s+level|sev)\b"             # a Severity/Priority field label…
     r"[^\n:—–]*[:—–\-]\**[ \t]*"                           # …'level'/'rating'/… then a sep
-    r"(?:CRITICAL|HIGH|MEDIUM|LOW)\b")                      # then the level as the value
+    r"(?:CRITICAL|HIGH|MEDIUM|LOW|BLOCKER|MAJOR|MINOR)\b")  # then the level as the value
 # A Markdown TABLE row carrying a severity level ('| HIGH | app/auth.py | 42 |
 # … |') is a finding row (Codex round 27) — a header row ('| Severity | File |')
 # has no level, so it does not trip.
@@ -7237,6 +7271,7 @@ def _text_has_unparsed_finding(text):
                 or _PROSE_DEFECT_FIELD_RE.search(text)    # 'Defect:'/'Scenario:'
                 or (_PROSE_SEV_LABEL_RE.search(text) and has_loc)  # 'HIGH-risk:' + a location
                 or (_PROSE_CWE_RE.search(text) and has_loc)        # 'CWE-798' + a location
+                or (_PROSE_DEFECT_VERB_RE.search(text) and has_loc)  # 'timing attack' + a location
                 or (_PROSE_FINDING_HEAD_LINE_RE.search(text)  # 'Finding 1:' + a severity
                     and _PROSE_ANY_SEV_RE.search(text))
                 or (_PROSE_FINDING_HEAD_LINE_RE.search(text)  # 'Finding 1:' + a file:line

@@ -555,6 +555,33 @@ def test_workflow_clean_audits_stay_clean(raw):
     assert _is_clean(_rj(raw))
 
 
+@pytest.mark.parametrize("raw", [
+    '{"findings": [], "verdict": "SHIP"}\nPriority: High\nFile: pay/charge.py\nDefect description: float() overcharges.',
+    '{"findings": [], "verdict": "SHIP"}\nThe token is compared with == in auth/session.py:88, enabling a timing attack that recovers the session secret.',
+    'Overall solid. the password is logged in plaintext at auth/login.py:53, which leaks credentials.\nVerdict: SHIP',
+    'Minor: the retry loop in client.py:210 spins forever on 503s.\nVerdict: SHIP',
+    '{"findings": [], "verdict": "SHIP"}\nMinor: the retry loop in client.py:210 spins forever.',
+])
+def test_workflow_r3_hidden_findings_not_clean(raw):
+    import io, contextlib, json as _j
+    b = io.StringIO()
+    with contextlib.redirect_stdout(b):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    e = _j.loads(b.getvalue())
+    assert not (e["verdict"] == "SHIP" and not e.get("findings") and e["exit_code"] == 0)
+
+
+def test_workflow_r3_high_level_summary_stays_clean():
+    import io, contextlib, json as _j
+    raw = ('High-level summary: reviewed utils/parse.py:88 and the caller; logic is '
+           'sound. No issues found.\nVerdict: SHIP')
+    b = io.StringIO()
+    with contextlib.redirect_stdout(b):
+        amb.render_findings(raw, "json", api_key="", model="m")
+    e = _j.loads(b.getvalue())
+    assert e["verdict"] == "SHIP" and not e.get("findings") and e["exit_code"] == 0
+
+
 def test_high_finding_forces_non_ship_verdict():
     # Codex round 2: a model-stated SHIP can't coexist with a HIGH finding.
     clean = json.dumps({"findings": [{"severity": "HIGH", "confidence": "HIGH",

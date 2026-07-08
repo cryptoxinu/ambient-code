@@ -425,3 +425,27 @@ def test_env_plumbing_variants_not_flagged(line):
 ])
 def test_labeled_secret_with_comment_still_caught(line):
     assert amb._line_has_secret(line) is True
+
+
+@_pytest.mark.parametrize("line", [
+    'spring.datasource.password=Pa55word123',
+    'jdbc.password=Postgres123',
+    'hibernate.connection.password=RootDb2024',
+])
+def test_dotted_lowercase_password_key_is_a_leak(line):
+    assert amb._line_has_secret(line) is True
+
+
+@_pytest.mark.parametrize("line", [
+    'DATABASE_URL = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"',
+    'SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_urlsafe(32))',
+    'password: ${{secrets.DOCKER_PASSWORD}}',
+    'DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@db:5432/app',
+])
+def test_template_and_nested_call_values_not_flagged(line):
+    assert amb._line_has_secret(line) is False
+
+
+def test_real_url_creds_still_caught_after_template_guard():
+    assert amb._line_has_secret('DATABASE_URL=postgres://admin:realSecret123@db/app') is True
+
