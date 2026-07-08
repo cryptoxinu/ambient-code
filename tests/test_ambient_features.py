@@ -608,17 +608,26 @@ class TestDocsDrift(unittest.TestCase):
         self.assertTrue(self.commands)
         ok_words = self.commands | {"xyz", "code…", "code:"}
         for rel in ("skills/ambient/SKILL.md", "README.md"):
-            text = open(os.path.join(ROOT, rel)).read()
+            # encoding="utf-8" is REQUIRED: these docs contain emoji/em-dashes, and
+            # Windows' default cp1252 raises UnicodeDecodeError on bytes like 0x8f
+            # (e.g. the ⚠️ variation selector) — a hermetic test must not depend on
+            # the platform locale.
+            text = open(os.path.join(ROOT, rel), encoding="utf-8").read()
             for cmd in re.findall(r"`ambient ([a-z][a-z-]+)\b", text):
                 self.assertIn(cmd, ok_words, f"{rel} references 'ambient {cmd}'")
 
     def test_version_quad_sync(self):
-        pj = json.load(open(os.path.join(ROOT, ".claude-plugin/plugin.json")))
-        py = re.search(r'version\s*=\s*"([^"]+)"',
-                       open(os.path.join(ROOT, "pyproject.toml")).read())
+        # encoding="utf-8" on every text read — CHANGELOG/pyproject can carry
+        # non-ASCII, and Windows' cp1252 default would otherwise break this.
+        with open(os.path.join(ROOT, ".claude-plugin/plugin.json"),
+                  encoding="utf-8") as fh:
+            pj = json.load(fh)
+        with open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8") as fh:
+            py = re.search(r'version\s*=\s*"([^"]+)"', fh.read())
         self.assertEqual(amb.__version__, pj["version"])
         self.assertEqual(amb.__version__, py.group(1))
-        head = open(os.path.join(ROOT, "CHANGELOG.md")).read().split("\n##")[1]
+        with open(os.path.join(ROOT, "CHANGELOG.md"), encoding="utf-8") as fh:
+            head = fh.read().split("\n##")[1]
         self.assertIn(amb.__version__, head)
 
     def test_welcome_panel_commands_exist(self):
