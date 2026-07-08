@@ -154,7 +154,8 @@ just work. Patterns, cheapest first:
   on PATH automatically (Claude Code injects each enabled plugin's `bin/`); if
   a worker ever reports `ambient: command not found`, it should fall back to
   `~/.local/bin/ambient` (the stable launcher `ambient link` installs at first
-  run) or `"${CLAUDE_PLUGIN_ROOT}/bin/ambient"` when that env var is set.
+  run) or the plugin-root binary `${CLAUDE_PLUGIN_ROOT}/bin/ambient` (that
+  variable is substituted to the real path when this skill loads).
 - The network concentrates capacity on the models in demand — a 10-wide fan-out
   on ONE model is fine (it load-balances). Availability shifts with demand, so
   check `ambient models` right before a big fan-out or before spreading across

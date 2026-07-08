@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ambient-code"
-version = "1.1.0"                       # keep in sync with .claude-plugin/plugin.json + bin/ambient __version__
+version = "1.1.1"                       # keep in sync with .claude-plugin/plugin.json + bin/ambient __version__
 description = "A second pair of eyes for Claude Code, on the Ambient decentralized inference network"
 readme = "README.md"
 requires-python = ">=3.8"

@@ -2,6 +2,21 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 1.1.1 — 2026-07-08
+
+Test-suite/CI hotfix — no behavior change to the CLI.
+
+- The v1.1.0 test files (`test_ambient_v20`–`v25`) were written with `pytest`,
+  but the canonical, hermetic CI runner is stdlib `python -m unittest discover`
+  with no third-party dependencies. Under that runner those modules failed to
+  import (no `pytest`), turning the whole CI matrix red and leaving ~150 of the
+  new tests uncollected. All six files are now pure `unittest` (`TestCase`
+  classes, `subTest` for the parametrized cases, `assertRaises`/`assertIs`,
+  `setUp`/`tearDown` for the old autouse fixtures) — the full suite (805 tests)
+  now runs and passes under the canonical runner, and `ruff check` is clean.
+- Corrected the `${CLAUDE_PLUGIN_ROOT}` note in the skill (it is substituted
+  inline in skill content, not a Bash environment variable).
+
 ## 1.1.0 — 2026-07-07
 
 Makes the tool work correctly across DIFFERENT models — not just the default —
