@@ -2,6 +2,51 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 1.1.0 — 2026-07-07
+
+Makes the tool work correctly across DIFFERENT models — not just the default —
+plus a deep security/robustness pass driven by four rounds of adversarial
+verification. Backward compatible; no new required flags. `AMBIENT_TELEMETRY=off`
+opts out of the new learning, byte-identical to before.
+
+### Added — adaptive per-model capability layer
+
+- Catalog capabilities are treated as a hypothesis; the tool now LEARNS each
+  model's observed behavior and adapts. When a model ignores the strict JSON
+  schema and answers in prose (e.g. GLM on Ambient), `ambient audit --json` now
+  **recovers the findings from that prose** instead of returning empty — so
+  structured audits work on any reasoning model, not only ones that honor
+  `json_schema`. The outcome is recorded per model
+  (`~/.config/ambient/capabilities.json`, 0600) and reused, with recovery on a
+  later success. `ambient build` downgrades the output demand
+  (json_schema → json_object → prompt-only) and, when a model genuinely can't
+  drive a build plan, names a model that can — never a silent model swap.
+
+### Security
+
+- **Credential tripwire** broadened far beyond `.env`-filename matching: catches
+  env/JSON/YAML/dotenv/properties secrets in any case, connection-string and URL
+  passwords (ADO.NET / JDBC / Spring), vendor keys (Stripe `sk_live_`, SendGrid,
+  JWT, GitLab, AWS, Azure SAS), `MYSQL_PWD`/glued `PGPASSWORD`, and now scans the
+  **chat** REPL. False positives on normal code are actively guarded: env
+  plumbing (`os.environ["K"]`, `process.env.X || ""`, `$(cmd)`, `${{ }}`/`{{ }}`),
+  config ABOUT secrets, schema columns, type annotations, credential PATHS, and
+  k8s Secret references are not flagged. Still a documented backstop — never send
+  secrets. Savings/consensus/chat receipts are redacted before stderr.
+
+### Robustness
+
+- `ambient audit --json` on a non-JSON model no longer returns empty findings +
+  exit 2; it recovers the model's prose findings. A self-contradicting reply (a
+  finding + `SHIP`) is forced to a non-clean verdict so a pre-commit hook can't
+  wave a defect through. Every realistic finding shape — inline/field-list/table/
+  heading/XML, any separator/notation/severity taxonomy, and empty-JSON-plus-prose
+  mixes — is handled; a clean audit that quotes an example or recalls a resolved
+  finding is NOT mis-flagged.
+- `ambient ask "…" -m MODEL -` (natural argument order) reads stdin instead of
+  erroring on `unrecognized arguments: -`.
+- Prose recovery and tripwire scanning are linear-time (ReDoS-hardened).
+
 ## 1.0.1 — 2026-07-06
 
 Reliability and robustness pass. No breaking changes; no new flags. Every fix is
