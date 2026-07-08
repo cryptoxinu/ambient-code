@@ -102,8 +102,9 @@ class AdaptiveCapabilityTests(unittest.TestCase):
 
     def test_store_written_0600(self):
         amb.record_cap("z-ai/glm-5.2", "structured_json", False)
-        mode = os.stat(str(self.store)).st_mode & 0o777
-        self.assertEqual(mode, 0o600)
+        if os.name != "nt":  # Windows has no POSIX owner-only mode bits
+            mode = os.stat(str(self.store)).st_mode & 0o777
+            self.assertEqual(mode, 0o600)
 
     def test_stale_success_does_not_mask_fresh_failures(self):
         # Codex: [ok, fail, fail] must be 'unreliable', not 'ok' (hysteresis keyed
