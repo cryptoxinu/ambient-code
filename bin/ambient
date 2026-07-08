@@ -3091,6 +3091,7 @@ SECRET_PATTERNS = [
     re.compile(r"glpat-[A-Za-z0-9_\-]{20,}"),  # GitLab personal access token
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}"),  # Stripe secret/restricted key
+    re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}"),  # SendGrid API key
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),
     # Unlabeled high-value creds the label pattern above misses. Both are
     # tightly anchored (fixed prefix + separators) so they stay linear on long
@@ -3129,6 +3130,13 @@ _LOOSE_CODE_VALUE_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*"
     r"(?:\.[A-Za-z0-9_.]*[A-Za-z0-9_](?:\s*\([^)\n]*\))?|\([^)\n]*\))"  # .attr[()] or ()
     r"\s*[;,)}\]]*\s*$")
+# A labeled TYPE annotation ('token: CancellationToken') — the value is a
+# PascalCase type name (upper, lower, letters), not a credential (Workflow false
+# positive in a function signature). Not anchored to end-of-line so it clears one
+# param among many. Value must START uppercase (a real token starts lower/mixed).
+_LOOSE_TYPE_VALUE_RE = re.compile(
+    r"(?i:api[_-]?key|secret|passwd|password|token)[ \t]*[:=][ \t]*"
+    r"[A-Z][a-z][A-Za-z]{2,}(?![A-Za-z0-9])")
 # Kept OUT of SECRET_PATTERNS: this pattern backtracks quadratically on long
 # lowercase-alnum runs (measured 129s on a 400k-char line — an effective hang
 # on minified/hex blobs). _line_has_secret gates it on
@@ -3169,8 +3177,12 @@ ENV_ASSIGN_RE = re.compile(
 # OR a camelCase token (DbPassword), but NOT buried in a longer lowercase word
 # (Tokenizer must not read as TOKEN — Codex round 3).
 _ENV_STRONG_COMPONENT_RE = re.compile(
-    r"(?i)(^|[_.\-])(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY)"
+    r"(?i)(^|[_.\-])(SECRET|TOKEN|PASSWORD|PASSWD|PWD|CREDENTIAL|CREDENTIALS|APIKEY)"
     r"([_.\-]|$)")
+# PASSWORD/PASSWD may be glued into an env-var name with no separator
+# ('PGPASSWORD', 'MYSQLPASSWORD') — still a credential (Workflow). Config-about
+# names ('PASSWORD_POLICY') are still excluded by _ENV_CONFIG_SUFFIX_RE first.
+_ENV_STRONG_SUBSTR_RE = re.compile(r"(?i)(?:PASSWORD|PASSWD)")
 _ENV_STRONG_CAMEL_RE = re.compile(
     r"(?:Secret|Token|Password|Passwd|Credential|Credentials|ApiKey)(?![a-z])")
 
@@ -3206,7 +3218,8 @@ def _env_is_strong(ident):
     if _ENV_CONFIG_SUFFIX_RE.search(ident) or _ENV_SECRET_REF_RE.match(ident):
         return False  # config ABOUT a secret / a k8s Secret NAME, not a value
     return bool(_ENV_STRONG_COMPONENT_RE.search(ident)
-                or _ENV_STRONG_CAMEL_RE.search(ident))
+                or _ENV_STRONG_CAMEL_RE.search(ident)
+                or _ENV_STRONG_SUBSTR_RE.search(ident))
 # An ambiguous *_KEY trips only when a SENSITIVE component precedes KEY (schema
 # columns like PRIMARY_KEY/FOREIGN_KEY/CACHE_KEY are NOT secrets — Codex).
 _ENV_SENSITIVE_KEY_RE = re.compile(
@@ -3219,12 +3232,30 @@ _ENV_HIGH_ENTROPY_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
 # A password-shaped value: 8+ chars mixing at least one letter and one digit
 # ('Pa55word123'). A pure word ('postgres') or pure number is NOT password-shaped.
 _ENV_PASSWORDISH_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{8,}$")
+# A ROOTED filesystem PATH value ('/home/me/keys/service-account.json',
+# '~/.aws/creds', 'C:\\keys\\x') is a location, not a credential (Workflow false
+# positive). Must start with a path root so a base64 secret containing '/'
+# ('wJalr…/K7…/bPx…', an AWS secret key) is NOT mistaken for a path.
+_ENV_PATH_VALUE_RE = re.compile(
+    r"^(?:(?:~|\.{1,2})?[/\\]|[A-Za-z]:[\\/])[\w.\-]+(?:[/\\][\w.\-]+)*$")
+
+
+def _value_looks_nonsecret(val):
+    """True if `val` is clearly NOT a literal credential: a filesystem path, or a
+    PascalCase TYPE name ('CancellationToken', 'OAuth2Token'). A type name has ≤1
+    digit, so a random token ('Xk9mQz7Lp2w', 'Secret123') with 2+ digits is NOT
+    excluded and stays flagged (Workflow false positives on TS type annotations)."""
+    if _ENV_PATH_VALUE_RE.match(val):
+        return True
+    return (val[:1].isupper() and val.isalnum() and any(c.islower() for c in val)
+            and sum(c.isdigit() for c in val) <= 1)
 # A value that is a pure variable interpolation ($VAR / ${VAR} / %VAR% / #{...}
 # / $(...)) is a passthrough reference, not a literal secret (Codex round 17:
 # 'DB_PASSWORD=${DB_PASSWORD}' is weekly deployment config).
 _ENV_INTERP_RE = re.compile(
     r"^(?:\$[A-Za-z_][A-Za-z0-9_]*"          # $VAR
     r"|\$\{\{[^}\n]*\}\}"                      # ${{ secrets.X }} (GitHub Actions)
+    r"|\{\{[^}\n]*\}\}"                        # {{ var }} (Jinja/Ansible/Helm)
     r"|\$\{[^}\n]*\}"                          # ${VAR}, ${VAR:-default}, ${VAR/…}
     r"|%[A-Za-z_][A-Za-z0-9_]*%"              # %VAR%
     r"|#\{[^}\n]*\}|\$\([^)\n]*\))$")         # #{...} / $(...)
@@ -3302,8 +3333,12 @@ def _env_assignment_is_secret(line):
             quoted = bool(m.group(1)) or bool(m.group(3))
             if len(val) < 8:
                 continue
+            if " " in val.strip():
+                continue  # a message/sentence value ('Passwords must match'), not a secret
             if _ENV_INTERP_RE.match(val):
                 continue  # a variable passthrough ($VAR/${VAR}), not a literal
+            if _value_looks_nonsecret(val):
+                continue  # a type name / filesystem path, not a credential
             if _env_is_strong(ident):
                 # An ALL-CAPS env var or a quoted key/value is a literal secret
                 # regardless of punctuation (a real password CAN contain '(').
@@ -3360,8 +3395,9 @@ def _line_has_secret(line):
         # code (`x=a.b.c`, `getenv(...)`, `$(cmd)`) or a k8s Secret NAME reference
         # ('existingSecret: my-secret') — a reference, not a credential value.
         return False
-    if _LOOSE_LABEL_RE.search(scan) and not _LOOSE_CODE_VALUE_RE.search(scan):
-        return True  # labeled secret, but not a bare code call/reference value
+    if (_LOOSE_LABEL_RE.search(scan) and not _LOOSE_CODE_VALUE_RE.search(scan)
+            and not _LOOSE_TYPE_VALUE_RE.search(scan)):
+        return True  # labeled secret, but not a code call/reference/type-annotation value
     if _env_assignment_is_secret(scan):
         return True
     if "://" not in line:
@@ -7125,8 +7161,10 @@ _PROSE_FINDING_RE = re.compile(
     # 2 confidence (OPTIONAL) — may sit after a separator ('HIGH — Confidence: HIGH
     # — …', Codex round 10); the 'confidence' keyword is what justifies the gap, so
     # a bare phrase ('Critical sections audited:') can NOT open one (Workflow).
-    r"(?:[ \t]*[—–\-:,]?[ \t]*\(?[ \t]*confidence[ \t]*[:=][ \t]*(HIGH|LOW)\b[ \t]*\)?)?"
-    r"[ \t]*[—–\-:,][ \t]*"                           # sep DIRECTLY after sev/confidence
+    # Whitespace runs BOUNDED ({0,20}) — an unbounded '[ \t]*' overlapping the
+    # trailing separator's '[ \t]*' is O(n^2) on 'HIGH' + a huge space run (ReDoS).
+    r"(?:[ \t]{0,20}[—–\-:,]?[ \t]{0,20}\(?[ \t]{0,20}confidence[ \t]{0,20}[:=][ \t]{0,20}(HIGH|LOW)\b[ \t]{0,20}\)?)?"
+    r"[ \t]{0,20}[—–\-:,][ \t]{0,20}"                 # sep DIRECTLY after sev/confidence
     r"([^\s:—–]{1,300}?)"
     # file:line separator — every common notation in one alternation:
     # ':7', ':L7', '#7', '#L7', ' L7', ' line 7', ' line number 7'

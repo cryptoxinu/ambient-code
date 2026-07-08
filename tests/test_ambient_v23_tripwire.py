@@ -449,3 +449,31 @@ def test_template_and_nested_call_values_not_flagged(line):
 def test_real_url_creds_still_caught_after_template_guard():
     assert amb._line_has_secret('DATABASE_URL=postgres://admin:realSecret123@db/app') is True
 
+
+@_pytest.mark.parametrize("line", [
+    'MYSQL_PWD=xK9mP2qR7vL4nB8wZ3tY6uH1jF5dC0aS',
+    'PGPASSWORD=Secret123 psql -h db -U app',
+    'SENDGRID_API_KEY=SG.ngeVfQFYQlKU0ufo8x5d1A.TwL2iGABf9DHYTfWZtms1XkLq',
+])
+def test_r4_more_leaks_caught(line):
+    assert amb._line_has_secret(line) is True
+
+
+@_pytest.mark.parametrize("line", [
+    'provideCompletionItems(document: TextDocument, token: CancellationToken) {',
+    '    token: OAuth2Token',
+    '  "password": "Passwords must match",',
+    'export GOOGLE_APPLICATION_CREDENTIALS=/home/me/keys/service-account.json',
+    '  ansible_password: "{{vault_ansible_password}}"',
+])
+def test_r4_type_path_message_interp_not_flagged(line):
+    assert amb._line_has_secret(line) is False
+
+
+def test_r4_finding_regex_redos_safe():
+    import time
+    for inp in ("HIGH" + " " * 80000 + "x", "CRITICAL " + "-" * 80000):
+        t = time.monotonic()
+        amb.parse_prose_findings(inp)
+        assert time.monotonic() - t < 2.0
+
