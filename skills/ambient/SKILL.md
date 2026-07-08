@@ -290,32 +290,48 @@ Ambient outage.
 
 ## Model picking UX
 
-Two lanes, plainly: **chat/audit** (ask, audit, chat, map) and **code** (code,
-build, agent) — each has its own default model.
+Two lanes, each with its OWN default model and INDEPENDENT of each other:
+**chat/audit** (ask, audit, chat, map, consensus) and **code** (code, build,
+agent). Changing one lane must NEVER silently clobber the other. `ambient mode`
+prints the current pair (`chat_model=…`, `code_model=…`) — ALWAYS show it first,
+plainly: "Now — Chat/audit → <A>, Code → <B>." That is what the user is about to
+change.
 
-1. Run `ambient models --json` once. Build the switch picker EXCLUSIVELY from
-   models with `ready == true && hidden == false`, labeled positively ("Serving
-   now — instant responses") with price + context + curation note per option.
-   Non-serving models never appear as picker options.
-2. Below the options, one confident line: "N more catalog models spin up on
-   demand — name one explicitly ('use ambient with qwen…') or `ambient models
-   --all` to browse everything."
-3. If the user explicitly names a non-serving model, honor it exactly (model
-   choice is SACRED) and relay the CLI's advisory in plain words: "it isn't
-   serving right now; X and Y are — want one of those, or keep your pick?"
-   Their pick always wins.
-4. Edge states, honestly: if ready-and-visible is empty but serving models
-   exist (curation hides them all), say so — "your curation hides every serving
-   model; `ambient curate show <id>` surfaces one, or pick explicitly". If
-   NOTHING is serving at all, say models spin up as demand arrives and offer a
-   short retry — never fabricate a serving option.
-5. After the model choice, ask the lane scope via AskUserQuestion:
-   **Chat & audits** (`ambient use <id> --chat` — questions, reviews, digests) /
-   **Code writing** (`--code` — code, build, agent) / **Both lanes** (bare —
-   suggest this as the default). Then persist.
-   Resolution order everywhere: `-m` flag > env vars > saved default > built-in
-   (`moonshotai/kimi-k2.7-code` both lanes — the default auditor; GLM-5.2
-   stays selectable while its network capacity ramps up).
+The switch picker is an AskUserQuestion card with a **Model** question and a
+**Lane** question.
+
+MODEL question — show ONLY live models as tap-options, keep the catalog one tap away:
+1. Run `ambient models --json` once. List each model with
+   `ready == true && hidden == false` as "Serving now — instant" (price ·
+   context · curation note). These are the one-tap choices.
+2. Add one option: **"🔎 Browse the full catalog"**. On select, run
+   `ambient models --all --json` and present EVERY model grouped **Serving now**
+   (instant) vs **Spins up on demand** (cold right now). Let the user pick or
+   name any one. When they choose a cold/on-demand model, say so in plain words
+   BEFORE confirming — e.g.: "<model> isn't running this minute. Ambient starts
+   models on demand, so your first request spins it up — usually a short wait; if
+   the network is busy it can take a little longer or briefly retry. Your pick is
+   kept either way." NEVER present a cold model as instant.
+3. The user may also type a model id directly (the "Other" field) — same cold
+   caveat if it isn't serving. Model choice is SACRED: a named model is honored
+   exactly, never swapped for a serving one; relay the CLI's advisory as info,
+   their pick always wins.
+
+LANE question — the user chooses INTENTIONALLY; do NOT pre-select "both":
+- **Chat & audits only** (`ambient use <id> --chat`) — leaves the Code model as-is.
+- **Code writing only** (`ambient use <id> --code`) — leaves the Chat/audit model as-is.
+- **Both lanes** (`ambient use <id>`) — replaces BOTH; when it's the choice, SAY
+  what it overwrites ("this also replaces your Code model <B>") so it can never be
+  an accidental clobber.
+
+Edge states, honestly: curation hides every serving model → say so
+(`ambient curate show <id>`); nothing serving at all → models spin up on demand,
+offer a short retry; never fabricate a serving option.
+
+After persisting, CONFIRM the new pair as a small table (Chat/audit → …, Code →
+…) so the user sees exactly what each lane now uses. Resolution order everywhere:
+`-m` flag > env vars > saved default > built-in (`moonshotai/kimi-k2.7-code`
+both lanes; GLM-5.2 selectable while its network capacity ramps up).
 
 ## Trust boundary (MANDATORY)
 

@@ -2,6 +2,42 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 1.1.2 — 2026-07-08
+
+Production-hardening pass (from a Codex + team-share audit) before wider sharing.
+No breaking changes.
+
+### Security
+
+- `AMBIENT_ALLOW_INSECURE=1` now relaxes the HTTPS requirement ONLY for a LOCAL
+  endpoint (127.0.0.1 / localhost) — never a real/public host, so the API key
+  can never ride plaintext HTTP to `api.ambient.xyz` or an attacker's box.
+- The outbound secret tripwire now also scans `--system` on `ask`/`chat` (it is
+  sent to the network) — a credential in a system prompt is no longer transmitted.
+
+### Robustness
+
+- `ambient audit --repo` over the input ceiling now reports coverage as PARTIAL
+  as a fact when files are excluded (exit 2 / not-clean), instead of trusting the
+  model to self-declare it — a clean SHIP can't be issued over skipped files.
+- A streamed response can no longer hang the client: the socket read now runs in
+  a background reader while the main loop enforces the hard-wall and no-progress
+  limits on a fixed cadence, so a peer that dribbles bytes and never sends a
+  newline is aborted on schedule (previously a blocking read could own the clock
+  and delay every limit). The per-line read is also capped against unbounded
+  buffering. Groundwork for a truly progress-aware timeout.
+- Piped stdin no longer hangs forever when `select()` is unavailable (some
+  Windows/IDE/CI wrappers) — the read is time-bounded.
+
+### Windows
+
+- `ambient agent` now launches opencode as a child process (handles the
+  `opencode.cmd` shim and keeps the console attached) instead of `os.execvpe`.
+- No more spurious `tightened … permissions (666 → 600)` on every command (the
+  POSIX-only mode heal is now guarded; Windows secures the file via profile ACLs).
+- `ambient link` writes a shim that uses the running interpreter (`sys.executable`)
+  instead of a bare `python` (off-PATH on stock Windows), and shows the PATH note.
+
 ## 1.1.1 — 2026-07-08
 
 Test-suite/CI hotfix — no behavior change to the CLI.

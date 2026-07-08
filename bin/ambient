@@ -73,6 +73,7 @@ import random
 import re
 import select
 import shutil
+import queue
 import stat
 import subprocess
 import sys
@@ -89,7 +90,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "1.1.1"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "1.1.2"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -146,6 +147,12 @@ HARD_WALL_S = 5400  # absolute ceiling on one streamed generation
 # emitting NO new content or reasoning — that fools a pure silence timeout. If
 # nothing useful grows for this long, treat it as a stall.
 NOPROGRESS_S = 150
+# Cap one streamed SSE line so a stream that sends bytes but NEVER a newline can
+# neither buffer without bound nor starve the hard-wall / no-progress checks that
+# live AFTER readline() — readline(N) returns after N bytes even with no '\n', so
+# the loop keeps ticking. Far larger than any real single delta line, so a valid
+# stream is never split/corrupted.
+STREAM_LINE_MAX = 8 * 1024 * 1024
 # No hard "no": inputs above a model's single-shot budget are automatically
 # map-reduced — split on file boundaries, processed as parallel chunk calls,
 # then merged by budget-aware synthesis. The single-shot/chunk budgets are
@@ -261,8 +268,12 @@ def read_config_file():
                 file=sys.stderr,
             )
             return conf
+        # POSIX-only, like the ownership check above: Windows has no Unix mode
+        # bits (st_mode is only 0o666/0o444), so an unguarded check would be
+        # permanently != 0o600 and print a FALSE "tightened 666->600" on every
+        # command forever (Windows secures the file via user-profile ACLs).
         mode_bits = st.st_mode & 0o777
-        if mode_bits != 0o600:
+        if os.name == "posix" and mode_bits != 0o600:
             os.chmod(CONFIG_PATH, 0o600)
             print(
                 f"ambient: tightened {CONFIG_PATH} permissions "
@@ -415,11 +426,18 @@ def resolve_api_url(conf):
     from_env = os.environ.get("AMBIENT_API_URL")
     api_url = (from_env or conf.get("AMBIENT_API_URL") or DEFAULT_API_URL).rstrip("/")
     parts = urllib.parse.urlsplit(api_url)
-    if parts.scheme.lower() != "https" and os.environ.get("AMBIENT_ALLOW_INSECURE") != "1":
+    host = (parts.hostname or "").lower()
+    # AMBIENT_ALLOW_INSECURE relaxes the HTTPS requirement ONLY for a LOCAL host
+    # (its documented local-dev purpose) — NEVER for a real/public host, so the
+    # Bearer key can't ride plaintext HTTP to api.ambient.xyz or an attacker's box.
+    allow_insecure_local = (os.environ.get("AMBIENT_ALLOW_INSECURE") == "1"
+                            and _is_local_host(host))
+    if parts.scheme.lower() != "https" and not allow_insecure_local:
         _fail_exit(
             None, _argv_command(), "config",
             f"refusing non-HTTPS endpoint {api_url} — the key would travel "
-            "unencrypted. Use https:// (or set AMBIENT_ALLOW_INSECURE=1 for local dev)."
+            "unencrypted. Use https:// (AMBIENT_ALLOW_INSECURE=1 only relaxes this "
+            "for a LOCAL endpoint like http://127.0.0.1)."
         )
     # HOST PINNING: the API key rides in the Authorization header of every call,
     # so AMBIENT_API_URL is key-equivalent — an injected env var or a tampered
@@ -3823,54 +3841,42 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                     finish = ch["finish_reason"]
                     terminated = True
 
-        while True:
+        # Read lines off the socket in a BACKGROUND thread so the main loop can
+        # enforce the hard-wall / no-progress limits on a fixed ~1s cadence. A
+        # peer that dribbles bytes and never sends a newline can no longer make a
+        # blocking readline() own the clock and delay every limit (Codex 2026-07-08:
+        # readline(cap) still blocks until newline/EOF/timeout/full cap). The
+        # queue is bounded, so the reader can't buffer the whole stream ahead.
+        line_q = queue.Queue(maxsize=256)
+
+        def _reader():
             try:
-                raw = resp.readline()
-            except TimeoutError:
-                close_beat()
-                raise StallError(
-                    f"stream went silent for {timeout}s "
-                    f"({sum(map(len, content))} chars received before the stall)",
-                    "".join(content), "".join(reasoning),
-                )
-            except (OSError, http.client.HTTPException) as err:
-                # Connection reset mid-stream = truncation, not a crash — route
-                # the partial through the same retry/salvage ladder as EOF.
-                close_beat()
-                raise StallError(
-                    f"connection dropped mid-stream ({err}); "
-                    f"{sum(map(len, content))} chars received",
-                    "".join(content), "".join(reasoning),
-                )
-            if not raw:
-                # EOF. A clean stream ends with [DONE] or a finish_reason; a
-                # connection that just drops mid-generation is TRUNCATION, not
-                # success — route it through the stall/retry/salvage ladder.
-                handle_event()  # flush any buffered final event
-                if not terminated:
-                    close_beat()
-                    raise StallError(
-                        "stream closed before completion "
-                        f"({sum(map(len, content))} chars received, no end marker)",
-                        "".join(content), "".join(reasoning),
-                    )
-                break
+                while True:
+                    ln = resp.readline(STREAM_LINE_MAX)
+                    line_q.put(ln)
+                    if not ln:      # EOF sentinel (empty bytes)
+                        break
+            except BaseException as exc:   # hand the socket fault to the main loop
+                line_q.put(exc)
+
+        threading.Thread(target=_reader, daemon=True).start()
+        while True:
             now = time.time()
+            # Enforced EVERY tick, INDEPENDENT of whether a line arrived — so a
+            # blocked/dribbling read can't push these past their limits.
             if now - start > HARD_WALL_S:
                 close_beat()
                 raise StallError(
                     f"generation exceeded the {HARD_WALL_S // 60}-minute hard wall",
                     "".join(content), "".join(reasoning), hard_wall=True,
                 )
-            size = sum(map(len, content)) + sum(map(len, reasoning))
-            if size > last_size:
-                last_size, last_growth = size, now
-            elif now - last_growth > NOPROGRESS_S:
-                # Bytes keep arriving but nothing useful is being produced.
+            if now - last_growth > NOPROGRESS_S:
+                # Nothing useful produced for the window — a stall, even if bytes
+                # (keep-alives / a newline-less dribble) keep the socket alive.
                 close_beat()
                 raise StallError(
                     f"no new content for {NOPROGRESS_S}s despite an open stream "
-                    f"({size:,} chars so far) — the stream stopped making "
+                    f"({last_size:,} chars so far) — the stream stopped making "
                     "progress",
                     "".join(content), "".join(reasoning),
                 )
@@ -3892,18 +3898,52 @@ def stream_completion(api_url, api_key, payload, timeout, on_delta=None):
                 else:
                     print(msg, file=sys.stderr)
                 last_beat = now
+            try:
+                raw = line_q.get(timeout=1.0)
+            except queue.Empty:
+                continue  # no line this tick — loop back to re-check the wall
+            if isinstance(raw, BaseException):
+                close_beat()
+                if isinstance(raw, TimeoutError):
+                    raise StallError(
+                        f"stream went silent for {timeout}s "
+                        f"({sum(map(len, content))} chars received before the stall)",
+                        "".join(content), "".join(reasoning),
+                    )
+                # Connection reset mid-stream = truncation, not a crash — route
+                # the partial through the same retry/salvage ladder as EOF.
+                raise StallError(
+                    f"connection dropped mid-stream ({raw}); "
+                    f"{sum(map(len, content))} chars received",
+                    "".join(content), "".join(reasoning),
+                )
+            if not raw:
+                # EOF. A clean stream ends with [DONE] or a finish_reason; a
+                # connection that just drops mid-generation is TRUNCATION, not
+                # success — route it through the stall/retry/salvage ladder.
+                handle_event()  # flush any buffered final event
+                if not terminated:
+                    close_beat()
+                    raise StallError(
+                        "stream closed before completion "
+                        f"({sum(map(len, content))} chars received, no end marker)",
+                        "".join(content), "".join(reasoning),
+                    )
+                break
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             if line == "":
                 handle_event()  # blank line = event boundary (SSE framing)
                 if terminated:
                     break
-                continue
-            if line.startswith(":"):
-                continue  # SSE comment/keep-alive
-            if line.startswith("data:"):
+            elif line.startswith("data:"):
                 # Per spec, a leading single space after the colon is stripped.
                 value = line[5:]
                 data_lines.append(value[1:] if value.startswith(" ") else value)
+            # else: an SSE comment/keep-alive (":") or unknown field — ignore.
+            # Progress accounting AFTER the event may have grown content/reasoning.
+            size = sum(map(len, content)) + sum(map(len, reasoning))
+            if size > last_size:
+                last_size, last_growth = size, now
     close_beat()  # close the in-place status line so later output starts fresh
     return 200, {
         "content": "".join(content),
@@ -4512,21 +4552,28 @@ def read_stdin_if_piped():
     # Guard against an IDE/CI wrapper that holds stdin open with NO data: wait
     # briefly for readability instead of blocking forever. A real pipe (git diff,
     # a file redirect) is readable immediately.
+    no_data_msg = (
+        f"ambient: stdin produced no data within {wait_s:g}s — proceeding "
+        "without it (slow pipe? set AMBIENT_STDIN_WAIT=<seconds>)")
     try:
         ready, _, _ = select.select([sys.stdin], [], [], wait_s)
-        if not ready:
-            print(
-                f"ambient: stdin produced no data within {wait_s:g}s — proceeding "
-                "without it (slow pipe? set AMBIENT_STDIN_WAIT=<seconds>)",
-                file=sys.stderr,
-            )
-            return ""
     except (OSError, ValueError):
-        pass  # select unsupported here — fall through to a plain read
+        # select() is unavailable here (Windows pipes, some IDE/CI wrappers) —
+        # exactly the case the guard exists for. Do NOT fall through to an
+        # UNBOUNDED blocking read: a held-open, dataless stdin would hang forever
+        # (a real pipe finishes at EOF well within the wait). Bound it in a thread.
+        return _read_stdin_bounded(wait_s, no_data_msg)
+    if not ready:
+        print(no_data_msg, file=sys.stderr)
+        return ""
+    return _stdin_read_and_decode()
+
+
+def _stdin_read_and_decode():
+    """Read stdin fully (bounded by ABS_MAX_CHARS) and decode lossily — blocks
+    until EOF, so call only when data is present or the read is time-bounded."""
     # Read BYTES and decode lossily: `git diff` on latin-1 sources or log data
-    # with stray bytes must degrade, not crash text-mode stdin.read() into the
-    # shield. Mirrors
-    # read_files' handling.
+    # with stray bytes must degrade, not crash text-mode stdin.read().
     buf = getattr(sys.stdin, "buffer", None)
     if buf is not None:
         raw = buf.read(ABS_MAX_CHARS * 4 + 1)  # bytes cap >= char cap for UTF-8
@@ -4548,6 +4595,31 @@ def read_stdin_if_piped():
             "— split the job (e.g. per-directory) as a cost sanity check."
         )
     return data
+
+
+def _read_stdin_bounded(wait_s, no_data_msg):
+    """Read stdin without EVER hanging: run the blocking read in a daemon thread
+    and give up after wait_s. A real pipe reaches EOF within the wait; a held-open
+    dataless stdin (where select() is unavailable) would otherwise block forever."""
+    result = {}
+
+    def _worker():
+        try:
+            result["data"] = _stdin_read_and_decode()
+        except SystemExit as exc:   # a _fail_exit inside the thread
+            result["exit"] = exc.code
+        except BaseException:       # never let the reader thread crash silently
+            result["data"] = ""
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(wait_s)
+    if t.is_alive():                # still blocked on a dataless pipe — give up
+        print(no_data_msg, file=sys.stderr)
+        return ""
+    if "exit" in result:
+        sys.exit(result["exit"])
+    return result.get("data", "")
 
 
 def warn_if_stdin_ignored(hint):
@@ -5849,6 +5921,8 @@ def cmd_ask(args, api_key, api_url, conf):
     if not question and not doc:
         usage_exit("nothing to ask (pass a prompt or pipe stdin)")
     scan = [("prompt", question)] + ([("stdin", doc)] if doc else [])
+    if getattr(args, "system", None):  # --system is sent to the network too
+        scan.append(("system", args.system))
     refuse_if_secrets(scan, getattr(args, "allow_secrets", False))
     if getattr(args, "model", None):
         note_if_hidden(args.model, conf)
@@ -9195,6 +9269,16 @@ def cmd_audit(args, api_key, api_url, conf):
         final = run_cross_file_pass(final, labeled, model, profile, args,
                                     api_key, api_url, catalog, conf,
                                     structured, session=session)
+    # Repo files EXCLUDED by the input ceiling make coverage PARTIAL as a FACT —
+    # never rely on the model reading the coverage note and self-declaring it. A
+    # clean SHIP must not report coverage_complete over skipped files, so force
+    # the partial flag deterministically (render_findings then flips SHIP→NEEDS
+    # WORK and coverage_complete→false; exit stays 2 unless --allow-partial).
+    omitted = repo_meta.get("omitted_over_cap", 0) if repo_meta else 0
+    if omitted:
+        partial = True
+        reason = ((reason + "; ") if reason else "") + \
+            f"{omitted} repo file(s) excluded by the input ceiling"
     if structured:
         eff = render_findings(final, args.format, api_key, partial, reason,
                               model=model)
@@ -9405,6 +9489,10 @@ def cmd_chat(args, api_key, api_url, conf):
             "ambient chat is an interactive REPL and needs a terminal — "
             "for piped/scripted use, call `ambient ask` instead.",
             exit_code=EXIT_USAGE, api_key=api_key)
+    # --system is prepended to every turn and sent to the network — scan it once
+    # up front with the same tripwire the per-turn lines get.
+    if getattr(args, "system", None):
+        refuse_if_secrets([("system", args.system)], getattr(args, "allow_secrets", False))
     try:
         import readline  # noqa: F401 — stdlib line editing where available
     except ImportError:
@@ -11054,14 +11142,16 @@ def _link_is_ours(dest):
 
 def _shim_is_ours(shim_path):
     """Windows analogue of _link_is_ours for the `.cmd` shim (M14): true only if
-    the file is OUR exact `@python "<target>" %*` template AND the target has an
-    `/ambient-code/` component — so `--remove` never deletes a foreign shim."""
+    the file is OUR template AND the target has an `/ambient-code/` component — so
+    `--remove` never deletes a foreign shim. Matches BOTH the current
+    `@"<interp>" "<target>" %*` form and the legacy `@python "<target>" %*` one
+    so an older shim stays removable."""
     try:
         with open(shim_path, encoding="utf-8") as fh:
             body = fh.read().strip()
     except OSError:
         return False
-    m = re.fullmatch(r'@python "(.+)" %\*', body)
+    m = re.fullmatch(r'@(?:python|"[^"]+") "(.+)" %\*', body)
     return bool(m) and "/ambient-code/" in m.group(1).replace("\\", "/")
 
 
@@ -11117,8 +11207,18 @@ def cmd_link(args):
         if os.name == "nt":  # symlinks need privileges on Windows — shim it
             shim = os.path.join(dest_dir, "ambient.cmd")
             with open(shim, "w", encoding="utf-8") as fh:
-                fh.write(f'@python "{target}" %*\r\n')
+                # Use the interpreter running THIS command (guaranteed present) —
+                # a bare `python` is off PATH on a stock Windows install (only
+                # `py`) and the Store app-execution alias shadows it with a dead
+                # stub, so `@python` shims are DOA.
+                fh.write(f'@"{sys.executable}" "{target}" %*\r\n')
             print(f"wrote launcher: {shim}")
+            if dest_dir not in os.environ.get("PATH", "").split(os.pathsep):
+                print(
+                    f"note: {dest_dir} is not on your PATH yet — add it so "
+                    "`ambient` works from any terminal (System Settings → "
+                    "Environment Variables → Path, or run:\n"
+                    f'  setx PATH "%PATH%;{dest_dir}")')
             return
         tmp = dest + f".tmp-{os.getpid()}"
         os.symlink(target, tmp)
@@ -11298,6 +11398,18 @@ def cmd_agent(args, api_key, api_url, conf):
         argv = ["opencode", "run", "--model", f"ambient/{model}"] + extra[1:]
     else:
         argv = ["opencode", "--model", f"ambient/{model}"] + extra
+    if os.name == "nt":
+        # Windows: os.exec* SPAWNS a new process then the parent exits, so the
+        # shell prompt and opencode's full-screen TUI fight over the console; and
+        # it can't cleanly exec the npm 'opencode.cmd' shim. Run it as a CHILD
+        # (subprocess handles .cmd via PATHEXT and keeps the console attached)
+        # and forward its exit code.
+        try:
+            proc = subprocess.run([shutil.which("opencode") or "opencode", *argv[1:]],
+                                  env=env)
+        except FileNotFoundError:
+            sys.exit("ambient: opencode not found on PATH (see https://opencode.ai)")
+        sys.exit(proc.returncode)
     try:
         os.execvpe("opencode", argv, env)
     except FileNotFoundError:

@@ -85,7 +85,7 @@ class FakeSSE:
         self.status = status
         self.headers = {"Content-Type": ctype}
 
-    def readline(self):
+    def readline(self, _size=-1):   # real http.client readline takes an optional size cap
         return self._lines.pop(0) if self._lines else b""
 
     def read(self):
