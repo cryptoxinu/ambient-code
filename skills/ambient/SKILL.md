@@ -17,7 +17,7 @@ always points at the active install, so never hardcode a path.
 
 | Invocation | What to do |
 |---|---|
-| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else run `ambient models --json` once and show a compact panel: (1) the mental model, one line — "Claude plans, reviews, and integrates; Ambient does the heavy token work (bulk code writing, audits, digests) at ~10-40x lower cost"; (2) delegate-mode state + lane defaults; (3) the headline `Serving now: <models with ready==true && hidden==false>` plus one positive catalog line — "`+N more` catalog models spin up on demand (`ambient models --all` shows everything)". Never enumerate non-serving models in the default panel (see **Plain-language status**). Then an AskUserQuestion action picker: toggle delegate mode / turn on **Ambient Takeover** (Ambient does everything on your tokens — **Ambient Takeover contract** below) / switch model (**Model picking UX** below) / audit something / build something / spawn terminal. (`ambient mode` reports `delegate=takeover` when that level is active; the bare `ambient` banner renders it as a `TAKEOVER` badge.) If NOTHING is serving this minute: say "All catalog models are between demand cycles right now — they spin up when called for; check `ambient models` in a few minutes", keep the non-model actions, and never present a model as serving when it isn't. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
+| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else run `ambient models --json` once and show a compact panel: (1) the mental model, one line — "Claude plans, reviews, and integrates; Ambient does the heavy token work (bulk code writing, audits, digests) at ~10-40x lower cost"; (2) delegate-mode state + lane defaults; (3) the headline `Serving now: <models with ready==true && hidden==false>` plus one positive catalog line — "`+N more` catalog models spin up on demand (`ambient models --all` shows everything)". Never enumerate non-serving models in the default panel (see **Plain-language status**). Then an AskUserQuestion action picker: toggle delegate mode / turn on **Ambient Takeover** (Ambient does everything on your tokens — **Ambient Takeover contract** below) / switch model (**Model picking UX** below) / adjust settings (**Settings** below) / audit something / build something / spawn terminal. (`ambient mode` reports `delegate=takeover` when that level is active; the bare `ambient` banner renders it as a `TAKEOVER` badge.) If NOTHING is serving this minute: say "All catalog models are between demand cycles right now — they spin up when called for; check `ambient models` in a few minutes", keep the non-model actions, and never present a model as serving when it isn't. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
 | `/ambient on` | `ambient mode on`, announce the delegate contract (below), follow it all session. |
 | `/ambient takeover` | `ambient mode takeover`, announce the **Ambient Takeover contract** (below), then route EVERY substantive turn through Ambient for the rest of the session (Ambient tokens, not Claude's). Show the takeover banner each turn. |
 | `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). Turns off BOTH delegate and takeover — the single, always-available exit from either mode. |
@@ -29,6 +29,7 @@ always points at the active install, so never hardcode a path.
 | `/ambient agent` | Interactive opencode TUI for the user (`ambient agent`); headless one-offs via `ambient agent run "task"`. The key enters opencode's process env — never ask the agent to print its environment. |
 | `/ambient curate ...` | User model curation: `ambient curate` (status) / `hide <id\|glob>` / `show <id>` / `only <ids>` / `note <id> "text"` / `reset`. Curation shapes menus + automatic selection only — explicit `-m` always works. |
 | `/ambient setup` | First-run setup below (key rotation: `setup --force`; removal: `setup --remove`). |
+| `/ambient settings` | **Settings** sub-panel below — one place to see your API-key status (and where to update it) and change streaming, model fallback, and other prefs, without touching env vars. |
 | `/ambient doctor` | Run `ambient doctor`, relay the PASS/FAIL table + DIAGNOSIS plainly. |
 | `/ambient usage` | Run `ambient usage`, report calls/tokens AND the relative savings % vs a frontier reference (per model + total, percentage only — never a plan-specific dollar figure). ALWAYS relay its agent-lane disclosure: `ambient agent` spend is billed by Ambient but NOT visible to local metering — never present the totals as complete if the user runs the agent lane. |
 
@@ -286,9 +287,9 @@ just work. Patterns, cheapest first:
 The user's picked model is never silently swapped. If the chosen model can't finish
 in one pass, the CLI escalates its token budget once, then SPLITS the work across
 the SAME model and merges. `--fallback` (or AMBIENT_FALLBACK=on) is the ONLY thing
-that authorizes a different model — off by default, curation-aware, it prints
-the price delta, and it now picks the CHEAPEST fitting alternate (fit-then-cheapest),
-not the biggest. Never enable it on the user's behalf without asking. User
+that authorizes a different model — off by default, curation-aware; it picks the
+CHEAPEST fitting alternate (fit-then-cheapest, not the biggest), cost-gates it, and
+prints the swap it made. Never enable it on the user's behalf without asking. User
 curation (`ambient curate`) shapes what menus SHOW, never what `-m` can do.
 
 Advisory routing stays inside that rule: `-m auto[:cheapest|:largest]` is the
@@ -392,6 +393,55 @@ Ambient outage.
 5. Setup refuses to save a key it cannot verify (a valid-but-out-of-funds key IS
    saved, with a top-up pointer). Finish with the smoke test the panel suggests:
    `ambient ask "Reply with exactly: AMBIENT-OK"`.
+
+## Settings
+
+One home for user preferences — the user never edits env vars or the config file
+by hand. `ambient config` (keyless, no network, safe for you to run) is the
+backbone; `/ambient settings` is its tap-panel. Config-owned prefs (streaming,
+fallback, fleet-budget, spend-cap, reference-price) persist to
+`~/.config/ambient/env` (0600) via `ambient config set …` and take effect on the
+next run; the API key, model, delegate mode, and curation are NOT config values —
+they keep their own commands (`setup`, `use`, `mode`, `curate`), and `ambient
+config` only shows their state.
+
+Mirror the **Model picking UX** flow: **show current → AskUserQuestion card → map
+each option to an explicit `ambient …` command → confirm after.**
+
+1. **Show current first.** Run `ambient config` and read the table back plainly:
+   the top block is settings owned by other commands (API key state — never the
+   key value — model, delegate mode, curation); the bottom block is the config
+   knobs (streaming, fallback, fleet-budget, spend-cap, reference-price) with their
+   current value. If a knob shows `(env override)`, tell the user an exported env
+   var is shadowing the file so a change won't take effect until they unset it.
+2. **AskUserQuestion card — a lean menu (an API-key action + 2 toggles + an escape
+   hatch), so the panel never clutters:**
+   - **API key** — ⚠️ NEVER through chat. Report the state from `ambient config`
+     (`configured (<backend>)` or `MISSING`). The ONLY actions are commands the
+     user runs in THEIR OWN terminal: `ambient setup --force` (rotate) · `ambient
+     setup --remove` (remove) · `ambient setup` (first time). Build NO command
+     containing a key; if the user pastes one, refuse it and recommend rotating it.
+     (Same guarantees as **First-run setup**.)
+   - **Streaming on/off** — run `ambient config set streaming on|off` yourself
+     (keyless, no key, safe). This is the live progress display (heartbeat + build
+     phase lines); see **Long-running dispatch**. Gates display only — the smart
+     timeout always runs.
+   - **Model fallback on/off** — explain BEFORE enabling (it's **SACRED**-adjacent):
+     it only lets ONE ready, fitting alternate (fit-then-cheapest, cost-gated) fill
+     in when your pick can't serve/fit, and the CLI prints the swap it made — never
+     a silent change beyond that. Then `ambient config set fallback on|off`. Never
+     enable it on the user's behalf without asking.
+   - **Everything else → `ambient config`** — a pointer, not more taps: spend cap,
+     fleet budget, and reference price are set via `ambient config set <name>
+     <value>` (shown in the table); model → `/ambient model`; delegate/takeover →
+     `/ambient on|takeover|off`; curation → `/ambient curate`.
+3. **Confirm after.** Re-run `ambient config` and show the single changed line
+   (e.g. `streaming = off`), exactly like the model-picker confirmation.
+
+Rules this panel obeys: the API key never enters chat or a command you construct;
+model status stays plain-language ("serving" vs "spins up on demand"); **Model
+choice is SACRED**; and no dollar figure is ever surfaced for the spend cap (it's a
+silent per-run safety ceiling — a bare number, no `$`).
 
 ## Model picking UX
 

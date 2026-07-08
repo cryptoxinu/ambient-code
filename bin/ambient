@@ -90,7 +90,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "1.2.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "1.3.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -10661,6 +10661,193 @@ def cmd_mode(args):
     )
 
 
+# ── ambient config: one clean home for user settings (no env editing) ──────
+# Every write goes through save_config_values (atomic, 0600, merge-preserving);
+# every read uses the SAME env-or-config resolvers the rest of the CLI already
+# uses, so a `config set` takes effect with NO reader change. set/unset may touch
+# ONLY the CONFIG_SETTINGS whitelist below — never the model/mode/curation/
+# endpoint/key keys (those keep their own commands). The API key is never a config
+# value: it can only be set via `ambient setup` (hidden input, user's terminal).
+def _config_fmt_num(x):
+    """5.0 → '5', 1.5 → '1.5' — clean display of an often-integral float."""
+    return str(int(x)) if float(x).is_integer() else str(x)
+
+
+def _config_norm_bool(raw):
+    """on/off/true/false/1/0/yes/no (any case) → 'on'/'off', else ValueError.
+    Stored as the literal on/off, which every boolean reader reads identically:
+    PROGRESS/FLEET treat off/0/false/no as off (else on); FALLBACK treats
+    1/on/true as on, and 'off' is outside that set → off."""
+    v = str(raw).strip().lower()
+    if v in ("on", "true", "1", "yes"):
+        return "on"
+    if v in ("off", "false", "0", "no"):
+        return "off"
+    raise ValueError("expected on or off")
+
+
+def _config_norm_spend(raw):
+    """A positive spend ceiling; lenient about a leading $ and thousands commas."""
+    cleaned = str(raw).strip().lstrip("$").replace(",", "")
+    try:
+        n = float(cleaned)
+    except ValueError:
+        raise ValueError("expected a positive number") from None
+    if not (0 < n < float("inf")):   # rejects 0, negatives, NaN, inf
+        raise ValueError("expected a positive number")
+    return cleaned
+
+
+def _config_norm_price(raw):
+    """A frontier reference price ('in/out' pair like 3/15, or one blended figure)."""
+    if parse_reference_price(str(raw).strip()) is None:
+        raise ValueError("expected an in/out pair like 3/15, or one number")
+    return str(raw).strip()
+
+
+# Whitelist: friendly name → (env key, validator/normalizer, default, current
+# reader, value-syntax hint). This tuple is the ONLY set of keys set/unset can
+# write — the guarantee that a settings change can never clobber another command's
+# config. current() reads the SAME resolver the CLI uses at runtime (zero network).
+CONFIG_SETTINGS = (
+    {"name": "streaming", "env": "AMBIENT_PROGRESS", "default": "on", "how": "on|off",
+     "validate": _config_norm_bool,
+     "current": lambda conf: "on" if _progress_from_env_or_conf(conf) else "off"},
+    {"name": "fallback", "env": "AMBIENT_FALLBACK", "default": "off", "how": "on|off",
+     "validate": _config_norm_bool,
+     "current": lambda conf: "on" if str(
+         os.environ.get("AMBIENT_FALLBACK") or conf.get("AMBIENT_FALLBACK") or ""
+     ).strip().lower() in ("1", "on", "true") else "off"},
+    {"name": "fleet-budget", "env": "AMBIENT_FLEET_BUDGET", "default": "on",
+     "how": "on|off", "validate": _config_norm_bool,
+     "current": lambda conf: "on" if _fleet_enabled(conf) else "off"},
+    {"name": "spend-cap", "env": "AMBIENT_MAX_SPEND", "default": "5", "how": "<number>",
+     "validate": _config_norm_spend,
+     "current": lambda conf: _config_fmt_num(_ceiling(conf)[0])},
+    {"name": "reference-price", "env": "AMBIENT_REFERENCE_PRICE", "default": "3/15",
+     "how": "<in/out>", "validate": _config_norm_price,
+     "current": lambda conf: "/".join(
+         _config_fmt_num(x) for x in resolve_reference_price(conf))},
+)
+_CONFIG_BY_NAME = {s["name"]: s for s in CONFIG_SETTINGS}
+
+
+def _config_names():
+    return ", ".join(s["name"] for s in CONFIG_SETTINGS)
+
+
+def _config_env_shadow_note(env):
+    """Warn (once, on stderr) when an exported env var will shadow the file write —
+    so a user who sets a value but sees no change understands the precedence."""
+    if os.environ.get(env) is not None:
+        print(f"note: {env} is set in your environment — it overrides the config "
+              "file, so this change takes effect only after you unset that env var.",
+              file=sys.stderr)
+
+
+def _config_redact(text):
+    """Echo an unknown setting name back ONLY if it is a short, clean slug (a
+    plausible typo like 'streming'). Anything else — a mistyped key, a value with
+    spaces/unicode, a vendor-format secret, a long opaque token — is replaced with a
+    placeholder, so nothing secret-shaped can ever reach stderr (Codex 2026-07-08:
+    a whitelist of safe SHAPE beats a blocklist of secret shapes)."""
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,30}", text) \
+            and not any(p.search(text) for p in SECRET_PATTERNS):
+        return text
+    return "<unrecognized>"
+
+
+def _config_curation_summary(conf):
+    """Zero-network: whether any curation is configured (no catalog fetch)."""
+    keys = ("AMBIENT_MODELS_ALLOW", "AMBIENT_MODELS_HIDE",
+            "AMBIENT_MODELS_SHOW", "AMBIENT_MODEL_NOTES")
+    return "customized" if any(os.environ.get(k) or conf.get(k) for k in keys) \
+        else "default (all shown)"
+
+
+def _config_print_status():
+    """The `ambient config` table. Two aligned blocks: settings OWNED by other
+    commands (pointers, not duplicated), then the config-owned knobs. Purely local
+    reads — the API key VALUE is never printed, only its backend."""
+    conf = read_config_file()
+    key, backend = resolve_key_and_backend(conf)
+    ns = argparse.Namespace(model=None)
+    key_state = f"configured ({backend})" if key else "MISSING — run: ambient setup"
+    owned = [
+        ("API key", key_state, "ambient setup --force / --remove"),
+        ("Model · chat", resolve_model(ns, conf, "chat"), "ambient use"),
+        ("Model · code", resolve_model(ns, conf, "code"), "ambient use --code"),
+        ("Delegate mode", (conf.get("AMBIENT_DELEGATE") or "off").lower(),
+         "ambient mode on|takeover|off"),
+        ("Curation", _config_curation_summary(conf), "ambient curate"),
+    ]
+    rows = []
+    for s in CONFIG_SETTINGS:
+        val = s["current"](conf)
+        if os.environ.get(s["env"]) is not None:
+            val += "  (env override)"
+        rows.append((s["name"], val, f"ambient config set {s['name']} {s['how']}"))
+    allrows = owned + rows
+    lw = max(len(r[0]) for r in allrows) + 2
+    vw = max(len(str(r[1])) for r in allrows) + 2
+
+    def emit(block):
+        for label, val, how in block:
+            print(f"  {label:<{lw}}{str(val):<{vw}}{how}")
+    print("Ambient settings\n")
+    emit(owned)
+    print()
+    emit(rows)
+    print("\n  reset any knob to its default:  ambient config unset <name>")
+
+
+def cmd_config(args):
+    """User settings in one place — no env vars, no hand-editing the config file.
+    Keyless (config-only, no network). `ambient config` shows everything; `set`/
+    `unset` change one whitelisted knob."""
+    verb = getattr(args, "verb", None) or "status"
+    if verb == "status":
+        _config_print_status()
+        return
+    name = getattr(args, "name", None)
+    if not name:
+        usage_exit(f"config {verb} needs a setting name (one of: {_config_names()})")
+    # A setting name never contains '=' or a secret. Split at '=' so a fat-fingered
+    # `set key=<SECRET>` is read as the name `key` (the value part is dropped, never
+    # echoed), and redact any secret-looking name before it could reach stderr
+    # (Codex 2026-07-08 — the unknown-setting error must not leak a mistyped key).
+    bare = name.split("=", 1)[0].strip()
+    if bare.lower().replace("_", "-") in ("key", "api-key", "apikey", "ambient-api-key"):
+        usage_exit(
+            "the API key isn't a config value — rotate it with `ambient setup "
+            "--force`, remove it with `ambient setup --remove` (hidden input, in "
+            "your OWN terminal). It never passes through config.")
+    setting = _CONFIG_BY_NAME.get(bare.lower())
+    if setting is None:
+        usage_exit(
+            f"unknown setting '{_config_redact(bare)}'. Valid: {_config_names()}. "
+            "(Model → ambient use · delegate mode → ambient mode · curation → "
+            "ambient curate · endpoint → ambient trust-url · key → ambient setup)")
+    env = setting["env"]
+    value = getattr(args, "value", None)
+    if verb == "unset":
+        if value is not None:
+            usage_exit(f"config unset {setting['name']} takes no value")
+        save_config_values({env: None})
+        print(f"{setting['name']} → back to default ({setting['default']})")
+        _config_env_shadow_note(env)
+        return
+    if value is None:   # verb == "set"
+        usage_exit(f"config set {setting['name']} needs a value ({setting['how']})")
+    try:
+        normalized = setting["validate"](value)
+    except ValueError as err:
+        usage_exit(f"invalid value for {setting['name']}: {err}")
+    save_config_values({env: normalized})
+    print(f"{setting['name']} = {normalized}")
+    _config_env_shadow_note(env)
+
+
 SETUP_PREAMBLE = f"""Ambient setup — one-time key configuration
 Ambient (ambient.xyz) is a decentralized network serving open-source models
 on demand behind one OpenAI-compatible API; you pay per token.
@@ -11708,6 +11895,17 @@ def _configure_mode(sub):
                         "omit to print current status")
 
 
+def _configure_config(sub):
+    p = sub.add_parser(
+        "config",
+        help="view or change your Ambient settings (no env vars, no file editing)")
+    p.add_argument("verb", nargs="?", choices=["status", "set", "unset"],
+                   default="status",
+                   help="status (default) · set <name> <value> · unset <name>")
+    p.add_argument("name", nargs="?", help="setting name (see: ambient config)")
+    p.add_argument("value", nargs="?", help="new value (for set)")
+
+
 def _configure_doctor(sub):
     sub.add_parser("doctor", help="diagnose key/funds/model/network/service issues")
 
@@ -12019,6 +12217,8 @@ COMMANDS = (
      "configure": _configure_usage, "handler": "cmd_usage"},
     {"name": "mode", "needs_key": False,
      "configure": _configure_mode, "handler": "cmd_mode"},
+    {"name": "config", "needs_key": False,
+     "configure": _configure_config, "handler": "cmd_config"},
     {"name": "doctor", "needs_key": False,
      "configure": _configure_doctor, "handler": "cmd_doctor"},
     {"name": "use", "needs_key": True,
@@ -12091,9 +12291,23 @@ def main():
 
     # Never accept a key as a command-line argument: argv lands in shell
     # history and process listings. Refuse BEFORE argparse
-    # can echo the token back in an 'unrecognized arguments' error.
-    if len(sys.argv) > 2 and sys.argv[1] == "setup":
+    # can echo the token back in an 'unrecognized arguments' error. `config` is
+    # covered too — none of its real values are secret-shaped, so a key-looking
+    # token there is a mistake to refuse, not to echo (Codex 2026-07-08).
+    if len(sys.argv) > 2 and sys.argv[1] in ("setup", "config"):
+        _keyname = ("key", "api-key", "apikey", "ambient-api-key")
         for tok in sys.argv[2:]:
+            # An explicit key ASSIGNMENT (`key=…`, `--api-key=…`) is never a valid
+            # arg here — refuse it regardless of the value's SHAPE, so even a short
+            # key can't be echoed by argparse's 'unrecognized arguments' error
+            # (Codex 2026-07-08).
+            if "=" in tok and tok.lstrip("-").split("=", 1)[0].strip().lower(
+            ).replace("_", "-") in _keyname:
+                sys.exit(
+                    "ambient: don't pass an API key on the command line — it lands "
+                    "in your shell history. Run `ambient setup` (interactive, "
+                    f"hidden input) instead, and ROTATE that key at {KEY_CONSOLE_URL}."
+                )
             if tok.startswith("-"):
                 # A bare flag is safe, but `--key=sk-...` smuggles the secret
                 # inside the token; inspect the value after the first '=' too,

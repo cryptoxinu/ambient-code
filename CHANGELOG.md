@@ -2,6 +2,41 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 1.3.0 — 2026-07-08
+
+A single settings home so users never edit environment variables or the config
+file by hand. No breaking changes.
+
+### Added
+
+- **`ambient config`** — one place to view and change your preferences:
+  - `ambient config` prints an aligned status table (API-key state, model, delegate
+    mode, curation — with pointers to the commands that own them — then the
+    config-owned knobs with their current values and how to change each).
+  - `ambient config set <name> <value>` / `ambient config unset <name>` change a
+    knob with validation and a one-line confirmation. Friendly names:
+    `streaming` (progress display on/off), `fallback`, `fleet-budget`, `spend-cap`,
+    `reference-price`. Every write persists to `~/.config/ambient/env` (0600) via
+    the existing atomic writer and is honored by the same env-or-config resolvers.
+  - Keyless and zero-network — works before a key exists; the API key value is
+    never printed. Booleans accept on/off/true/false/1/0/yes/no. A `set`/`unset`
+    can only touch the five whitelisted knobs — it can never clobber your model,
+    delegate mode, curation, or endpoint. The API key is not a config value:
+    `config` points you to `ambient setup --force` / `--remove` for that.
+  - When an exported `AMBIENT_*` env var shadows the file, the status view and
+    `set` say so, so a change that "doesn't take" is never a mystery.
+- A **Settings** sub-panel in the `/ambient` skill (`/ambient settings`) that drives
+  `ambient config` — change streaming, model fallback, and other prefs, and see
+  your API-key status — without the user touching env vars.
+
+### Security
+
+- `config` refuses a key-shaped argument without echoing it: a mistyped
+  `config set key=<SECRET>` (or `config --key=<SECRET>`) is caught by the same
+  pre-argparse guard that protects `setup`, and any secret-looking setting name is
+  redacted in error output. The API key can still only be entered via `ambient
+  setup` (hidden input, in your own terminal).
+
 ## 1.2.0 — 2026-07-08
 
 Three founder-requested features. No breaking changes; every prior default is
