@@ -348,20 +348,38 @@ class TestBuildMode(unittest.TestCase):
         self.assertEqual(env["status"], "partial")
 
     def test_truncated_batch_requeues_and_completes(self):
+        # Record-framed contract: the gen reply is per-file JSON objects. a.py's
+        # object is complete; b.py's is cut mid-content (decoder drops it), and on
+        # the length finish the conservative guard also drops the last accepted
+        # file — so the truncated batch requeues and the retry delivers both.
         root = tempfile.mkdtemp()
         plan = [{"path": "a.py", "purpose": "p", "est_lines": 5},
                 {"path": "b.py", "purpose": "p", "est_lines": 5}]
-        fake, state = fake_build_complete(plan, [
-            {"files": [{"path": "a.py", "content": "A\n"},
-                       {"path": "b.py", "content": "CUT"}],
-             "finish_reason": "length"},   # b dropped as possibly-cut
-            {"files": [{"path": "b.py", "content": "B\n"}]},
-        ])
+        state = {"calls": 0}
+
+        def fake(api_key, api_url, model, messages, args, on_delta=None, **kw):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return (json.dumps({"plan": plan, "notes": "n",
+                                    "advisory_steps": []}),
+                        {}, {"finish_reason": "stop"})
+            if state["calls"] == 2:
+                return ('{"path":"a.py","content":"A\\n"}\n'
+                        '{"path":"b.py","content":"BB',
+                        {}, {"finish_reason": "length"})
+            return ('{"path":"a.py","content":"A\\n"}\n'
+                    '{"path":"b.py","content":"BBB\\n"}',
+                    {}, {"finish_reason": "stop"})
+
         env = self._run(build_ns(root), fake)
         self.assertEqual(env["status"], "ok")
         self.assertEqual(sorted(f["path"] for f in env["files"]),
                          ["a.py", "b.py"])
-        self.assertEqual(state["calls"], 3)  # plan + 2 generations
+        bpy = next(f for f in env["files"] if f["path"] == "b.py")
+        self.assertEqual(bpy["bytes"], len("BBB\n".encode()))
+        # plan + truncated gen + per-file requeue(s); exact count depends on how
+        # the requeue splits the batch, so just assert it took a retry.
+        self.assertGreaterEqual(state["calls"], 3)
 
     def test_apply_writes_inside_root_only(self):
         root = tempfile.mkdtemp()

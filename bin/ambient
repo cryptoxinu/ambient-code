@@ -4499,7 +4499,11 @@ def complete(api_key, api_url, model, messages, args, _stall_retried=False,
                     "answer. This is a best-effort draft assembled from that "
                     "reasoning — treat with extra skepticism.]\n\n" + reasoning
                 )
+                # reasoning_draft flags that `draft` is the model's THINKING, not
+                # its output — consumers that parse structured output (e.g. the
+                # build lane's JSONL records) must NOT mine it for real content.
                 return draft, usage, {"salvaged_partial": True,
+                                      "reasoning_draft": True,
                                       "usage": usage, "_served_model": model}
             raise ChatError(
                 "empty",
@@ -9785,15 +9789,128 @@ BUILD_JSON_INSTRUCTION_PLAN = (
 )
 
 BUILD_GEN_PROMPT = """You are a senior software engineer generating COMPLETE files
-for a planned build. Output ONLY a JSON object matching the requested schema.
-Produce the FULL content of every requested file — production quality, no
-placeholders, no TODOs, imports correct across files. Use exactly the requested
-relative paths. Do not add commentary outside the JSON."""
+for a planned build. Produce the FULL content of every requested file — production
+quality, no placeholders, no TODOs, imports correct across files. Use exactly the
+requested relative paths.
 
+OUTPUT FORMAT — emit ONE file per line as a standalone JSON object:
+{"path":"<relative/path>","content":"<full file content>"}
+Rules: exactly one complete JSON object per line, newline-separated; NO array and
+NO envelope wrapping them; NO prose, comments, or markdown fences; escape every
+newline inside content as \\n so each file stays on ONE line. Emit the files in the
+order requested. If your output is cut off by a length limit, do NOT try to
+continue a partial object — a follow-up request will ask for the remaining files;
+never split one file across replies."""
+
+# Retained for back-compat: a non-compliant model that emits the old single-object
+# form is still salvaged by _parse_file_records (which unwraps a {"files":[...]}).
 BUILD_JSON_INSTRUCTION_FILES = (
-    "\n\nOUTPUT FORMAT: return ONLY a JSON object (no prose, no markdown fences) "
-    'matching: {"files":[{"path":str,"content":str}]}'
+    "\n\nOUTPUT FORMAT: one JSON object per line — "
+    '{"path":str,"content":str} — no array, no fences, no prose.'
 )
+
+
+def _parse_file_records(text):
+    """Parse a build-generation reply into a list of file objects, tolerant to
+    truncation BY DESIGN. The contract is per-file JSON objects ({"path","content"}),
+    but the parser is robust to how a real model formats them:
+      * a record must BEGIN a line (first non-space char '{') — a JSON object
+        embedded mid-line in prose (an "example: {...}") is NEVER read as a record;
+      * an object may SPAN lines (pretty-printed) — following lines are folded in
+        until it decodes, so indented/multi-line JSON is accepted, not rejected;
+      * several objects may be concatenated on one line;
+      * a malformed/truncated line is skipped, and clean records on OTHER lines
+        (before AND after it) are still recovered — junk never blocks a good file,
+        and a truncated final object drops cleanly (never repaired or stitched).
+    Splitting is on '\n' ONLY (str.splitlines would also break on exotic Unicode
+    line separators, inventing false record boundaries or splitting real content).
+
+    Layered fallback for a non-compliant model that emits the old single
+    {"files":[...]} wrapper (even pretty-printed across lines): a decoded object
+    exposing a `files` list is unwrapped into its members.
+
+    Returns a list of dicts (each expected to carry path/content; callers apply
+    the path / plan / size checks)."""
+    objs = []
+    n, i, line_start = len(text), 0, 0
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            i += 1
+            line_start = i
+            continue
+        if c != "{":
+            i += 1
+            continue
+        # A '{'. It is a TOP-LEVEL record candidate only if it BEGINS its line
+        # (only whitespace since the last '\n') — this rejects an object embedded
+        # mid-line in prose ("example: {...}"). Split concerns: we track '\n' only
+        # (str.splitlines would also break on U+2028/2029/0085/000B-000C/001C-001E,
+        # inventing false record boundaries or splitting a record's own content).
+        if text[line_start:i].strip():
+            nl = text.find("\n", i)          # '{' not at line start → skip the line
+            i = nl + 1 if nl >= 0 else n
+            line_start = i
+            continue
+        # Scan a STRING-AWARE balanced object span from i. Brace depth (ignoring
+        # braces inside JSON strings, honoring backslash escapes) finds the real
+        # top-level object boundary, so a pretty-printed/multi-line object and its
+        # NESTED objects (arrays of objects, a {"files":[...]} wrapper) are consumed
+        # as ONE unit — never mis-read as separate records. O(n): each char once.
+        depth, j, in_str, esc, closed = 0, i, False, False, False
+        while j < n:
+            ch = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    closed = True
+                    j += 1
+                    break
+            j += 1
+        if not closed:
+            break   # unterminated top-level object (truncated tail) → drop, stop
+        valid = False
+        try:
+            obj = json.loads(text[i:j])
+            if isinstance(obj, dict):
+                objs.append(obj)
+                valid = True
+        except (ValueError, RecursionError):
+            pass    # balanced but not valid JSON (e.g. missing key) → skip, no dig
+        i = j
+        # Same-line concatenation is honored ONLY after a VALID record. A
+        # balanced-but-invalid object ("{note: example}") must not let a trailing
+        # object on the same prose line masquerade as a top-level record.
+        if valid:
+            while i < n and text[i] in " \t\r,":
+                i += 1
+            if i < n and text[i] == "{":
+                line_start = i   # a second object concatenated on the same line
+                continue
+        nl = text.find("\n", i)
+        i = nl + 1 if nl >= 0 else n
+        line_start = i
+    files = []
+    for o in objs:
+        # A per-file record wins: check path/content BEFORE the legacy wrapper, so
+        # a record that also happens to carry a `files` key is NOT replaced by its
+        # nested contents.
+        if "path" in o or "content" in o:            # per-file record
+            files.append(o)
+        elif isinstance(o.get("files"), list):        # legacy wrapper → unwrap
+            files.extend(f for f in o["files"] if isinstance(f, dict))
+    return files
 
 
 def _within_root(child_real, root_real):
@@ -10144,14 +10261,16 @@ def cmd_build(args, api_key, api_url, conf):
         user = f"TASK: {task}"
         if context:
             user += f"\n\nContext files:\n\n{context}"
-        # Gate the (cheap) planning call too so AMBIENT_MAX_SPEND is a true
-        # ceiling across BOTH phases, not just generation.
-        cost_gate(catalog, model, len(task) + len(context), 1, args, conf)
         obj, served_model = None, model
         # Adaptive ladder: each attempt DOWNGRADES the structured-output demand
         # (json_schema -> json_object -> prompt-only) rather than re-sending the
         # same doomed request the model already ignored.
         attempts = build_plan_rf_ladder(model, profile)
+        # Gate the WHOLE planning ladder (it may retry across rungs) so
+        # AMBIENT_MAX_SPEND is a true ceiling across BOTH phases, not just
+        # generation — reserving one call would under-count the retries.
+        cost_gate(catalog, model, len(task) + len(context), len(attempts),
+                  args, conf)
         for attempt, attempt_rf in enumerate(attempts, 1):
             pa, extra = _ns_with(
                 attempt_rf, "" if (attempt_rf and attempt_rf.get("type") == "json_schema")
@@ -10180,7 +10299,35 @@ def cmd_build(args, api_key, api_url, conf):
             # a non-JSON one) so a --fallback served model gets the credit/blame,
             # not the requested model — on the failure path too (Codex round 2).
             served_model = _served_model_of(_b, model)
-            obj = extract_json(content)
+            # The plan is the build CONTRACT (its paths drive later file writes),
+            # so it must come from real, COMPLETE model output — never reasoning
+            # the model happened to think, nor a truncated/repaired reply. Unlike
+            # generation (which requeues missing files), the plan has no
+            # continuation, so a truncated plan permanently loses files. Since
+            # extract_json intentionally mines JSON out of prose, reject any reply
+            # that is a reasoning draft, salvaged, output-capped (length/etc.), or
+            # whose parse had to be repaired — retry the ladder, then fail closed.
+            _fr = (str(_b.get("finish_reason") or "").lower()
+                   if isinstance(_b, dict) else "")
+            # ALLOW-LIST (not a blacklist): the plan is accepted ONLY on a normal
+            # end-of-turn stop or an ABSENT finish reason (missing meta / [DONE] —
+            # no evidence of truncation). Any TRUTHY non-stop reason — length /
+            # content_filter / safety / tool_calls / error / any unknown value —
+            # or a reasoning-draft / salvaged reply is rejected, so no cap reason
+            # can slip a truncated contract through. Retry the ladder. A non-dict
+            # meta carries no finish reason at all, so it stays in the accept case
+            # (ambient's own truncations always arrive as a dict with a length
+            # reason or a salvage flag).
+            _dirty = ((isinstance(_b, dict)
+                       and (_b.get("reasoning_draft") or _b.get("salvaged_partial")))
+                      or _fr not in ("", "stop", "end_turn", "stop_sequence",
+                                     "eos", "eos_token", "complete", "completed"))
+            if _dirty:
+                obj = None
+            else:
+                obj = extract_json(content)
+                if obj and obj.get("_repaired"):
+                    obj = None
             if obj and isinstance(obj.get("plan"), list) and obj["plan"]:
                 break
             obj = None
@@ -10310,9 +10457,13 @@ def cmd_build(args, api_key, api_url, conf):
             max_gen_calls, args.max_tokens, args, conf,
             per_call_chars=[prompt_chars] * max_gen_calls)
         _gate_amount(expected, args, conf, bound=bound)
-    rf_files = response_format_for(profile, BUILD_FILES_SCHEMA)
-    gen_extra = ("" if (rf_files and rf_files.get("type") == "json_schema")
-                 else BUILD_JSON_INSTRUCTION_FILES)
+    # Generation uses PROMPT MODE (no response_format): the output is a STREAM of
+    # per-file JSON objects (JSONL), not one object, so json_schema/json_object
+    # (which force a single object) cannot express it. The record contract is
+    # stated in BUILD_GEN_PROMPT; truncation only costs the last incomplete
+    # record (see _parse_file_records), which the requeue loop below regenerates.
+    rf_files = None
+    gen_extra = ""
     attempts = {}
     queue = list(batches)
     while queue:
@@ -10398,41 +10549,83 @@ def cmd_build(args, api_key, api_url, conf):
             failed.append({"path": want[0],
                            "reason": f"[{err.category}] {err.diagnosis}"[:300]})
             continue
-        obj = extract_json(content)
-        truncated = (body.get("finish_reason") == "length"
-                     or bool(body.get("salvaged_partial"))
-                     or not obj or bool(obj.get("_repaired")))
+        # Record-framed parse: each complete per-file object is recovered whole;
+        # a truncated final record is dropped by the decoder (no repair/stitch),
+        # and the missing files requeue below — that IS the continuation.
+        # EXCEPTION: a reasoning-draft salvage (complete() returned the model's
+        # THINKING, not its output, because no final answer came) must NOT be
+        # mined for records — any {"path","content"} the model reasoned about is
+        # not a real file. Commit nothing; the whole batch requeues.
+        if isinstance(body, dict) and body.get("reasoning_draft"):
+            records = []
+        else:
+            records = _parse_file_records(content)
+        want_set = set(want)   # only the files THIS call was asked to generate
         got = {}
-        if obj and isinstance(obj.get("files"), list):
-            for f in obj["files"]:
-                if not isinstance(f, dict) or not isinstance(f.get("content"), str):
-                    continue
-                try:
-                    rel = safe_relpath(str(f.get("path", "")), root)
-                except ValueError as why:
-                    failed.append({"path": str(f.get("path")),
-                                   "reason": f"unsafe path: {why}"})
-                    continue
-                if rel not in plan_paths:
-                    # The reviewed plan is the contract: refuse any path the
-                    # user never approved (guards --plan-only review, the
-                    # --max-files cap, and prompt-injected extra files). Record
-                    # it as a DROP (surfaced) — not a failure — so delivering
-                    # every approved file still yields status ok.
-                    if rel not in dropped:
-                        dropped.append(rel)
-                    continue
-                if len(f["content"].encode()) > args.max_file_bytes:
-                    failed.append({"path": rel,
-                                   "reason": f"file exceeds --max-file-bytes "
-                                             f"({args.max_file_bytes:,})"})
-                    continue
-                got[rel] = f["content"]
-        if truncated and got:
-            # The LAST file in a cut stream may itself be cut — trust only the
-            # ones before it; the rest requeue whole (unit of atomicity = file).
-            emitted_order = [r for r in got]
-            got.pop(emitted_order[-1], None)
+        for f in records:
+            if not isinstance(f.get("content"), str):
+                continue
+            try:
+                rel = safe_relpath(str(f.get("path", "")), root)
+            except ValueError as why:
+                failed.append({"path": str(f.get("path")),
+                               "reason": f"unsafe path: {why}"})
+                continue
+            if rel not in plan_paths:
+                # The reviewed plan is the contract: refuse any path the user
+                # never approved (guards --plan-only review, the --max-files cap,
+                # and prompt-injected extra files). Record it as a DROP
+                # (surfaced) — not a failure — so a fully-delivered plan is ok.
+                if rel not in dropped:
+                    dropped.append(rel)
+                continue
+            if rel not in want_set or rel in done:
+                # Not a file THIS call was asked to (re)generate — a model that
+                # restarted and re-emitted an already-persisted or other-batch
+                # file. Ignore it: NEVER overwrite a completed file, and never
+                # accept a file out of its own batch (a later requeue could
+                # otherwise clobber an earlier correct one).
+                continue
+            try:
+                content_bytes = f["content"].encode("utf-8")
+            except UnicodeEncodeError:
+                # json.loads accepts a lone surrogate (e.g. "\ud800") that cannot
+                # be UTF-8 encoded — SKIP the record (never crash on the size
+                # check / sha / write downstream). Skipping requeues it rather
+                # than hard-failing, so a surrogate that was just a truncation
+                # artifact can regenerate; a persistently-bad file still fails via
+                # the bounded 2-attempt requeue cap.
+                continue
+            if len(content_bytes) > args.max_file_bytes:
+                failed.append({"path": rel,
+                               "reason": f"file exceeds --max-file-bytes "
+                                         f"({args.max_file_bytes:,})"})
+                continue
+            if rel in got:
+                # First complete emission of a path wins within a reply too.
+                continue
+            got[rel] = f["content"]
+        # Truncation guard, scoped precisely. A record only reaches `got` after
+        # decoding as a COMPLETE JSON object; the parser drops an incomplete
+        # (mid-cut) object. In a normally-streamed reply a complete JSON object
+        # therefore means a complete FILE — the model emitted the closing brace,
+        # which it cannot do if the stream was cut mid-object — so length /
+        # content_filter / None / unknown finishes all COMMIT their complete
+        # records. The ONE exception is a SALVAGED-PARTIAL reply: complete()
+        # reassembled a best-effort draft from a stalled/cut stream, whose last
+        # record may be a file the model was mid-writing that merely closed as
+        # valid JSON. Only then drop the last accepted file (it requeues).
+        # (Dropping on every non-clean finish false-fails deliverable builds — a
+        # large single file that fills the output budget would requeue at the same
+        # budget forever — so it is deliberately NOT done here.)
+        if got and isinstance(body, dict) and body.get("salvaged_partial"):
+            got.pop(next(reversed(got)))
+        # A path delivered in-bounds this reply must not ALSO remain reported as
+        # a failure from an earlier duplicate occurrence in the same reply (the
+        # oversize check runs before first-wins dedup, so an oversize duplicate
+        # could have recorded a `failed` entry for a path we then accepted).
+        if failed and got:
+            failed[:] = [fe for fe in failed if fe.get("path") not in got]
         for rel, body_text in got.items():
             done[rel] = {"content": body_text,
                          "sha256": hashlib.sha256(body_text.encode()).hexdigest()}
@@ -10512,17 +10705,20 @@ def cmd_build(args, api_key, api_url, conf):
                     # so re-running a finished build exits 0, not 2.
                     if os.path.isfile(dest) and not os.path.islink(dest):
                         try:
-                            # newline="" so CRLF/CR content round-trips byte-
-                            # faithfully — universal-newline translation would
-                            # otherwise defeat the sha compare and a completed
-                            # CRLF build would never read back as "unchanged".
-                            with open(dest, encoding="utf-8",
-                                      errors="replace", newline="") as fh:
-                                cur = fh.read()
+                            # Read RAW BYTES and hash them directly against the
+                            # desired content's byte hash (rec["sha256"] ==
+                            # sha256(content.encode())). A decode-then-reencode
+                            # compare (errors="replace") could FALSELY match an
+                            # existing invalid-UTF-8 file to a replacement-char
+                            # content and report "unchanged" while leaving the
+                            # wrong bytes on disk. Raw bytes also round-trip CRLF
+                            # faithfully, so this stays byte-exact.
+                            with open(dest, "rb") as fh:
+                                cur_bytes = fh.read()
                         except OSError:
-                            cur = None
-                        if cur is not None and hashlib.sha256(
-                                cur.encode()).hexdigest() == rec["sha256"]:
+                            cur_bytes = None
+                        if cur_bytes is not None and hashlib.sha256(
+                                cur_bytes).hexdigest() == rec["sha256"]:
                             actions[rel] = "unchanged"
                             continue
                     if not args.force:
