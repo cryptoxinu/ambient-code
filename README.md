@@ -55,6 +55,15 @@ lands on the ~10-40x cheaper lane. `ambient build` plans a file-set, generates i
 and writes only inside `--dir` after your confirmation. It **never executes
 anything**.
 
+Big builds are **truncation-safe**. `ambient build` streams one JSON record per
+file, so a cut-off response never loses finished work — for instance when a
+reasoning model spends its output budget before the batch is done. Files that came
+through complete are kept; anything unfinished (and, to be safe, the one file
+bordering the cut) is simply re-requested in smaller batches on the next pass. You
+keep the model you chose — a large set just takes more passes. The only case that
+still wants a bigger-output model or a raised budget is a *single* file too big to
+emit in one response, which is reported after two attempts rather than dropped.
+
 **3. Digest cheap, reason expensive**
 
 ```bash
