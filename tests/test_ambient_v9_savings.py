@@ -168,10 +168,14 @@ class TestSavingsNote(unittest.TestCase):
     """The stderr receipt suffix — the honesty rules live here."""
 
     def note(self, model, usage, catalog=None):
-        return amb.savings_note(
-            model, usage,
-            catalog=fake_catalog() if catalog is None else catalog,
-            conf={"AMBIENT_REFERENCE_PRICE": "3/15"})
+        # Savings receipts are opt-in (default OFF); this suite exercises the ON
+        # path, so the conf must enable it. Clear any inherited AMBIENT_SAVINGS
+        # so the conf value — not a polluted env — decides.
+        with env_var("AMBIENT_SAVINGS", None):
+            return amb.savings_note(
+                model, usage,
+                catalog=fake_catalog() if catalog is None else catalog,
+                conf={"AMBIENT_SAVINGS": "on", "AMBIENT_REFERENCE_PRICE": "3/15"})
 
     def test_cost_frontier_and_floored_saved_pct(self):
         with env_var("AMBIENT_REFERENCE_PRICE", None):
@@ -218,8 +222,11 @@ class TestSavingsNote(unittest.TestCase):
     def test_receipt_line_carries_the_note(self):
         args = argparse.Namespace(allow_partial=False)
         err = io.StringIO()
-        with patched(amb, _PRICING_CATALOG=fake_catalog(),
-                     _REF_CACHE=REF), \
+        # render_result resolves savings from config/env (it takes no conf),
+        # so the opt-in has to come from the environment here.
+        with env_var("AMBIENT_SAVINGS", "on"), \
+                patched(amb, _PRICING_CATALOG=fake_catalog(),
+                        _REF_CACHE=REF), \
                 contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(err):
             amb.render_result(
@@ -292,8 +299,11 @@ def usage_args(**kw):
 
 
 @contextlib.contextmanager
-def usage_env(records, catalog=None, offline=False):
-    """cmd_usage sandbox: seeded tempdir ledger, no network, no real config."""
+def usage_env(records, catalog=None, offline=False, savings=True):
+    """cmd_usage sandbox: seeded tempdir ledger, no network, no real config.
+    Savings is opt-in (default OFF in the tool), so this sandbox forces
+    AMBIENT_SAVINGS on for the savings-column tests; pass savings=False to
+    assert the default-off behavior."""
     d = tempfile.mkdtemp()
     up = os.path.join(d, "usage.jsonl")
     with open(up, "w", encoding="utf-8") as fh:
@@ -306,6 +316,7 @@ def usage_env(records, catalog=None, offline=False):
         return catalog if catalog is not None else fake_catalog()
 
     with env_var("AMBIENT_REFERENCE_PRICE", None), \
+            env_var("AMBIENT_SAVINGS", "on" if savings else None), \
             patched(amb, USAGE_PATH=up, read_config_file=lambda: {},
                     resolve_api_url=lambda conf: "https://api.ambient.xyz",
                     fetch_models=fetch, _REF_CACHE=None):
@@ -489,6 +500,77 @@ class TestUsageSavings(unittest.TestCase):
         self.assertTrue(data["all_priced"])
         # old record priced online → a real relative saving, no dollar fields
         self.assertIsNotNone(data["models"][0]["saved_pct"])
+
+
+class TestSavingsIsOptIn(unittest.TestCase):
+    """The vs-frontier saving compares real spend against a list price WE chose,
+    so it reads as a pitch and is OFF by default; it must stay silent until the
+    user opts in. Every case pins BOTH the default (off) and the opt-in (on) for
+    the SAME inputs, so a regression that flips the default cannot hide behind an
+    input that happens to produce no saving."""
+
+    FULLY_PRICED = {"prompt_tokens": 100_000, "completion_tokens": 10_000}
+
+    def test_savings_note_silent_until_opted_in(self):
+        # Identical fully-priced call that WOULD report a saving: silent by
+        # default, "cheaper" once opted in.
+        with env_var("AMBIENT_SAVINGS", None), \
+                env_var("AMBIENT_REFERENCE_PRICE", None):
+            off = amb.savings_note("cheap/model", self.FULLY_PRICED,
+                                   catalog=fake_catalog(), conf={})
+            on = amb.savings_note("cheap/model", self.FULLY_PRICED,
+                                  catalog=fake_catalog(),
+                                  conf={"AMBIENT_SAVINGS": "on"})
+        self.assertEqual(off, "")
+        self.assertIn("cheaper", on)
+
+    def test_savings_note_by_served_silent_until_opted_in(self):
+        by_model = {"cheap/model": self.FULLY_PRICED}
+        with env_var("AMBIENT_SAVINGS", None), \
+                env_var("AMBIENT_REFERENCE_PRICE", None):
+            off = amb.savings_note_by_served(by_model, catalog=fake_catalog(),
+                                             conf={})
+            on = amb.savings_note_by_served(by_model, catalog=fake_catalog(),
+                                            conf={"AMBIENT_SAVINGS": "on"})
+        self.assertEqual(off, "")
+        self.assertIn("cheaper", on)
+
+    def test_usage_text_has_no_comparison_when_off(self):
+        now = int(time.time())
+        records = [{"ts": now, "model": "cheap/model",
+                    "in": 100_000, "out": 10_000,
+                    "cost": 0.028, "ref": [3.0, 15.0]}]
+        with usage_env(records, offline=True, savings=False):
+            text = run_usage(usage_args())
+        # No relative-saving language at all, and the total line is plain.
+        self.assertNotIn("cheaper", text)
+        self.assertNotIn("costlier", text)
+        self.assertNotIn("%", text)
+        total = next(ln for ln in text.splitlines()
+                     if ln.startswith("Overall"))
+        self.assertEqual(total, "Overall usage summary")
+
+    def test_usage_json_savings_flag_tracks_opt_in(self):
+        now = int(time.time())
+        # Ref-less record: approx_ref WOULD count it (1) when savings is on, so
+        # 0-when-off proves the field is gated, not merely absent by input.
+        records = [{"ts": now, "model": "cheap/model",
+                    "in": 100_000, "out": 10_000, "cost": 0.028}]
+        with usage_env(records, offline=True, savings=False):
+            off = json.loads(run_usage(usage_args(json=True)))
+        with usage_env(records, offline=True, savings=True):
+            on = json.loads(run_usage(usage_args(json=True)))
+        self.assertIs(off["savings"], False)
+        self.assertIsNone(off["saved_pct"])
+        self.assertEqual(off["approx_ref_records"], 0)
+        self.assertIs(on["savings"], True)
+        self.assertIsNotNone(on["saved_pct"])   # fully-priced ledger
+        self.assertEqual(on["approx_ref_records"], 1)
+
+    def test_config_settings_lists_savings_off_by_default(self):
+        by_name = {s["name"]: s for s in amb.CONFIG_SETTINGS}
+        self.assertIn("savings", by_name)
+        self.assertEqual(by_name["savings"]["default"], "off")
 
 
 if __name__ == "__main__":

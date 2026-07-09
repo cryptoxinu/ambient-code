@@ -2,6 +2,24 @@
 
 All notable changes to ambient-code. Format loosely follows Keep a Changelog.
 
+## 1.3.1 — 2026-07-09
+
+### Changed
+- The vs-frontier savings comparison on run receipts and in `ambient usage` is now
+  opt-in and off by default. Turn it on with `ambient settings set savings on`;
+  otherwise `ambient usage` reports calls and tokens per model with no savings figure.
+- Setup prints `Verifying…` while it checks the key.
+
+### Added
+- `ambient settings` — a keyless, discoverable alias of `ambient config` that lists
+  every knob, its current value, and the exact command to change it.
+
+### Fixed
+- `ambient build` now prints its planning and generation phases even when output is
+  not a TTY, so long builds show progress instead of appearing to hang.
+- `ambient link` and `ambient link --remove` now recognize marketplace installs, where
+  the launcher lives under the marketplace directory rather than a repo checkout.
+
 ## 1.3.0 — 2026-07-08
 
 A single settings home so users never edit environment variables or the config

@@ -13,6 +13,12 @@
   the --json and prose paths.
 - LOW: cmd_code's --best-of 0→0.7 temperature bump applies to the
   GENERATION samples only, not the billed distillation passes.
+
+The "~N% cheaper / costlier than a frontier model" receipt tail is opt-in and
+OFF by default, so the mixed-served honesty tests enable it (AMBIENT_SAVINGS=on)
+to render the comparison they assert on — the over-stating-a-saving hazard only
+exists once that tail is shown. The JSON per-served-model split is unconditional
+and needs no opt-in.
 """
 
 import argparse
@@ -69,6 +75,24 @@ def chdir(path):
         yield
     finally:
         os.chdir(prev)
+
+
+@contextlib.contextmanager
+def env_var(name, value):
+    """Set/clear an env var for the duration of a call — the saving receipt is
+    gated on AMBIENT_SAVINGS, which the honest-pricing tests opt into."""
+    old = os.environ.get(name)
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old
 
 
 def fake_catalog():
@@ -189,8 +213,10 @@ class BestOfMixedServedPricingTests(unittest.TestCase):
         # Pricing the 4000-token aggregate at the selected (cheap) sample's
         # model would fabricate "saved 94%".
         rec = ServedRecorder(served=("cheap/model", "pricey/model"))
-        _out, err, _g = run_ask(ask_args(best_of=2, parallel=1), rec,
-                                self.cache)
+        # Opt in to the saving tail so the mixed-served pricing is rendered.
+        with env_var("AMBIENT_SAVINGS", "on"):
+            _out, err, _g = run_ask(ask_args(best_of=2, parallel=1), rec,
+                                    self.cache)
         self.assertEqual(len(rec.calls), 2)
         receipt = [ln for ln in err.splitlines() if "tokens" in ln]
         self.assertTrue(receipt, f"no receipt line in stderr: {err!r}")
@@ -213,8 +239,10 @@ class BestOfMixedServedPricingTests(unittest.TestCase):
 
     def test_single_served_receipt_still_claims_the_true_saving(self):
         rec = ServedRecorder(served=("cheap/model",))
-        _out, err, _g = run_ask(ask_args(best_of=2, parallel=1), rec,
-                                self.cache)
+        # Opt in to the saving tail so the honest single-served claim shows.
+        with env_var("AMBIENT_SAVINGS", "on"):
+            _out, err, _g = run_ask(ask_args(best_of=2, parallel=1), rec,
+                                    self.cache)
         receipt = [ln for ln in err.splitlines() if "tokens" in ln]
         self.assertTrue(receipt)
         self.assertIn("cheaper", receipt[-1])        # honest claim survives

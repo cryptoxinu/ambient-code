@@ -302,7 +302,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.addCleanup(setattr, amb, "_CAP_CACHE", None)
 
     def test_multifile_jsonl_build_byte_exact(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         gen = _rec("a.py", "print('a')\n") + "\n" + _rec("b.py", "print('b')\n")
         fake, _st = _staged(_plan("a.py", "b.py"), [(gen, "stop")])
         env, files = _run(d, fake)
@@ -311,7 +312,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(files.get("b.py"), "print('b')\n", files)
 
     def test_truncation_requeues_and_completes(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # gen1: a complete, b cut. The conservative guard also drops the last
         # ACCEPTED file, so the truncated batch requeues (splitting into per-file
         # retries); every retry serves complete records. Never a partial; always
@@ -325,7 +327,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(files.get("b.py"), "BBB\n", files)
 
     def test_wrapper_fallback_from_noncompliant_model(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         gen = json.dumps({"files": [{"path": "a.py", "content": "A\n"}]})
         fake, _st = _staged(_plan("a.py"), [(gen, "stop")])
         env, files = _run(d, fake)
@@ -333,7 +336,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(files.get("a.py"), "A\n", files)
 
     def test_complete_records_commit_under_length_stop(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # both records decoded as COMPLETE JSON objects; a length stop just means
         # the model was cut BEFORE the next file. Complete records are complete
         # files (the model emitted the closing brace) — commit both, don't drop a
@@ -347,7 +351,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(st["calls"], 2)                          # no needless requeue
 
     def test_single_complete_file_filling_budget_is_not_dropped(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # a single complete file whose reply ends on finish_reason=length (it
         # filled the budget) must COMMIT — the old drop-on-non-clean guard would
         # requeue it at the same budget forever and false-fail a deliverable file.
@@ -358,7 +363,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(st["calls"], 2)
 
     def test_requeue_restart_does_not_overwrite_committed_file(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # gen1: a, b complete + c cut. a and b (complete records) COMMIT; only c
         # (cut by the parser) requeues. gen2 RESTARTS, re-emitting a AND b with
         # WRONG content — both are already done and not in this call's want-set,
@@ -374,7 +380,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(files.get("c.py"), "GOOD_C\n", files)   # cut → requeued
 
     def test_within_reply_restart_first_content_wins(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # model emits a.py correct, then RESTARTS and re-emits a.py wrong in the
         # same reply. First-wins must keep the correct (in-order) content.
         gen = _rec("a.py", "CORRECT\n") + "\n" + _rec("a.py", "WRONG\n")
@@ -383,7 +390,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(files.get("a.py"), "CORRECT\n", files)
 
     def test_content_filter_stop_commits_complete_records(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # content_filter (or any non-salvaged finish): complete records are still
         # complete files → commit both. No drop.
         gen = _rec("a.py", "AAA\n") + "\n" + _rec("b.py", "BBB\n")
@@ -395,7 +403,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(st["calls"], 2)
 
     def test_plan_phase_rejects_reasoning_draft_plan(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # a reasoning-draft plan reply (reasoning_draft=True) containing a
         # {"plan":[...]} must NOT become the build contract — the plan ladder
         # retries and the REAL plan (a.py) wins; evil.py is never built.
@@ -416,7 +425,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertNotIn("evil.py", files, files)
 
     def test_plan_phase_rejects_length_truncated_plan(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # a plan reply that PARSES but ended on finish_reason=length may be a
         # truncated (incomplete) contract; the plan has no per-file continuation,
         # so reject it and retry. The clean plan (a.py,b.py) wins; partial.py is
@@ -440,7 +450,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertNotIn("partial.py", files, files)
 
     def test_plan_phase_rejects_content_filter_plan(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # allow-list: a plan that PARSES but ended on content_filter (not a clean
         # stop) is rejected — no non-stop finish becomes the contract. Retry wins.
         state = {"calls": 0}
@@ -460,7 +471,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertNotIn("blocked.py", files, files)
 
     def test_apply_overwrites_invalid_utf8_file_byte_exact(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # a pre-existing file with INVALID UTF-8 bytes and desired content = the
         # replacement char: a lossy decode-compare would falsely match and report
         # "unchanged", leaving the wrong bytes. The raw-byte compare must detect
@@ -489,7 +501,8 @@ class TestJsonlBuild(unittest.TestCase):
             self.assertEqual(fh.read(), "�".encode("utf-8"))   # not b"\xff"
 
     def test_reasoning_draft_salvage_commits_no_records(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # complete() returned the model's REASONING as a draft (reasoning_draft=True)
         # because no final answer came. Any {"path","content"} the model *reasoned
         # about* is NOT a real file — commit nothing; the retry delivers the real
@@ -513,7 +526,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(files.get("b.py"), "REAL_B\n", files)
 
     def test_salvaged_partial_reply_drops_its_last_record(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # a SALVAGED-PARTIAL reply (complete() reassembled a best-effort draft
         # from a stalled/cut stream) is the ONE case where its last record may be
         # a file the model was mid-writing — drop it (requeue). a.py commits.
@@ -534,7 +548,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(state["calls"], 3)
 
     def test_cut_wrapper_single_file_requeues_and_delivers_safely(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # legacy wrapper cut at its OUTER brace: last-fail resets on the inner a,
         # so a is conservatively drop-lasted + requeued (safe; rarely wasteful).
         # The requeue delivers a complete a — never a partial, never a hard fail.
@@ -548,7 +563,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(st["calls"], 3)                        # plan + gen + requeue
 
     def test_leading_junk_requeues_and_completes_without_false_records(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # a leading malformed object makes the parser STOP (no digging), so the
         # whole reply salvages nothing and requeues — never a mis-salvaged record.
         # The retry serves clean records and the build completes correctly.
@@ -561,7 +577,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertEqual(files.get("b.py"), "BBB\n", files)
 
     def test_lone_surrogate_content_fails_record_without_crashing(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # valid JSON, but content is a lone surrogate that cannot UTF-8 encode.
         gen = '{"path":"a.py","content":"\\ud800"}'
         fake, _st = _staged(_plan("a.py"), [(gen, "stop")] * 5)
@@ -570,7 +587,8 @@ class TestJsonlBuild(unittest.TestCase):
         self.assertNotIn("a.py", files)
 
     def test_single_oversized_file_always_truncates_fails_safe(self):
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         # every reply is a cut record for the one file → never completes.
         cut = '{"path":"big.py","content":"xxxxxxxx'
         fake, _st = _staged(_plan("big.py"), [(cut, "length")] * 40)

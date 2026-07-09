@@ -3,11 +3,10 @@
 > **Community integration — not affiliated with or endorsed by Ambient.** An
 > independent, open-source (MIT) plugin that talks to Ambient's public API.
 
-Give Claude Code a second brain — at a fraction of the price. This plugin connects
-Claude to [Ambient](https://ambient.xyz), the decentralized AI inference network
-which serves open-source models (Kimi, GLM, GPT-OSS, Qwen, Gemma…) on demand
-behind one OpenAI-compatible API, paid per token — typically **10-40x
-cheaper** than frontier models.
+Give Claude Code a second brain. This plugin connects Claude to
+[Ambient](https://ambient.xyz), the decentralized AI inference network which serves
+open-source models (Kimi, GLM, GPT-OSS, Qwen, Gemma…) on demand behind one
+OpenAI-compatible API, paid per token.
 
 **You stay in control the whole time**: you pick the model, you decide when Ambient
 is used, and Claude reviews everything Ambient produces before it lands.
@@ -50,8 +49,8 @@ ambient build "FastAPI /users CRUD + pytest suite per the brief" --dir src/ --ap
 # Claude reviews the manifest and every file, runs the tests, integrates.
 ```
 
-Claude's judgment on every line, Kimi's price on every token — the bulk writing
-lands on the ~10-40x cheaper lane. `ambient build` plans a file-set, generates it,
+Claude's judgment on every line, Kimi doing the token-heavy writing. `ambient build`
+plans a file-set, generates it,
 and writes only inside `--dir` after your confirmation. It **never executes
 anything**.
 
@@ -102,13 +101,14 @@ ambient audit [files]    adversarial code review · git diff | ambient audit · 
                          · --install-hook installs a pre-commit/pre-push audit gate
 ambient map "p" [files]  bulk lane: ONE prompt run independently over MANY items
                          (files, or one item per stdin line; --jsonl objects)
-ambient chat             interactive REPL — streamed replies, per-turn cost receipt,
+ambient chat             interactive REPL — streamed replies, per-turn token receipt,
                          /model /clear /help /exit
 ambient code "task"      single-file code generation (-f context.py) · --best-of K
 ambient build "task"     plan + generate a whole file-set (manifest-first, --apply writes)
 ambient agent            interactive agentic terminal on Ambient (opencode)
 ambient doctor           pinpoints key / funds / model-availability / network trouble
-ambient usage            local spend summary (--days N)
+ambient usage            per-model calls and tokens (--days N)
+ambient settings         every setting, its value, and how to change it
 ambient mode on|off      delegate mode for Claude Code sessions
 ambient link             put a stable `ambient` launcher on your PATH
 ambient cache …          inspect / clear the local chunk cache
@@ -133,30 +133,26 @@ holder is never expired — and, where liveness is unknowable (Windows), by
 Set `AMBIENT_FLEET_BUDGET=off` to restore per-invocation-only gating; the
 mechanism itself is fail-open and never blocks a call on its own failure.
 
-**Savings receipts** — every run now ends with what it actually cost and what
-the same tokens would have cost at a frontier price:
+**Run receipts** — every run ends with the model and the tokens it used:
 
 ```
-[ambient moonshotai/kimi-k2.7-code | in=48210 out=1834 tokens — ~97% cheaper than a frontier model]
+[ambient moonshotai/kimi-k2.7-code | in=48210 out=1834 tokens]
 ```
 
-The frontier comparison uses `AMBIENT_REFERENCE_PRICE` (env or config):
-either an `in/out` per-million-token pair or a single blended figure. The
-default is a representative frontier-model rate
-(approximation; set it to whatever baseline you actually compare against).
-The receipt never over-states savings: if a model's pricing is missing from
-the catalog the cost is shown at assumed worst-case rates with **no** savings
-claim, estimated token counts are labeled `(est.)`, the saved-% is rounded
-down, and a model pricier than the reference reads "costlier", not a fake
-saving. Each metering record also stores the run cost and the reference
-price in force at call time, so `ambient usage` reports historical savings
-per model and in total (relative `%`; `--json` adds `reference_price`,
-`frontier_cost`, `saved`) accurately even if you change the reference later;
-records that predate stored references fall back to the current one with an
-explicit "(approx)" note. One honest gap: `ambient agent` hands off to an
-external opencode process whose spend is billed by Ambient but not visible
-to local metering — `ambient usage` discloses this instead of pretending its
-totals are complete.
+**Savings receipts are opt-in and off by default.** A `~N% cheaper than a frontier
+model` line measures real spend against a list price the tool picked on your behalf,
+so nothing surfaces it unless you ask: `ambient settings set savings on` (or
+`AMBIENT_SAVINGS=on`). `AMBIENT_REFERENCE_PRICE` — an `in/out` per-million-token pair
+or one blended figure — then sets the baseline it is measured against.
+
+With savings on the figures stay conservative: a model whose catalog pricing is
+missing shows an assumed worst-case cost with **no** savings claim, estimated token
+counts are labeled `(est.)`, the saved-% is rounded down, and a model pricier than the
+reference reads "costlier" rather than a fake saving. With savings off, `ambient usage`
+reports calls and tokens per model and nothing it cannot measure. One honest gap:
+`ambient agent` hands off to an external opencode process whose spend is billed by
+Ambient but not visible to local metering — `ambient usage` discloses this instead of
+pretending its totals are complete.
 
 **Self-calibrating token math (smarter with use)** — cost estimates and
 per-model budgets convert characters to tokens. Out of the box that uses a

@@ -28,6 +28,8 @@ Commands:
                        frontier reference (never a plan-specific dollar figure)
   mode      [on|off]   Delegate mode toggle (no arg = status). When ON, Claude
                        routes code writing through Ambient for the session
+  settings  [set|unset] Every setting, its value, and how to change it
+                       (same as `ambient config`)
   link                 Put a stable `ambient` launcher on your PATH
   cache     [action]   Inspect / clear the local chunk cache
   trust-url [url]      Explicitly trust a non-Ambient endpoint (self-hosted)
@@ -90,7 +92,7 @@ try:
 except ImportError:
     fcntl = None
 
-__version__ = "1.3.0"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
+__version__ = "1.3.1"  # kept in sync with plugin.json + pyproject.toml (test- and CI-asserted)
 CONFIG_PATH = os.path.expanduser("~/.config/ambient/env")
 USAGE_PATH = os.path.expanduser("~/.config/ambient/usage.jsonl")
 KEYCHAIN_SERVICE = "ambient.xyz"
@@ -200,6 +202,22 @@ def progress_display_enabled():
     always works. NEVER affects the hard-wall / no-progress / stall guards."""
     v = _PROGRESS_DISPLAY["resolved"]
     return _progress_from_env_or_conf(None) if v is None else v
+
+
+def build_phase(msg):
+    """One greppable milestone line per build phase, on stderr.
+
+    The generic heartbeat only reports `…thinking (N chars, Ns elapsed)`. During a
+    reasoning model's planning pass no content exists yet, so for minutes that is
+    the ONLY output and a working build is indistinguishable from a hang. Phase
+    lines are deliberately NOT tty-gated: the CLI is usually driven from a tool
+    harness with no tty, which is exactly where progress was invisible.
+    """
+    if not progress_display_enabled():
+        return
+    if _stderr_is_tty():
+        sys.stderr.write("\r\033[K")   # close an in-place heartbeat first
+    print(f"ambient: build — {msg}", file=sys.stderr, flush=True)
 
 
 # No hard "no": inputs above a model's single-shot budget are automatically
@@ -1029,8 +1047,8 @@ def print_welcome_panel(models, where, probe_detail, conf, funds_issue=False):
     print(f"Key verified — {probe_detail}.")
     print(f"Stored in: {where}")
     print(net)
-    print("\nWelcome to Ambient — a second pair of eyes, ~10-40x cheaper than "
-          "frontier models.\n")
+    print("\nWelcome to Ambient — a second pair of eyes, on open-source "
+          "models you pay for per token.\n")
     if funds_issue:
         print(f"  NOTE: your account is OUT OF FUNDS — completions will fail until\n"
               f"  you top up at {KEY_CONSOLE_URL}, then run: ambient doctor\n")
@@ -1658,14 +1676,29 @@ def reference_cost(usage, ref):
     return (tin * ref[0] + tout * ref[1]) / 1e6
 
 
+def _savings_enabled(conf=None):
+    """Savings receipts are OFF by default. A '~N% cheaper than a frontier model'
+    line measures real spend against a list price WE picked on the user's behalf,
+    so it reads as a sales pitch rather than a measurement. Users who want the
+    comparison opt in — `ambient settings set savings on` (or AMBIENT_SAVINGS=on) —
+    and then `reference-price` sets the baseline it is measured against."""
+    if conf is None:
+        conf = read_config_file()
+    raw = os.environ.get("AMBIENT_SAVINGS") or conf.get("AMBIENT_SAVINGS") or ""
+    return str(raw).strip().lower() in ("1", "on", "true")
+
+
 def savings_note(model, usage, catalog=None, conf=None):
-    """Receipt suffix: ' — ~97% cheaper than a frontier model (est.)'. Reports
+    """Receipt suffix: ' — ~97% cheaper than a frontier model (est.)'. Empty
+    unless the user opted in (see _savings_enabled). Reports
     only the RELATIVE saving vs a frontier reference — never a dollar figure,
     since actual billing is plan-dependent (a subscription or pay-as-you-go
     API). Honesty rules (never over-state): assumed/absent pricing OMITS any
     claim; saved-% is floored; at-or-above the reference reads 'costlier';
     estimated token counts carry '(est.)'; zero tokens → no note. Never raises."""
     try:
+        if not _savings_enabled(conf):
+            return ""
         tin = _as_pos_int(usage.get("prompt_tokens"), 0)
         tout = _as_pos_int(usage.get("completion_tokens"), 0)
         if tin + tout == 0:
@@ -1697,8 +1730,10 @@ def savings_note_by_served(usage_by_model, catalog=None, conf=None):
     reference prices the total. Same honesty rules as savings_note — a
     single serving model delegates to it outright, assumed pricing claims
     no saving, saved-% is floored, negative savings read 'costlier', and
-    it never raises."""
+    it never raises. Empty unless the user opted in (see _savings_enabled)."""
     try:
+        if not _savings_enabled(conf):
+            return ""
         if not usage_by_model:
             return ""
         if len(usage_by_model) == 1:
@@ -10271,6 +10306,7 @@ def cmd_build(args, api_key, api_url, conf):
         # generation — reserving one call would under-count the retries.
         cost_gate(catalog, model, len(task) + len(context), len(attempts),
                   args, conf)
+        build_phase(f"planning with {model}…")
         for attempt, attempt_rf in enumerate(attempts, 1):
             pa, extra = _ns_with(
                 attempt_rf, "" if (attempt_rf and attempt_rf.get("type") == "json_schema")
@@ -10376,6 +10412,7 @@ def cmd_build(args, api_key, api_url, conf):
         _save_build_state(root, state)
 
     plan = state["plan"]
+    build_phase(f"plan ready — {len(plan)} file(s)")
     plan_paths = {p["path"] for p in plan}   # the reviewed plan is a CONTRACT
     advisory = state.get("advisory_steps") or []
     if getattr(args, "plan_only", False):
@@ -10477,6 +10514,9 @@ def cmd_build(args, api_key, api_url, conf):
                                              "resume where this stopped"})
             continue
         want = [p["path"] for p in batch]
+        _shown = ", ".join(want[:3]) + ("…" if len(want) > 3 else "")
+        build_phase(f"generating {len(done) + 1}-{len(done) + len(want)} "
+                    f"of {len(plan)}: {_shown}")
 
         def _mk_user(overview, already_blk, ctx):
             u = (f"TASK: {task}\n\nFULL PLAN (for cross-file consistency):\n"
@@ -10920,6 +10960,11 @@ CONFIG_SETTINGS = (
     {"name": "spend-cap", "env": "AMBIENT_MAX_SPEND", "default": "5", "how": "<number>",
      "validate": _config_norm_spend,
      "current": lambda conf: _config_fmt_num(_ceiling(conf)[0])},
+    # OFF by default: see _savings_enabled. `reference-price` only means
+    # anything once `savings` is on, so it is listed after it.
+    {"name": "savings", "env": "AMBIENT_SAVINGS", "default": "off", "how": "on|off",
+     "validate": _config_norm_bool,
+     "current": lambda conf: "on" if _savings_enabled(conf) else "off"},
     {"name": "reference-price", "env": "AMBIENT_REFERENCE_PRICE", "default": "3/15",
      "how": "<in/out>", "validate": _config_norm_price,
      "current": lambda conf: "/".join(
@@ -10982,7 +11027,7 @@ def _config_print_status():
         val = s["current"](conf)
         if os.environ.get(s["env"]) is not None:
             val += "  (env override)"
-        rows.append((s["name"], val, f"ambient config set {s['name']} {s['how']}"))
+        rows.append((s["name"], val, f"ambient settings set {s['name']} {s['how']}"))
     allrows = owned + rows
     lw = max(len(r[0]) for r in allrows) + 2
     vw = max(len(str(r[1])) for r in allrows) + 2
@@ -10994,7 +11039,7 @@ def _config_print_status():
     emit(owned)
     print()
     emit(rows)
-    print("\n  reset any knob to its default:  ambient config unset <name>")
+    print("\n  reset any knob to its default:  ambient settings unset <name>")
 
 
 def cmd_config(args):
@@ -11107,9 +11152,7 @@ def _verify_and_store_key(key, conf, use_file):
     (models, probe_detail, where, funds_issue). Exits with a per-category
     diagnosis + support pointer when the key can't be certified."""
     api_url = resolve_api_url(conf)
-    host = urllib.parse.urlsplit(api_url).hostname
-    print(f"Verifying key with {host} (one tiny paid completion)…",
-          file=sys.stderr)
+    print("Verifying…", file=sys.stderr)
     try:
         status, body = api_request(api_url, key, "/v1/models", timeout=30)
         if status != 200:
@@ -11515,18 +11558,23 @@ def cmd_usage(args):
     unmetered_note = ("`ambient agent` spend is billed by Ambient but not "
                       "visible to local metering — these totals cover only "
                       "ambient CLI calls")
+    # The vs-frontier comparison is opt-in (`ambient settings set savings on`).
+    # With it off, `usage` reports only what it can measure: calls and tokens.
+    show_savings = _savings_enabled(conf)
     if getattr(args, "json", False):
         # Relative % savings only — NO dollar figures and NO per-token
         # reference prices (founder policy: billing is plan-dependent).
         overall_pct = (int(grand_saved / grand_frontier * 100)
-                       if grand_frontier > 0 and grand_saved > 0 else None)
+                       if show_savings and grand_frontier > 0 and grand_saved > 0
+                       else None)
         print(json.dumps({
             "schema_version": 1, # contract field
             "days": args.days,
             "models": rows,
             "all_priced": priced_all,
+            "savings": show_savings,   # opt-in; saved_pct is null when off
             "saved_pct": overall_pct,
-            "approx_ref_records": approx_ref,
+            "approx_ref_records": approx_ref if show_savings else 0,
             "est_records": est_records,  # estimated ≠ exact
             "unmetered_lanes": ["agent"],
             "note": unmetered_note,
@@ -11534,38 +11582,38 @@ def cmd_usage(args):
         return
     print(f"Ambient usage, last {args.days} days:")
     for r, raw in zip(rows, raw_rows):
-        if raw is None:
-            tail = "est n/a"
-        elif raw[0] == "partial":
-            tail = "(partial — some records unpriced)"
-        else:
-            _cost, _fcost, saved, pct = raw  # RAW math
-            if pct is not None:
-                tail = f"~{pct}% cheaper than frontier"
-            elif saved < 0:
-                tail = "costlier than frontier"
+        tail = ""
+        if show_savings:
+            if raw is None:
+                tail = "est n/a"
+            elif raw[0] == "partial":
+                tail = "(partial — some records unpriced)"
             else:
-                tail = ""
+                _cost, _fcost, saved, pct = raw  # RAW math
+                if pct is not None:
+                    tail = f"~{pct}% cheaper than frontier"
+                elif saved < 0:
+                    tail = "costlier than frontier"
         if r["est_records"]:
-            tail += f"  [{r['est_records']} est.]"
+            tail += f"  [{r['est_records']} est.]" if tail else f"[{r['est_records']} est.]"
         print(
             f"  {r['model']:42} {r['calls']:4} calls  in={r['in']:>9,}  "
             f"out={r['out']:>9,}  {tail}"
         )
-    if grand_frontier > 0 and grand_saved > 0:
-        pct = int(grand_saved / grand_frontier * 100)
-        total_line = f"Overall: ~{pct}% cheaper than a frontier-equivalent model"
-    elif grand_frontier > 0 and grand_saved < 0:
-        total_line = "Overall: costlier than a frontier-equivalent model"
-    else:
-        total_line = "Overall usage summary"
-    if not priced_all:
-        total_line += " (some models unpriced)"
+    total_line = "Overall usage summary"
+    if show_savings:
+        if grand_frontier > 0 and grand_saved > 0:
+            pct = int(grand_saved / grand_frontier * 100)
+            total_line = f"Overall: ~{pct}% cheaper than a frontier-equivalent model"
+        elif grand_frontier > 0 and grand_saved < 0:
+            total_line = "Overall: costlier than a frontier-equivalent model"
+        if not priced_all:
+            total_line += " (some models unpriced)"
     print(total_line)
     if est_records:
         print(f"note: {est_records} estimated record(s) — token counts "
               "approximated locally (stream sent no usage object), not exact.")
-    if approx_ref:
+    if show_savings and approx_ref:
         print(f"note: {approx_ref} record(s) predate stored reference "
               "pricing — their frontier figures use the current "
               "AMBIENT_REFERENCE_PRICE (approx).")
@@ -11578,19 +11626,39 @@ def _this_script():
 
 
 def _link_is_ours(dest):
-    """True only if `dest` is a launcher symlink WE own — its stored target has
-    an `/ambient-code/` path component (every real install: dev
-    `.../skills/ambient-code/...` or marketplace `.../ambient-code/<ver>/...`).
-    A symlink to a DIFFERENT tool merely named `ambient` returns False, so we
-    never clobber a foreign launcher. readlink reports the stored target of a
-    dangling link too, so the same check covers the post-GC case."""
+    """True only if `dest` is a launcher symlink WE own. Three signals:
+    (1) its stored target carries an `/ambient-code/` path component (dev
+        `.../skills/ambient-code/...`, cache `.../ambient-code/<ver>/...`);
+    (2) it resolves to the CLI running right now — the idempotent re-link case;
+    (3) its target is this install's own `<plugin_root>/bin/ambient`.
+    (1) and (3) read the STORED target, so they still hold for a dangling link
+    (post-GC). (3) exists because a marketplace directory is named after the
+    MARKETPLACE, not the plugin: a `marketplace.json` with `"name": "ambient"`
+    installs to `.../plugins/marketplaces/ambient/`, which has NO
+    `/ambient-code/` component — without it we mistake our own launcher for a
+    foreign tool and refuse both `link` and `link --remove`.
+    A symlink to a DIFFERENT tool merely named `ambient` matches none of the
+    three and returns False, so we never clobber a foreign launcher."""
     if not os.path.islink(dest):
         return False
     try:
         target = os.readlink(dest)
     except OSError:
         return False
-    return "/ambient-code/" in target.replace("\\", "/")
+    if "/ambient-code/" in target.replace("\\", "/"):
+        return True
+    this = _this_script()
+    try:
+        if os.path.realpath(dest) == this:
+            return True
+    except OSError:
+        pass
+    resolved = os.path.abspath(
+        os.path.join(os.path.dirname(dest), target)
+    )
+    return resolved == os.path.join(
+        os.path.dirname(os.path.dirname(this)), "bin", "ambient"
+    )
 
 
 def _shim_is_ours(shim_path):
@@ -12102,6 +12170,19 @@ def _configure_config(sub):
     p.add_argument("value", nargs="?", help="new value (for set)")
 
 
+def _configure_settings(sub):
+    """`settings` is the discoverable name for the same thing `config` does.
+    Nobody looking for a toggle guesses `config`. Both dispatch to cmd_config."""
+    p = sub.add_parser(
+        "settings",
+        help="view or change your Ambient settings (same as `ambient config`)")
+    p.add_argument("verb", nargs="?", choices=["status", "set", "unset"],
+                   default="status",
+                   help="status (default) · set <name> <value> · unset <name>")
+    p.add_argument("name", nargs="?", help="setting name (see: ambient settings)")
+    p.add_argument("value", nargs="?", help="new value (for set)")
+
+
 def _configure_doctor(sub):
     sub.add_parser("doctor", help="diagnose key/funds/model/network/service issues")
 
@@ -12415,6 +12496,8 @@ COMMANDS = (
      "configure": _configure_mode, "handler": "cmd_mode"},
     {"name": "config", "needs_key": False,
      "configure": _configure_config, "handler": "cmd_config"},
+    {"name": "settings", "needs_key": False,
+     "configure": _configure_settings, "handler": "cmd_config"},
     {"name": "doctor", "needs_key": False,
      "configure": _configure_doctor, "handler": "cmd_doctor"},
     {"name": "use", "needs_key": True,
@@ -12490,7 +12573,7 @@ def main():
     # can echo the token back in an 'unrecognized arguments' error. `config` is
     # covered too — none of its real values are secret-shaped, so a key-looking
     # token there is a mistake to refuse, not to echo (Codex 2026-07-08).
-    if len(sys.argv) > 2 and sys.argv[1] in ("setup", "config"):
+    if len(sys.argv) > 2 and sys.argv[1] in ("setup", "config", "settings"):
         _keyname = ("key", "api-key", "apikey", "ambient-api-key")
         for tok in sys.argv[2:]:
             # An explicit key ASSIGNMENT (`key=…`, `--api-key=…`) is never a valid

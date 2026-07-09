@@ -16,6 +16,13 @@ violation (over-stated saving or under-counted spend):
 - locally-estimated usage never landed in body["usage"], so ask/code
   --json could emit usage:null while the ledger had an estimated record.
 
+The savings receipt (the "~N% cheaper than a frontier model" tail) is now
+OPT-IN and OFF by default, so the honesty tests that inspect that tail enable
+it explicitly (AMBIENT_SAVINGS=on) — the properties they guard (served-model
+pricing, sub-micro spend never reading as ~100% saved) only exist once the
+comparison is shown. One test pins the default: OFF still prints the token
+counts but no comparison tail.
+
 Everything is offline: fake catalogs, tempdir ledgers, patched config/env.
 """
 import argparse
@@ -111,8 +118,11 @@ class TestH1ReceiptPricesServedModel(unittest.TestCase):
         body = {"_served_model": "pricey/model", "finish_reason": "stop",
                 "usage": usage}
         err = io.StringIO()
-        with patched(amb, _PRICING_CATALOG=fake_catalog(), _REF_CACHE=REF,
-                     complete=lambda *a, **k: ("hi", usage, body)), \
+        # The saving tail is opt-in; enable it so the served-model pricing
+        # property is actually rendered and can be asserted.
+        with env_var("AMBIENT_SAVINGS", "on"), \
+                patched(amb, _PRICING_CATALOG=fake_catalog(), _REF_CACHE=REF,
+                        complete=lambda *a, **k: ("hi", usage, body)), \
                 contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(err):
             amb.chat("sk-test-key-x", "https://x", "cheap/model",
@@ -127,8 +137,10 @@ class TestH1ReceiptPricesServedModel(unittest.TestCase):
         body = {"_served_model": "cheap/model", "finish_reason": "stop",
                 "usage": usage}
         err = io.StringIO()
-        with patched(amb, _PRICING_CATALOG=fake_catalog(), _REF_CACHE=REF,
-                     complete=lambda *a, **k: ("hi", usage, body)), \
+        # Opt in to the saving tail so the honest claim is rendered.
+        with env_var("AMBIENT_SAVINGS", "on"), \
+                patched(amb, _PRICING_CATALOG=fake_catalog(), _REF_CACHE=REF,
+                        complete=lambda *a, **k: ("hi", usage, body)), \
                 contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(err):
             amb.chat("sk-test-key-x", "https://x", "cheap/model",
@@ -136,6 +148,33 @@ class TestH1ReceiptPricesServedModel(unittest.TestCase):
         receipt = err.getvalue()
         self.assertIn("cheap/model", receipt)
         self.assertIn("93% cheaper", receipt)
+
+    def test_chat_receipt_off_by_default_has_no_saving_tail(self):
+        """The saving comparison is opt-in: with AMBIENT_SAVINGS unset the
+        receipt still reports the token counts, but carries NO
+        '— cheaper/costlier than a frontier model' tail (which measures spend
+        against a list price we picked, so it reads as a pitch, not a fact)."""
+        usage = {"prompt_tokens": 100, "completion_tokens": 10}
+        body = {"_served_model": "cheap/model", "finish_reason": "stop",
+                "usage": usage}
+        err = io.StringIO()
+        # env cleared AND config pinned empty so the default (off) is
+        # deterministic regardless of the developer's own machine.
+        with env_var("AMBIENT_SAVINGS", None), \
+                patched(amb, _PRICING_CATALOG=fake_catalog(), _REF_CACHE=REF,
+                        read_config_file=lambda: {},
+                        complete=lambda *a, **k: ("hi", usage, body)), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(err):
+            amb.chat("sk-test-key-x", "https://x", "cheap/model",
+                     [{"role": "user", "content": "hi"}], chat_args())
+        receipt = err.getvalue()
+        # token counts still printed, tail closes right after "tokens"
+        self.assertIn("[ambient cheap/model | in=100 out=10 tokens]", receipt)
+        # no comparison tail of any kind
+        self.assertNotIn(" — ", receipt)
+        self.assertNotIn("cheaper", receipt)
+        self.assertNotIn("costlier", receipt)
 
     def test_cmd_ask_receipt_gets_served_model(self):
         """cmd_ask's own render_result call must also pass the SERVED model."""
@@ -220,7 +259,9 @@ class TestH3SubMicroCostsNeverVanish(unittest.TestCase):
         n = 100
         records = [{"ts": now, "model": "cheap/model", "in": 1, "out": 0,
                     "cost": 2e-7, "ref": [3.0, 15.0]} for _ in range(n)]
-        with usage_env(records, offline=True):
+        # The %-saving is opt-in; enable it so the sub-micro aggregation
+        # (never rounding to a fabricated ~100%) is exercised.
+        with env_var("AMBIENT_SAVINGS", "on"), usage_env(records, offline=True):
             out = run_usage(usage_args(json=True))
             text = run_usage(usage_args())
         data = json.loads(out)

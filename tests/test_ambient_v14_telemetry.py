@@ -104,8 +104,9 @@ def rec(model="m-reason", chars=3200, in_tok=1000, **kw):
 # ---------------------------------------------------------------------------
 
 ALL_COMMANDS = {"version", "models", "curate", "setup", "link", "cache",
-                "trust-url", "usage", "mode", "config", "doctor", "use", "ask",
-                "audit", "map", "code", "chat", "build", "agent", "codex"}
+                "trust-url", "usage", "mode", "config", "settings", "doctor",
+                "use", "ask", "audit", "map", "code", "chat", "build", "agent",
+                "codex"}
 KEYED = {"use", "ask", "audit", "map", "code", "chat", "build", "agent"}
 
 
@@ -163,6 +164,9 @@ class TestCommandRegistry(unittest.TestCase):
             ("cache", ["cache"], "cmd_cache"),
             ("curate", ["curate"], "cmd_curate"),
             ("setup", ["setup"], "cmd_setup"),
+            # `settings` is a keyless alias of `config` (same cmd_config handler);
+            # dispatch must never reach load_config for it either.
+            ("settings", ["settings"], "cmd_config"),
         ]
         for name, argv, fn in cases:
             seen = {}

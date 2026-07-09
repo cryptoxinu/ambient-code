@@ -1,6 +1,6 @@
 ---
 name: ambient
-description: Control panel for the Ambient (ambient.xyz) decentralized inference network — pick models, toggle "Ambient codes everything" delegate mode, run second-opinion audits, and build whole file-sets on cheap open-source models. Use for /ambient, "ambient", "use ambient", "use ambient to build/audit X", "ask ambient to do X", "run this on ambient", "have ambient do/audit/build X", "second opinion", "switch ambient model", or delegate-mode sessions. Also use when the user wants to save tokens/cost, delegate bulk code-writing to a cheaper model, bulk-summarize files, or get a pre-commit second opinion.
+description: Control panel for the Ambient (ambient.xyz) decentralized inference network — pick models, toggle "Ambient codes everything" delegate mode, run second-opinion audits, and build whole file-sets on open-source models. Use for /ambient, "ambient", "use ambient", "use ambient to build/audit X", "ask ambient to do X", "run this on ambient", "have ambient do/audit/build X", "second opinion", "switch ambient model", or delegate-mode sessions. Also use when the user wants to delegate bulk code-writing, bulk-summarize files, or get a pre-commit second opinion.
 ---
 
 # Ambient — decentralized second-model lane
@@ -17,21 +17,21 @@ always points at the active install, so never hardcode a path.
 
 | Invocation | What to do |
 |---|---|
-| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else run `ambient models --json` once and show a compact panel: (1) the mental model, one line — "Claude plans, reviews, and integrates; Ambient does the heavy token work (bulk code writing, audits, digests) at ~10-40x lower cost"; (2) delegate-mode state + lane defaults; (3) the headline `Serving now: <models with ready==true && hidden==false>` plus one positive catalog line — "`+N more` catalog models spin up on demand (`ambient models --all` shows everything)". Never enumerate non-serving models in the default panel (see **Plain-language status**). Then an AskUserQuestion action picker: toggle delegate mode / turn on **Ambient Takeover** (Ambient does everything on your tokens — **Ambient Takeover contract** below) / switch model (**Model picking UX** below) / adjust settings (**Settings** below) / audit something / build something / spawn terminal. (`ambient mode` reports `delegate=takeover` when that level is active; the bare `ambient` banner renders it as a `TAKEOVER` badge.) If NOTHING is serving this minute: say "All catalog models are between demand cycles right now — they spin up when called for; check `ambient models` in a few minutes", keep the non-model actions, and never present a model as serving when it isn't. Always end the panel with this visible line: `💡 Tip: just say "use ambient to build/audit <thing>" in plain language and I'll run it for you.` |
+| `/ambient` (bare) | Run `ambient mode`. If `key=MISSING` → **First-run setup** below. Else run `ambient models --json` once and show a compact panel: (1) the mental model, one line — "Claude plans, reviews, and integrates; Ambient does the heavy token work (bulk code writing, audits, digests)" — no price, multiple, or percentage, ever; (2) delegate-mode state + lane defaults; (3) the headline `Serving now: <models with ready==true && hidden==false>` plus one positive catalog line — "`+N more` catalog models spin up on demand (`ambient models --all` shows everything)". Never enumerate non-serving models in the default panel (see **Plain-language status**). **(4) A "What you can do" block — this is the ONLY place the full surface is discoverable, because a picker card holds at most four options.** Print it verbatim as a compact list: `/ambient model` (switch model) · `/ambient settings` (every toggle) · `/ambient audit <target>` · `/ambient build <task>` · `/ambient usage` · `/ambient doctor` · `/ambient takeover` · `/ambient off`. Then one line: `Or just say it: "use ambient to audit this diff" · "have ambient build X".` **Then** an AskUserQuestion picker of EXACTLY these four options, in this fixed order — an AskUserQuestion card accepts at most 4, so nothing else may take a slot: (1) `Nothing — just wanted to get it set up`: a true no-op that leaves delegate mode exactly as it is (on a fresh install that means **off** — never turn delegate on as a side effect of setup); (2) the delegate toggle, worded for the current state — `Turn on delegate mode` when `delegate=off`, `Turn off delegate mode` when `delegate=on`; (3) `Switch model` (**Model picking UX** below); (4) `Open settings` (**Settings** below). Takeover, audit, build, usage and doctor are reachable from the "What you can do" block and from plain language — do NOT let them displace these four. (`ambient mode` reports `delegate=takeover` when that level is active; the bare `ambient` banner renders it as a `TAKEOVER` badge.) If NOTHING is serving this minute: say "All catalog models are between demand cycles right now — they spin up when called for; check `ambient models` in a few minutes", keep the non-model actions, and never present a model as serving when it isn't. |
 | `/ambient on` | `ambient mode on`, announce the delegate contract (below), follow it all session. |
 | `/ambient takeover` | `ambient mode takeover`, announce the **Ambient Takeover contract** (below), then route EVERY substantive turn through Ambient for the rest of the session (Ambient tokens, not Claude's). Show the takeover banner each turn. |
 | `/ambient off` | `ambient mode off`, back to normal (Ambient only on demand). Turns off BOTH delegate and takeover — the single, always-available exit from either mode. |
 | `/ambient model` | Model picking UX below. |
 | `/ambient audit <target>` | `git diff \| ambient audit` or `ambient audit <files> [--focus X] --json`, then verify + report. Whole codebase: `ambient audit --repo <dir> [--focus X] --json` — git-aware walker (`.gitignore` respected; binaries/lockfiles/vendored dirs skipped) that reports files + chars BEFORE spending; under `--json` a one-line `{"status":"plan",…}` object precedes the standard envelope. A repo over the input ceiling is refused unless `--allow-cost`/`--allow-partial` (which audits what fits and reports the rest as an explicit coverage gap). `--parallel`/`--reduce-model`/`--consensus`/the cost gate apply unchanged; a bounded cross-file confirmation pass (ONE extra gated call max) is on by default for `--repo` — `--no-deep` skips it, and under `--consensus` it is always skipped (multi-model corroboration replaces it; `--deep`/`--no-deep` have no effect there). |
 | `/ambient map <prompt> <items>` | Bulk lane: `ambient map "<prompt>" <files> --json` (or pipe one item per line; `--jsonl` for objects). One prompt, applied independently per item, one JSONL envelope per item out. |
-| `/ambient chat` | The user's interactive REPL (`ambient chat` in THEIR terminal — it requires a TTY; scripted use routes to `ambient ask`). Streams replies, prints a per-turn savings receipt (relative % only), `/model` switches models mid-session (explicit + printed), `/clear` resets history, Ctrl-C interrupts only the current turn. Every turn is cost-gated + fleet-reserved. |
+| `/ambient chat` | The user's interactive REPL (`ambient chat` in THEIR terminal — it requires a TTY; scripted use routes to `ambient ask`). Streams replies, prints a per-turn token receipt, `/model` switches models mid-session (explicit + printed), `/clear` resets history, Ctrl-C interrupts only the current turn. Every turn is cost-gated + fleet-reserved. |
 | `/ambient build <task>` | Native build lane: write a precise brief, run `ambient build "<brief>" --dir <target> [-f context] --json --apply --yes`, read the manifest, review every file, run tests yourself. Anything beyond a trivial build → dispatch it in the BACKGROUND and relay progress (see **Long-running dispatch** — never wrap a real build in a Bash timeout). |
 | `/ambient agent` | Interactive opencode TUI for the user (`ambient agent`); headless one-offs via `ambient agent run "task"`. The key enters opencode's process env — never ask the agent to print its environment. |
 | `/ambient curate ...` | User model curation: `ambient curate` (status) / `hide <id\|glob>` / `show <id>` / `only <ids>` / `note <id> "text"` / `reset`. Curation shapes menus + automatic selection only — explicit `-m` always works. |
 | `/ambient setup` | First-run setup below (key rotation: `setup --force`; removal: `setup --remove`). |
 | `/ambient settings` | **Settings** sub-panel below — one place to see your API-key status (and where to update it) and change streaming, model fallback, and other prefs, without touching env vars. |
 | `/ambient doctor` | Run `ambient doctor`, relay the PASS/FAIL table + DIAGNOSIS plainly. |
-| `/ambient usage` | Run `ambient usage`, report calls/tokens AND the relative savings % vs a frontier reference (per model + total, percentage only — never a plan-specific dollar figure). ALWAYS relay its agent-lane disclosure: `ambient agent` spend is billed by Ambient but NOT visible to local metering — never present the totals as complete if the user runs the agent lane. |
+| `/ambient usage` | Run `ambient usage`, report calls and tokens per model. The vs-frontier savings % is OPT-IN and off by default (`ambient settings set savings on`); report it only when the CLI itself prints it, and never volunteer a cost comparison the user did not ask for. ALWAYS relay its agent-lane disclosure: `ambient agent` spend is billed by Ambient but NOT visible to local metering — never present the totals as complete if the user runs the agent lane. |
 
 **Natural-language invocation (no slash needed):** when the user says it in plain
 words, route straight to the matching row above and run it — "use ambient to build
@@ -144,9 +144,9 @@ While `ambient mode` reports `delegate=on` (a SessionStart hook also reminds you
 
 **The division of labor — this is the product.** The user plans and decides with
 Claude; Ambient (default: `moonshotai/kimi-k2.7-code`) does the token-heavy writing;
-Claude reviews and integrates. Ambient inference is ~10-40x cheaper per token than
-frontier models, so every line Kimi writes instead of you is money the user keeps —
-without giving up your judgment.
+Claude reviews and integrates. Every line Kimi writes instead of you is token-heavy
+work the user does not spend Claude's context on — without giving up your judgment.
+Do not quantify this. No prices, no multiples, no percentages.
 
 Per task:
 1. **You write the brief** — file paths, exact requirements, constraints, acceptance
@@ -214,30 +214,53 @@ outage), offer a serving alternative or a short retry, and — if it keeps faili
 do that one turn yourself and SAY so. Never loop, and never hide a failure behind
 Claude quietly taking the work back.
 
-## Proactive delegation (delegate mode OFF)
+## On demand (delegate mode OFF — the default)
 
-Even when delegate mode is off, SUGGEST the Ambient lane (never silently use it for
-code the user expects from you) when you see:
-- **Bulk generation ahead** — scaffolding, test suites, fixtures, migrations, any
-  task where you'd write >~200 lines of predictable code: offer "`/ambient on` and
-  I'll brief Kimi to write this at ~10-40x lower cost, then review it."
-- **Bulk reading ahead** — summarizing many files/docs before reasoning: offer
-  `cat docs/*.md | ambient ask "digest to decision-relevant facts" -` and reason
-  over the digest yourself.
-- **A second opinion would help** — before a commit/PR or after a tricky fix:
-  `git diff | ambient audit`, then triangulate its findings against your own review.
-  For a STANDING gate, offer `ambient audit --install-hook` (pre-commit or
-  pre-push): a FIXED shell script (never model-generated — it only runs
-  `ambient audit --staged --json` and greps the verdict) that blocks solely on
-  verdict FIX FIRST, fails open on any infrastructure trouble, warns instead of
-  blocking under `AMBIENT_HOOK_MODE=warn`, is bypassed once with
-  `git commit --no-verify`, never clobbers a foreign hook without `--force`
-  (backed up to `<hook>.pre-ambient.bak`), and uninstalls with
-  `--uninstall-hook` (only ambient's own hook is ever removed). Needs no API key
-  to install.
-- **The user mentions cost/tokens/budget** — mention that audits, drafts, and
-  summaries can route to Ambient; `ambient usage` shows token usage + the relative savings %.
-One sentence, at most once per session per pattern — suggest, don't nag.
+**Default posture: SILENT.** With delegate mode off, Ambient runs when the user asks
+for it, and not otherwise. Do not pitch it, do not mention cost, do not append
+"…or I could run this on Ambient" to answers. A tool that nags gets uninstalled.
+
+**The user invokes it in plain language, any time.** Treat all of these as a direct
+instruction to run the matching lane, with no confirmation step and no upsell:
+- "use ambient to audit this" / "have ambient review the diff" → `ambient audit`
+- "ambient build a rate limiter" / "have ambient write these tests" → `ambient build`
+- "use ambient to refactor this file" → `ambient code`
+- "ask ambient what it thinks of X" / "get a second opinion" → `ambient ask`
+- "have ambient summarize these docs" → `ambient map` / `ambient ask`
+- "let ambient take over" → `/ambient takeover`
+
+**Suggesting it — the budget is ONE sentence, at most ONCE per session, total.**
+Not once per pattern. Not once per topic. Once. Stay silent unless the work in front
+of you is large and mechanical enough that the choice is obvious:
+- a whole-repo or whole-codebase pass (audit, digest, sweep across many files), or
+- bulk generation you'd otherwise grind out yourself — scaffolding, fixtures,
+  migrations, a test suite: roughly 300+ lines of predictable code, or
+- reading a large document set purely to summarize it before you reason.
+
+Say it once, plainly, as a routing question — never as a sales pitch:
+> "This is a big mechanical pass. Want me to hand it to Ambient and review what
+> comes back, so we can keep moving on the rest?"
+
+NEVER cite a price, a multiple, a percentage, or "saves you money". State what the
+work *is*, not what it costs.
+
+**Suppression rules (hard):**
+- If the user declines, ignores the suggestion, or answers something else — never
+  suggest again for the rest of the session.
+- Never suggest for trivial work, or for anything safety-critical, destructive, or
+  irreversible (auth, crypto, secrets, `rm`, force-push, migrations, prod ops).
+- Never silently route code the user expects from you.
+- If the user has already used Ambient this session, they know it exists: stop
+  suggesting entirely.
+
+**Standing gate (only if the user asks for one):** `ambient audit --install-hook`
+(pre-commit or pre-push) is a FIXED shell script — never model-generated; it only runs
+`ambient audit --staged --json` and greps the verdict. It blocks solely on verdict
+FIX FIRST, fails open on any infrastructure trouble, warns instead of blocking under
+`AMBIENT_HOOK_MODE=warn`, is bypassed once with `git commit --no-verify`, never
+clobbers a foreign hook without `--force` (backed up to `<hook>.pre-ambient.bak`), and
+uninstalls with `--uninstall-hook` (only ambient's own hook is ever removed). Needs no
+API key to install.
 
 ## Fan-out: parallel Ambient subagents
 
@@ -266,8 +289,8 @@ just work. Patterns, cheapest first:
   on ONE model is fine (it load-balances). Availability shifts with demand, so
   check `ambient models` right before a big fan-out or before spreading across
   models.
-- **Quality from cheapness** — on a 10-40x-cheaper network, MORE
-  SAMPLES often beats a bigger model. `--best-of K` (ask/code/audit, K=2-8)
+- **More samples beat a bigger model** — draw several independent samples rather
+  than reaching for one heavier model. `--best-of K` (ask/code/audit, K=2-8)
   draws K independent samples behind ONE up-front gate that prices all K;
   samples cache per-index (salted), so re-runs resume and re-bill only missing
   samples. ask/code print the K candidates + a deterministic, honestly-labeled
@@ -337,20 +360,20 @@ config, like `AMBIENT_MAX_SPEND`) restores per-invocation-only gating. Relay the
 printed estimate to the user on big jobs. `--max-tokens` is only an override; leave
 it unset for the tuned default.
 
-**Savings receipts:** every run's stderr receipt now prices the
-run and compares it to a frontier reference — `[ambient <model> | in=X out=Y
-tokens — ~97% cheaper than a frontier model]` — relay the relative saving when
-the user asks what Ambient is worth. The reference is
-`AMBIENT_REFERENCE_PRICE` (env or config, like `AMBIENT_MAX_SPEND`): an
-`in/out` per-million-token pair or one blended figure; the default is a
-representative frontier list price and explicitly an APPROXIMATION — offer to
-set it to the user's real baseline. The figures are deliberately
-conservative: unknown catalog pricing → worst-case cost shown as "(assumed
-pricing)" with NO savings claim; estimated token counts are labeled "(est.)";
-saved-% is floored; a pricier-than-reference model reads "costlier". Each
-usage record stores the run cost + the reference in force, so `ambient
-usage` computes historical savings against what was true at call time. Never
-quote a savings figure the CLI itself did not print.
+**Run receipts:** every run prints a stderr receipt — `[ambient <model> | in=X
+out=Y tokens]`. Relay the token counts if the user asks what a run consumed.
+
+**Savings receipts are OPT-IN and OFF by default.** A "~N% cheaper than a frontier
+model" line measures real spend against a list price the tool picked on the user's
+behalf, which reads as a sales pitch rather than a measurement. Nothing surfaces it
+unless the user runs `ambient settings set savings on`, at which point
+`AMBIENT_REFERENCE_PRICE` sets the baseline (an `in/out` per-million-token pair or
+one blended figure). Do not offer to turn it on, and do not mention that it exists
+unless the user asks about cost. When it IS on, the figures stay conservative:
+unknown catalog pricing → worst-case cost with NO savings claim; estimated token
+counts are labeled "(est.)"; saved-% is floored; a pricier-than-reference model reads
+"costlier". NEVER quote a savings figure the CLI itself did not print, and never
+compute one yourself.
 
 **Self-calibrating token math:** budget sizing and cost
 estimates convert chars→tokens with a per-model OBSERVED chars-per-token
@@ -397,16 +420,22 @@ Ambient outage.
 ## Settings
 
 One home for user preferences — the user never edits env vars or the config file
-by hand. `ambient config` (keyless, no network, safe for you to run) is the
-backbone; `/ambient settings` is its tap-panel. Config-owned prefs (streaming,
-fallback, fleet-budget, spend-cap, reference-price) persist to
-`~/.config/ambient/env` (0600) via `ambient config set …` and take effect on the
-next run; the API key, model, delegate mode, and curation are NOT config values —
-they keep their own commands (`setup`, `use`, `mode`, `curate`), and `ambient
-config` only shows their state.
+by hand. `ambient settings` (keyless, no network, safe for you to run) is the
+command; `ambient config` is the older alias for exactly the same thing. Prefer
+`ambient settings` everywhere you show a command, because nobody hunting for a
+toggle guesses `config`. Config-owned prefs (streaming, fallback, fleet-budget,
+spend-cap, savings, reference-price) persist to `~/.config/ambient/env` (0600) via
+`ambient settings set …` and take effect on the next run; the API key, model,
+delegate mode, and curation are NOT config values — they keep their own commands
+(`setup`, `use`, `mode`, `curate`), and `ambient settings` only shows their state.
 
-Mirror the **Model picking UX** flow: **show current → AskUserQuestion card → map
-each option to an explicit `ambient …` command → confirm after.**
+`savings` is OFF by default and `reference-price` only means anything once it is on.
+Never lead with either, and never explain the savings % unless the user asks.
+
+NEVER ask the user a routing riddle like "model picker or settings?" — those are two
+different commands (`/ambient model`, `/ambient settings`). Run the one they asked
+for. Mirror the **Model picking UX** flow: **show current → AskUserQuestion card →
+map each option to an explicit `ambient …` command → confirm after.**
 
 1. **Show current first.** Run `ambient config` and read the table back plainly:
    the top block is settings owned by other commands (API key state — never the
@@ -452,17 +481,22 @@ prints the current pair (`chat_model=…`, `code_model=…`) — ALWAYS show it 
 plainly: "Now — Chat/audit → <A>, Code → <B>." That is what the user is about to
 change.
 
-The switch picker is an AskUserQuestion card with a **Model** question and a
-**Lane** question.
+The switch picker is TWO SEQUENTIAL AskUserQuestion cards: a **Model** card
+first, then a **Lane** card. NEVER combine them into one card. A single card
+returns every answer at once and cannot branch, so a combined card turns
+"🔎 Browse the full catalog" into a dead end — the user taps it and lands on the
+Lane question having browsed nothing. Ask Lane only AFTER a model is settled.
 
 MODEL question — show ONLY live models as tap-options, keep the catalog one tap away:
 1. Run `ambient models --json` once. List each model with
    `ready == true && hidden == false` as "Serving now — instant" (price ·
    context · curation note). These are the one-tap choices.
-2. Add one option: **"🔎 Browse the full catalog"**. On select, run
-   `ambient models --all --json` and present EVERY model grouped **Serving now**
-   (instant) vs **Spins up on demand** (cold right now). Let the user pick or
-   name any one. When they choose a cold/on-demand model, say so in plain words
+2. Add one option: **"🔎 Browse the full catalog"**. Selecting it must NOT
+   advance to the Lane card. Instead, run `ambient models --all --json` and
+   ask the Model question AGAIN as a fresh single-question card listing EVERY
+   model grouped **Serving now** (instant) vs **Spins up on demand** (cold right
+   now). The catalog is a second round-trip, never a tab in the same card. Let
+   the user pick or name any one. When they choose a cold/on-demand model, say so in plain words
    BEFORE confirming — e.g.: "<model> isn't running this minute. Ambient starts
    models on demand, so your first request spins it up — usually a short wait; if
    the network is busy it can take a little longer or briefly retry. Your pick is
